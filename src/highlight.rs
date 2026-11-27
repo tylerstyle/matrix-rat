@@ -12,11 +12,12 @@ use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use syntect::parsing::{ParseState, Scope, ScopeStack, SyntaxSet};
 
 use crate::rich::{Rich, Segment};
+use crate::time::Instant;
 
 /// What a piece of code is, as far as colours go.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

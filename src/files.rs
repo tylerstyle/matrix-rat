@@ -1,8 +1,72 @@
 //! Saving attachments to disk: where they go and under which name.
+//!
+//! The names and the rules are here. The folders the user's environment points to
+//! (`HOME`, `user-dirs.dirs`) are found in [`home`]; the files are written in
+//! [`write`].
 
-use std::io::Write;
-use std::path::{Path, PathBuf};
+#[cfg(not(target_family = "wasm"))]
+mod home;
+/// The browser has no home folder, no `HOME` and no `user-dirs.dirs`: a folder is
+/// taken and shown as it was given.
+#[cfg(target_family = "wasm")]
+mod home {
+    use std::path::{Path, PathBuf};
 
+    pub fn resolve_dir(setting: &str) -> PathBuf {
+        PathBuf::from(setting.trim())
+    }
+
+    pub fn display(path: &Path) -> String {
+        path.display().to_string()
+    }
+}
+#[cfg(not(target_family = "wasm"))]
+mod write;
+/// The browser has no folder to write into: every file is refused (phase 2 gives it
+/// downloads).
+#[cfg(target_family = "wasm")]
+mod write {
+    use std::io;
+    use std::path::{Path, PathBuf};
+
+    fn refused() -> io::Error {
+        io::Error::from(io::ErrorKind::Unsupported)
+    }
+
+    pub fn write_new(_dir: &Path, _name: &str, _bytes: &[u8]) -> io::Result<PathBuf> {
+        Err(refused())
+    }
+
+    /// Never made: [`NewFile::create`] refuses.
+    pub enum NewFile {}
+
+    impl NewFile {
+        pub fn create(_dir: &Path, _name: &str) -> io::Result<Self> {
+            Err(refused())
+        }
+
+        pub fn finish(self) -> io::Result<PathBuf> {
+            match self {}
+        }
+    }
+
+    impl io::Write for NewFile {
+        fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
+            match *self {}
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            match *self {}
+        }
+    }
+}
+
+use std::path::Path;
+
+pub use home::{display, resolve_dir};
+pub use write::{NewFile, write_new};
+
+#[cfg(any(not(target_family = "wasm"), test))]
 use crate::text::sanitize_line;
 
 /// Asked about once before a download this large starts.
@@ -10,6 +74,7 @@ pub const LARGE_FILE: u64 = 100 * 1000 * 1000;
 
 /// A file name that is safe to create inside the download folder. The name comes from
 /// whoever sent the file, so it may carry a path, control characters or a leading dot.
+#[cfg(any(not(target_family = "wasm"), test))]
 pub fn safe_name(name: &str) -> String {
     let cleaned = sanitize_line(name);
     let last = cleaned
@@ -34,57 +99,6 @@ pub fn safe_name(name: &str) -> String {
     }
 }
 
-fn home() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-}
-
-/// The desktop's download folder (from `user-dirs.dirs`), or `~/Downloads`.
-pub fn default_dir() -> PathBuf {
-    let config = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .unwrap_or_else(|| home().join(".config"));
-    std::fs::read_to_string(config.join("user-dirs.dirs"))
-        .ok()
-        .and_then(|text| user_dirs_download(&text))
-        .unwrap_or_else(|| home().join("Downloads"))
-}
-
-fn user_dirs_download(text: &str) -> Option<PathBuf> {
-    let value = text
-        .lines()
-        .filter_map(|line| line.trim().strip_prefix("XDG_DOWNLOAD_DIR="))
-        .next_back()?
-        .trim()
-        .trim_matches('"');
-    let path = match value.strip_prefix("$HOME") {
-        Some(rest) => home().join(rest.trim_start_matches('/')),
-        None => PathBuf::from(value),
-    };
-    // The format allows nothing but absolute paths; `$HOME` alone means "not set".
-    (path.is_absolute() && path != home()).then_some(path)
-}
-
-/// The folder for a `download_dir` setting; an empty setting means the default. Always
-/// absolute: a relative setting is taken from the home folder, not from wherever the
-/// program happened to be started.
-pub fn resolve_dir(setting: &str) -> PathBuf {
-    let setting = setting.trim();
-    if setting.is_empty() {
-        default_dir()
-    } else if setting == "~" {
-        home()
-    } else if let Some(rest) = setting.strip_prefix("~/") {
-        home().join(rest)
-    } else if Path::new(setting).is_absolute() {
-        PathBuf::from(setting)
-    } else {
-        home().join(setting)
-    }
-}
-
 /// Whether a saved file may be handed to the desktop's default program right away.
 /// The sender chooses the name, so only types that open in a viewer or player qualify;
 /// scripts, launchers, web pages, documents with macros and everything unknown do not.
@@ -96,173 +110,6 @@ pub fn opens_safely(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| VIEWABLE.contains(&extension.to_ascii_lowercase().as_str()))
-}
-
-/// A path for showing, with the home folder shortened to `~`.
-pub fn display(path: &Path) -> String {
-    match path.strip_prefix(home()) {
-        Ok(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
-        Ok(rest) => format!("~/{}", rest.display()),
-        Err(_) => path.display().to_string(),
-    }
-}
-
-/// Writes `bytes` into `dir` under `name`, or `name (1)`, `name (2)`… if that exists:
-/// nothing is ever overwritten, no link is followed, and the file appears under its
-/// name only when it is complete. Only the user may read it (mode 0600), like
-/// [`NewFile`], since saved attachments may come from encrypted rooms.
-pub fn write_new(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
-    use std::io::ErrorKind::AlreadyExists;
-    use std::os::unix::fs::OpenOptionsExt;
-    std::fs::create_dir_all(dir)?;
-    let name = safe_name(name);
-    // The data goes into a new hidden file first (never an existing one).
-    let mut partial = None;
-    for attempt in 0..100u32 {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.subsec_nanos());
-        let path = dir.join(format!(
-            ".matrix-rat-{}-{nanos}-{attempt}.part",
-            std::process::id()
-        ));
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-        {
-            Ok(file) => {
-                partial = Some((path, file));
-                break;
-            }
-            Err(err) if err.kind() == AlreadyExists => continue,
-            Err(err) => return Err(err),
-        }
-    }
-    let Some((partial, mut file)) = partial else {
-        return Err(std::io::Error::other("could not create a temporary file"));
-    };
-    let result = file
-        .write_all(bytes)
-        .and_then(|()| file.sync_all())
-        .and_then(|()| publish(dir, &name, &partial));
-    let _ = std::fs::remove_file(&partial);
-    result
-}
-
-/// A private file that is written piece by piece: it appears in `dir` under its name
-/// (or `name (1)`, `name (2)`… where that is taken) only when [`NewFile::finish`] is
-/// called, complete. Nothing is overwritten and no link is followed, as with
-/// [`write_new`]. Only the user may read it (mode 0600): it holds the text of a room
-/// that may be encrypted. Dropped before it is finished, nothing of it stays.
-pub struct NewFile {
-    dir: PathBuf,
-    name: String,
-    partial: PathBuf,
-    file: std::io::BufWriter<std::fs::File>,
-}
-
-impl NewFile {
-    pub fn create(dir: &Path, name: &str) -> std::io::Result<Self> {
-        use std::io::ErrorKind::AlreadyExists;
-        use std::os::unix::fs::OpenOptionsExt;
-        std::fs::create_dir_all(dir)?;
-        for attempt in 0..100u32 {
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.subsec_nanos());
-            let partial = dir.join(format!(
-                ".matrix-rat-{}-{nanos}-{attempt}.part",
-                std::process::id()
-            ));
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&partial)
-            {
-                Ok(file) => {
-                    return Ok(Self {
-                        dir: dir.to_owned(),
-                        name: safe_name(name),
-                        partial,
-                        file: std::io::BufWriter::new(file),
-                    });
-                }
-                Err(err) if err.kind() == AlreadyExists => continue,
-                Err(err) => return Err(err),
-            }
-        }
-        Err(std::io::Error::other("could not create a temporary file"))
-    }
-
-    /// Everything is written: the file gets its name, which is returned.
-    pub fn finish(mut self) -> std::io::Result<PathBuf> {
-        self.file.flush()?;
-        self.file.get_ref().sync_all()?;
-        // The partial file is removed when `self` is dropped, here as on an error.
-        publish(&self.dir, &self.name, &self.partial)
-    }
-}
-
-impl Write for NewFile {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.file.write(bytes)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.file.flush()
-    }
-}
-
-impl Drop for NewFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.partial);
-    }
-}
-
-/// Gives the finished file its name. A hard link fails if the name is taken (by
-/// anything, links included) and never shows a half-written file.
-fn publish(dir: &Path, name: &str, partial: &Path) -> std::io::Result<PathBuf> {
-    use std::io::ErrorKind::AlreadyExists;
-    use std::os::unix::fs::OpenOptionsExt;
-    let (stem, extension) = match name.rfind('.') {
-        Some(dot) if dot > 0 => name.split_at(dot),
-        _ => (name, ""),
-    };
-    for n in 0..10_000 {
-        let candidate = if n == 0 {
-            dir.join(name)
-        } else {
-            dir.join(format!("{stem} ({n}){extension}"))
-        };
-        match std::fs::hard_link(partial, &candidate) {
-            Ok(()) => return Ok(candidate),
-            Err(err) if err.kind() == AlreadyExists => continue,
-            Err(_) => {}
-        }
-        // File systems without hard links (FAT, some network shares): reserve the
-        // name with a new empty file, then move the data onto it.
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&candidate)
-        {
-            Ok(_) => {}
-            Err(err) if err.kind() == AlreadyExists => continue,
-            Err(err) => return Err(err),
-        }
-        return match std::fs::rename(partial, &candidate) {
-            Ok(()) => Ok(candidate),
-            Err(err) => {
-                let _ = std::fs::remove_file(&candidate);
-                Err(err)
-            }
-        };
-    }
-    Err(std::io::Error::other("too many files with this name"))
 }
 
 #[cfg(test)]
@@ -296,101 +143,7 @@ mod tests {
     }
 
     #[test]
-    fn nothing_is_overwritten() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("matrix-rat-files-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let first = write_new(&dir, "note.txt", b"one").unwrap();
-        let second = write_new(&dir, "note.txt", b"two").unwrap();
-        let third = write_new(&dir, "../note.txt", b"three").unwrap();
-        assert_eq!(first, dir.join("note.txt"));
-        assert_eq!(second, dir.join("note (1).txt"));
-        assert_eq!(third, dir.join("note (2).txt"));
-        assert_eq!(std::fs::read(&first).unwrap(), b"one");
-        assert_eq!(std::fs::read(&third).unwrap(), b"three");
-        assert_eq!(
-            std::fs::metadata(&first).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-        assert_eq!(
-            std::fs::metadata(&second).unwrap().permissions().mode() & 0o777,
-            0o600
-        );
-        assert_eq!(write_new(&dir, "README", b"x").unwrap(), dir.join("README"));
-        assert_eq!(
-            write_new(&dir, "README", b"x").unwrap(),
-            dir.join("README (1)")
-        );
-        // A link in the folder is neither followed nor replaced.
-        let target = dir.join("target");
-        std::fs::write(&target, b"precious").unwrap();
-        std::os::unix::fs::symlink(&target, dir.join("link.txt")).unwrap();
-        let beside = write_new(&dir, "link.txt", b"new").unwrap();
-        assert_eq!(beside, dir.join("link (1).txt"));
-        assert_eq!(std::fs::read(&target).unwrap(), b"precious");
-        // No partial files are left behind.
-        let leftovers = std::fs::read_dir(&dir)
-            .unwrap()
-            .filter(|e| {
-                e.as_ref()
-                    .unwrap()
-                    .file_name()
-                    .to_string_lossy()
-                    .ends_with(".part")
-            })
-            .count();
-        assert_eq!(leftovers, 0);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_file_written_piece_by_piece_is_private_whole_and_never_in_the_way() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("matrix-rat-newfile-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let names = |dir: &Path| {
-            let mut names: Vec<String> = std::fs::read_dir(dir)
-                .unwrap()
-                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-                .collect();
-            names.sort();
-            names
-        };
-
-        let mut file = NewFile::create(&dir, "../room.md").unwrap();
-        file.write_all(b"one\n").unwrap();
-        // Not under its name before it is complete.
-        assert!(!dir.join("room.md").exists());
-        file.write_all(b"two\n").unwrap();
-        let first = file.finish().unwrap();
-        assert_eq!(first, dir.join("room.md"));
-        assert_eq!(std::fs::read(&first).unwrap(), b"one\ntwo\n");
-        let mode = std::fs::metadata(&first).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600);
-
-        // The name is taken: the next one goes beside it, as private.
-        let mut file = NewFile::create(&dir, "room.md").unwrap();
-        file.write_all(b"three").unwrap();
-        let second = file.finish().unwrap();
-        assert_eq!(second, dir.join("room (1).md"));
-        assert_eq!(std::fs::read(&first).unwrap(), b"one\ntwo\n");
-        let mode = std::fs::metadata(&second).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600);
-
-        // Given up: nothing of it stays.
-        let mut file = NewFile::create(&dir, "gone.md").unwrap();
-        file.write_all(b"half").unwrap();
-        drop(file);
-        assert_eq!(names(&dir), ["room (1).md", "room.md"]);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn folders() {
-        assert_eq!(resolve_dir("/srv/files"), PathBuf::from("/srv/files"));
-        assert_eq!(resolve_dir("~/inbox"), home().join("inbox"));
-        assert_eq!(resolve_dir("inbox"), home().join("inbox"));
-        assert!(resolve_dir("-x").is_absolute());
+    fn what_opens_at_once() {
         for (name, safe) in [
             ("a.PNG", true),
             ("b.pdf", true),
@@ -404,19 +157,5 @@ mod tests {
         ] {
             assert_eq!(opens_safely(Path::new(name)), safe, "{name}");
         }
-        assert_eq!(display(&home().join("Downloads")), "~/Downloads");
-        assert_eq!(display(Path::new("/srv/files")), "/srv/files");
-        assert_eq!(
-            user_dirs_download(
-                "# c\nXDG_DESKTOP_DIR=\"$HOME/D\"\nXDG_DOWNLOAD_DIR=\"$HOME/Laden\"\n"
-            ),
-            Some(home().join("Laden"))
-        );
-        assert_eq!(
-            user_dirs_download("XDG_DOWNLOAD_DIR=\"/data/dl\""),
-            Some(PathBuf::from("/data/dl"))
-        );
-        assert_eq!(user_dirs_download("XDG_DOWNLOAD_DIR=\"$HOME/\""), None);
-        assert_eq!(user_dirs_download("XDG_DOWNLOAD_DIR=\"relative\""), None);
     }
 }

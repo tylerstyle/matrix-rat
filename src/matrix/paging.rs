@@ -9,13 +9,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures::{FutureExt, pin_mut};
+use matrix_sdk::SendOutsideWasm;
 use matrix_sdk_ui::timeline::{Error as TimelineError, Timeline};
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::task::JoinHandle;
-use tokio::time::{Instant, MissedTickBehavior};
 
 use super::MatrixEvent;
 use crate::logsafe;
+use crate::rt::{self, JoinHandle};
+use crate::time::Instant;
 
 /// A page (older messages, newer ones of a detached slice, more rooms of the directory)
 /// loading in the background, which answers the UI once it is loaded. A request for a page
@@ -34,11 +35,11 @@ impl Paging {
     /// Loads the page with `load`, and sends the UI the answer it gives.
     pub(super) fn spawn(
         events: UnboundedSender<MatrixEvent>,
-        load: impl Future<Output = MatrixEvent> + Send + 'static,
+        load: impl Future<Output = MatrixEvent> + SendOutsideWasm + 'static,
     ) -> Self {
         let answered = Arc::new(AtomicBool::new(false));
         let done = answered.clone();
-        let task = tokio::spawn(async move {
+        let task = rt::spawn(async move {
             let answer = load.await;
             done.store(true, Ordering::Release);
             let _ = events.send(answer);
@@ -90,10 +91,10 @@ pub(super) async fn backwards(timeline: &Timeline, count: u16) -> Result<bool, P
     let page = timeline.paginate_backwards(count);
     // One process holds one account at a time; a logout and a login within the bound
     // share it, which only delays a clear.
-    static LAST_CLEAR: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    static LAST_CLEAR: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
     match unpanicked(page, LOOK_AGAIN).await {
         Err(PageError::Panicked { .. }) => {
-            let cleared = clear_due(&LAST_CLEAR, std::time::Instant::now())
+            let cleared = clear_due(&LAST_CLEAR, Instant::now())
                 && clear_caches(timeline.room().client()).await;
             Err(PageError::Panicked { cleared })
         }
@@ -112,7 +113,7 @@ pub(super) async fn backwards(timeline: &Timeline, count: u16) -> Result<bool, P
 /// would leave them apart for all rooms. A task that is no longer waited for runs to its
 /// end.
 async fn clear_caches(client: matrix_sdk::Client) -> bool {
-    let clear = tokio::spawn(async move {
+    let clear = rt::spawn(async move {
         match client.event_cache().clear_all_rooms().await {
             Ok(()) => true,
             Err(err) => {
@@ -131,7 +132,7 @@ const CLEAR_EVERY: Duration = Duration::from_secs(5 * 60);
 
 /// Whether the caches may be cleared after a panic at `now`, the last clear being kept in
 /// `last`; if so, `now` is kept, and the next time is [`CLEAR_EVERY`] later.
-fn clear_due(last: &std::sync::Mutex<Option<std::time::Instant>>, now: std::time::Instant) -> bool {
+fn clear_due(last: &std::sync::Mutex<Option<Instant>>, now: Instant) -> bool {
     let mut last = last
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -151,14 +152,12 @@ async fn unpanicked(
 ) -> Result<bool, PageError> {
     let page = AssertUnwindSafe(page).catch_unwind();
     pin_mut!(page);
-    let mut again = tokio::time::interval_at(Instant::now() + look_again, look_again);
-    again.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let answer = loop {
         tokio::select! {
             biased;
             answer = &mut page => break answer,
             // Only so that `page` is polled again.
-            _ = again.tick() => {}
+            () = rt::sleep(look_again) => {}
         }
     };
     match answer {
@@ -346,7 +345,7 @@ mod tests {
     #[test]
     fn the_caches_are_cleared_at_most_once_in_a_while() {
         let last = std::sync::Mutex::new(None);
-        let start = std::time::Instant::now();
+        let start = crate::time::Instant::now();
         assert!(super::clear_due(&last, start));
         assert!(!super::clear_due(&last, start));
         assert!(!super::clear_due(

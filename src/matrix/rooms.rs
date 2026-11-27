@@ -3,9 +3,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use futures::{StreamExt, pin_mut};
 use matrix_sdk::room::edit::EditedContent;
 use matrix_sdk::ruma::api::client::receipt::create_receipt::v3::ReceiptType;
@@ -14,7 +14,7 @@ use matrix_sdk::ruma::events::room::message::{
     RoomMessageEventContent, RoomMessageEventContentWithoutRelation,
 };
 use matrix_sdk::ruma::{EventId, OwnedEventId, OwnedTransactionId, OwnedUserId, RoomId, UserId};
-use matrix_sdk::{Client, Room, RoomMemberships};
+use matrix_sdk::{Client, Room, RoomMemberships, SendOutsideWasm};
 use matrix_sdk_ui::eyeball_im::{Vector, VectorDiff};
 use matrix_sdk_ui::timeline::{
     MsgLikeKind, RoomExt, Timeline, TimelineDetails, TimelineEventFocusThreadMode,
@@ -23,14 +23,15 @@ use matrix_sdk_ui::timeline::{
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
 
 use super::paging::{self, PageError, Paging};
 use super::safety::{IgnoredSet, is_ignored_in};
-use super::{DetachedTimeline, MatrixCmd, MatrixEvent, drafts, threads};
+use super::{DetachedTimeline, MatrixCmd, MatrixEvent, SdkResult, drafts, threads};
 use crate::format::Outgoing;
 use crate::logsafe;
 use crate::model::ItemRef;
+use crate::rt::{self, JoinHandle};
+use crate::time::Instant;
 
 /// Recently used timelines stay alive so going back to a room is instant and keeps the
 /// history that was already loaded.
@@ -130,7 +131,7 @@ pub struct Timelines {
     media: super::media::Media,
     previews: super::previews::Previews,
     /// Running requests for member lists (for sender names).
-    member_fetches: tokio::task::JoinSet<()>,
+    member_fetches: rt::JoinSet<()>,
     /// Set while a command for a thread is handled: the event the thread starts at.
     /// `timeline` then answers with that thread's timeline instead of the room's.
     thread: Option<String>,
@@ -153,11 +154,11 @@ pub struct Timelines {
     /// What commands left running that changes something (a send, a reaction, a read
     /// receipt). It holds the session's client and timelines, so it ends with the
     /// session (see `stop`); at a shutdown it is given a moment first.
-    actions: tokio::task::JoinSet<()>,
+    actions: rt::JoinSet<()>,
     /// What commands left running that only looks something up or says something
     /// passing (pinned and saved messages, a source, a retried decryption, typing).
     /// Ends with the session too, and is not waited for.
-    lookups: tokio::task::JoinSet<()>,
+    lookups: rt::JoinSet<()>,
     /// Rooms left in this session (see [`super::left`]).
     left: super::left::LeftRooms,
 }
@@ -175,7 +176,7 @@ impl Timelines {
         Self {
             media: super::media::Media::new(client.clone(), events.clone()),
             previews: super::previews::Previews::new(client.clone(), events.clone()),
-            member_fetches: tokio::task::JoinSet::new(),
+            member_fetches: rt::JoinSet::new(),
             uploads: super::upload::Uploads::new(client.clone(), events.clone()),
             client,
             cache: VecDeque::new(),
@@ -199,8 +200,8 @@ impl Timelines {
             pinned_cache: Arc::default(),
             saved_limit: Arc::new(tokio::sync::Semaphore::new(super::saved::CONCURRENCY)),
             thread_lister: None,
-            actions: tokio::task::JoinSet::new(),
-            lookups: tokio::task::JoinSet::new(),
+            actions: rt::JoinSet::new(),
+            lookups: rt::JoinSet::new(),
             left,
             events,
         }
@@ -248,11 +249,11 @@ impl Timelines {
     /// to end: within `wait` in all, and those at most [`ACTIONS_WAIT`]. Lookups are
     /// not waited for.
     pub async fn finish_uploads(&mut self, wait: std::time::Duration) {
-        let deadline = tokio::time::Instant::now() + wait;
+        let deadline = Instant::now() + wait;
         self.uploads.finish(wait).await;
-        let deadline = deadline.min(tokio::time::Instant::now() + ACTIONS_WAIT);
+        let deadline = deadline.min(Instant::now() + ACTIONS_WAIT);
         let actions = async { while self.actions.join_next().await.is_some() {} };
-        let _ = tokio::time::timeout_at(deadline, actions).await;
+        let _ = rt::timeout_at(deadline, actions).await;
     }
 
     /// At the end of the session: closes the timelines, and stops a request for the
@@ -271,13 +272,13 @@ impl Timelines {
     }
 
     /// Starts `work` among [`Self::actions`], letting go of those that are done.
-    fn spawn_action(&mut self, work: impl Future<Output = ()> + Send + 'static) {
+    fn spawn_action(&mut self, work: impl Future<Output = ()> + SendOutsideWasm + 'static) {
         while self.actions.try_join_next().is_some() {}
         self.actions.spawn(work);
     }
 
     /// Starts `work` among [`Self::lookups`], letting go of those that are done.
-    fn spawn_lookup(&mut self, work: impl Future<Output = ()> + Send + 'static) {
+    fn spawn_lookup(&mut self, work: impl Future<Output = ()> + SendOutsideWasm + 'static) {
         while self.lookups.try_join_next().is_some() {}
         self.lookups.spawn(work);
     }
@@ -429,7 +430,7 @@ impl Timelines {
         let next = self.next_idle();
         async move {
             match next {
-                Some(at) => tokio::time::sleep_until(at.into()).await,
+                Some(at) => rt::sleep_until(at).await,
                 None => std::future::pending().await,
             }
         }
@@ -556,7 +557,7 @@ impl Timelines {
     /// Runs `work` in the background and reports a failure to the user.
     fn spawn<F>(&mut self, what: &'static str, work: F)
     where
-        F: Future<Output = Result<()>> + Send + 'static,
+        F: Future<Output = Result<()>> + SendOutsideWasm + 'static,
     {
         let events = self.events.clone();
         self.spawn_action(async move {
@@ -571,7 +572,7 @@ impl Timelines {
     async fn with_timeline<F, Fut>(&mut self, room_id: &str, what: &'static str, work: F)
     where
         F: FnOnce(Arc<Timeline>) -> Fut,
-        Fut: Future<Output = Result<()>> + Send + 'static,
+        Fut: Future<Output = Result<()>> + SendOutsideWasm + 'static,
     {
         match self.timeline(room_id).await {
             Ok(timeline) => self.spawn(what, work(timeline)),
@@ -609,7 +610,7 @@ impl Timelines {
     async fn with_active_timeline<F, Fut>(&mut self, room_id: &str, what: &'static str, work: F)
     where
         F: FnOnce(Arc<Timeline>) -> Fut,
-        Fut: Future<Output = Result<()>> + Send + 'static,
+        Fut: Future<Output = Result<()>> + SendOutsideWasm + 'static,
     {
         match self.active_timeline(room_id).await {
             Ok((timeline, _)) => self.spawn(what, work(timeline)),
@@ -675,7 +676,7 @@ impl Timelines {
                 });
                 self.tell_draft_for(&room, &room_id, thread_root.as_deref())
                     .await;
-                self.forwarder = Some(tokio::spawn(forward(
+                self.forwarder = Some(rt::spawn(forward(
                     room,
                     timeline,
                     room_id,
@@ -695,7 +696,7 @@ impl Timelines {
         self.pending_open_event_gen = Some(generation);
         let open_tx = self.open_tx.clone();
         let ignored = self.ignored.clone();
-        self.event_opener = Some(tokio::spawn(async move {
+        self.event_opener = Some(rt::spawn(async move {
             // Check the target event before opening a `TimelineFocus::Event` cache so an
             // ignored, MSC4406-blocked, or missing event fails cleanly without leaving a
             // broken `event_focused` entry behind in the SDK's `EventCache`.
@@ -861,7 +862,7 @@ impl Timelines {
                 self.spawn_members_if_needed(&room, &timeline);
                 self.tell_draft_for(&room, &room_id, thread.as_deref())
                     .await;
-                self.forwarder = Some(tokio::spawn(forward(
+                self.forwarder = Some(rt::spawn(forward(
                     room,
                     timeline,
                     room_id,
@@ -934,7 +935,7 @@ impl Timelines {
                     room_id: room_id.clone(),
                     generation,
                 });
-                self.forwarder = Some(tokio::spawn(forward(
+                self.forwarder = Some(rt::spawn(forward(
                     room,
                     timeline.clone(),
                     room_id,
@@ -980,7 +981,7 @@ impl Timelines {
                     room_id: room_id.clone(),
                     generation,
                 });
-                self.forwarder = Some(tokio::spawn(forward(
+                self.forwarder = Some(rt::spawn(forward(
                     room,
                     timeline,
                     room_id,
@@ -1049,7 +1050,7 @@ impl Timelines {
                             generation,
                             kind: StreamKind::Live,
                         });
-                        self.forwarder = Some(tokio::spawn(forward(
+                        self.forwarder = Some(rt::spawn(forward(
                             room,
                             timeline.clone(),
                             room_id,
@@ -1222,10 +1223,11 @@ impl Timelines {
                                 .map_err(|_| anyhow!("invalid event id"))?;
                             timeline
                                 .send_reply(content_without_relation(&message)?, event_id)
-                                .await?;
+                                .await
+                                .sdk()?;
                         }
                         None => {
-                            timeline.send(content(&message)?.into()).await?;
+                            timeline.send(content(&message)?.into()).await.sdk()?;
                         }
                     }
                     Ok(())
@@ -1239,7 +1241,7 @@ impl Timelines {
             } => {
                 self.with_active_timeline(&room_id, "Could not edit", |timeline| async move {
                     let content = EditedContent::RoomMessage(content_without_relation(&message)?);
-                    timeline.edit(&item_id(&item)?, content).await?;
+                    timeline.edit(&item_id(&item)?, content).await.sdk()?;
                     Ok(())
                 })
                 .await;
@@ -1256,7 +1258,8 @@ impl Timelines {
                 self.with_active_timeline(&room_id, "Could not react", |timeline| async move {
                     timeline
                         .toggle_reaction_with_extra_content(&item_id(&item)?, &key, extra)
-                        .await?;
+                        .await
+                        .sdk()?;
                     Ok(())
                 })
                 .await;
@@ -1274,7 +1277,10 @@ impl Timelines {
                     .filter(|s| !crate::text::is_blank(s));
                 self.with_active_timeline(&room_id, "Could not delete", |timeline| async move {
                     let target = item_id(&item)?;
-                    timeline.redact(&target, clean_reason.as_deref()).await?;
+                    timeline
+                        .redact(&target, clean_reason.as_deref())
+                        .await
+                        .sdk()?;
                     if let ItemRef::Event(id) = item {
                         cache
                             .lock()
@@ -1431,7 +1437,7 @@ impl Timelines {
                         .find(|event| event.identifier() == wanted)
                         .and_then(|event| event.local_echo_send_handle())
                         .ok_or_else(|| anyhow!("this message is no longer waiting"))?;
-                    handle.unwedge().await?;
+                    handle.unwedge().await.sdk()?;
                     // The SDK stops a room's queue after any failure; nothing would
                     // be tried again without this.
                     timeline.room().send_queue().set_enabled(true);
@@ -1584,7 +1590,7 @@ impl Timelines {
                 Ok(room) => {
                     let left = self.left.clone();
                     self.spawn("Could not join", async move {
-                        room.join().await?;
+                        room.join().await.sdk()?;
                         // In it: no longer a room that was left. Only now: until the join
                         // went through, one left here stays as gone as it was.
                         left.clear(room.room_id());
@@ -1600,7 +1606,7 @@ impl Timelines {
                     let left = self.left.clone();
                     self.spawn("Could not leave", async move {
                         let was_knocked = room.state() == matrix_sdk::RoomState::Knocked;
-                        room.leave().await?;
+                        room.leave().await.sdk()?;
                         // Remembered like any room left, so that a sync answer that was on
                         // its way cannot bring it back as one the user is in. (A new
                         // invitation still shows: that is news.)
@@ -1729,7 +1735,6 @@ impl Timelines {
             | MatrixCmd::SearchUsers { .. }
             | MatrixCmd::Devices(_)
             | MatrixCmd::Keywords(_)
-            | MatrixCmd::Agent(_)
             | MatrixCmd::Collect(_)
             | MatrixCmd::CancelUserSearch
             | MatrixCmd::SearchDirectory { .. }
@@ -1740,6 +1745,8 @@ impl Timelines {
             | MatrixCmd::SetOwnDisplayName { .. }
             | MatrixCmd::SetOwnAvatar { .. }
             | MatrixCmd::RemoveOwnAvatar => {}
+            #[cfg(not(target_family = "wasm"))]
+            MatrixCmd::Agent(_) => {}
         }
     }
 
@@ -1762,7 +1769,7 @@ impl Timelines {
         };
         let read = self.read_marks.clone();
         let ignored = self.ignored.borrow().clone();
-        self.thread_lister = Some(tokio::spawn(async move {
+        self.thread_lister = Some(rt::spawn(async move {
             let event = match threads::list(&room, from, mine, &read, &ignored).await {
                 Some((threads, next)) => MatrixEvent::Threads(threads::ThreadPage {
                     room_id,
@@ -1795,7 +1802,7 @@ impl Timelines {
             } => {
                 self.with_timeline(&room_id, "Could not send sticker", |timeline| async move {
                     let content = sticker_content(&name, url, dimensions, size, mime)?;
-                    timeline.send(content.into()).await?;
+                    timeline.send(content.into()).await.sdk()?;
                     Ok(())
                 })
                 .await;
@@ -1815,7 +1822,7 @@ impl Timelines {
                             fallback, block,
                         ),
                     );
-                    timeline.send(content.into()).await?;
+                    timeline.send(content.into()).await.sdk()?;
                     Ok(())
                 })
                 .await;
@@ -1835,7 +1842,7 @@ impl Timelines {
                         fallback_text: fallback,
                         new_content: block,
                     };
-                    timeline.edit(&item_id(&item)?, edited).await?;
+                    timeline.edit(&item_id(&item)?, edited).await.sdk()?;
                     Ok(())
                 })
                 .await;
@@ -1851,7 +1858,7 @@ impl Timelines {
                     let content = matrix_sdk::ruma::events::poll::unstable_response::UnstablePollResponseEventContent::new(
                         answers, poll_id,
                     );
-                    timeline.send(content.into()).await?;
+                    timeline.send(content.into()).await.sdk()?;
                     Ok(())
                 })
                 .await;
@@ -1867,7 +1874,7 @@ impl Timelines {
                     let content = matrix_sdk::ruma::events::poll::unstable_end::UnstablePollEndEventContent::new(
                         fallback, poll_id,
                     );
-                    timeline.send(content.into()).await?;
+                    timeline.send(content.into()).await.sdk()?;
                     Ok(())
                 })
                 .await;
@@ -1907,7 +1914,7 @@ async fn decrypt_again(timeline: &Timeline, event_id: &str) -> Result<super::Ret
     timeline.retry_decryption([session_id]).await;
     // The answer shows in the timeline; it takes a moment.
     for _ in 0..15 {
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        rt::sleep(std::time::Duration::from_millis(200)).await;
         match timeline.item_by_event_id(&event_id).await {
             Some(now) if now.content().as_unable_to_decrypt().is_some() => {}
             Some(_) => return Ok(Retried::Decrypted),
@@ -2150,7 +2157,7 @@ async fn room_timeline(room: &Room) -> Result<Timeline> {
         .track_read_marker_and_receipts(TimelineReadReceiptTracking::MessageLikeEvents)
         .build()
         .await
-        .context("could not open the room's messages")
+        .sdk_context("could not open the room's messages")
 }
 
 fn receipt_type(public: bool) -> ReceiptType {
@@ -2199,8 +2206,8 @@ async fn mark_room_read(
                         event_id,
                     )
                     .await;
-                r?;
-                m?;
+                r.sdk()?;
+                m.sdk()?;
                 return Ok(());
             }
             bail!("no message to mark as read");
@@ -2208,8 +2215,8 @@ async fn mark_room_read(
     }
     let receipt = timeline.mark_as_read(receipt).await;
     let marker = timeline.mark_as_read(ReceiptType::FullyRead).await;
-    receipt?;
-    marker?;
+    receipt.sdk()?;
+    marker.sdk()?;
     Ok(())
 }
 
@@ -2243,7 +2250,7 @@ async fn fallback_latest_event_id(room: &Room) -> Option<matrix_sdk::ruma::Owned
 struct UnreadFlags {
     queue: UnboundedSender<(Room, bool)>,
     /// The task that sends them; stopped with the session.
-    task: tokio::task::AbortHandle,
+    task: rt::AbortHandle,
 }
 
 impl UnreadFlags {
@@ -2254,10 +2261,10 @@ impl UnreadFlags {
     fn start(events: UnboundedSender<MatrixEvent>) -> Self {
         use matrix_sdk::ruma::events::marked_unread::MarkedUnreadEventContent;
         let (queue, mut wanted) = tokio::sync::mpsc::unbounded_channel::<(Room, bool)>();
-        let task = tokio::spawn(async move {
+        let task = rt::spawn(async move {
             let mut sent: std::collections::HashMap<
                 matrix_sdk::ruma::OwnedRoomId,
-                (bool, std::time::Instant),
+                (bool, crate::time::Instant),
             > = Default::default();
             while let Some((room, unread)) = wanted.recv().await {
                 sent.retain(|_, (_, at)| at.elapsed() < Self::TRUST_SENT);
@@ -2278,7 +2285,7 @@ impl UnreadFlags {
                     .await
                 {
                     Ok(_) => {
-                        let at = std::time::Instant::now();
+                        let at = crate::time::Instant::now();
                         sent.insert(room.room_id().to_owned(), (unread, at));
                     }
                     Err(err) => {
@@ -2626,7 +2633,7 @@ async fn forward(
     // original is fetched. Ask once per reply. The requests end with this forwarder,
     // when the room is closed or the session ends.
     let mut asked: HashSet<OwnedEventId> = HashSet::new();
-    let mut reply_fetches = tokio::task::JoinSet::new();
+    let mut reply_fetches = rt::JoinSet::new();
     let mut fetch_replies = |items: &Vector<Arc<TimelineItem>>| {
         while reply_fetches.try_join_next().is_some() {}
         for event in items.iter().filter_map(|item| item.as_event()) {
@@ -2688,7 +2695,7 @@ async fn forward(
     }
     let pin_stream = room.pinned_event_ids_stream();
     pin_mut!(pin_stream);
-    let mut clear_paginators = tokio::task::JoinSet::new();
+    let mut clear_paginators = rt::JoinSet::new();
     loop {
         tokio::select! {
             diffs = changes.next() => {
@@ -3696,7 +3703,7 @@ mod tests {
 
         // `drop_idle` drops unshown room B while keeping restored room A.
         timelines
-            .drop_idle(std::time::Instant::now() + super::IDLE_TIMELINE + Duration::from_secs(1));
+            .drop_idle(crate::time::Instant::now() + super::IDLE_TIMELINE + Duration::from_secs(1));
         let cached: Vec<&str> = timelines.cache.iter().map(|c| c.key.as_str()).collect();
         assert_eq!(cached, [room_a]);
         drop(server);
@@ -4196,7 +4203,7 @@ mod tests {
         timelines.on_opened(opened).await;
         assert!(timelines.before_jump.is_some());
         timelines
-            .drop_idle(std::time::Instant::now() + super::IDLE_TIMELINE + Duration::from_secs(1));
+            .drop_idle(crate::time::Instant::now() + super::IDLE_TIMELINE + Duration::from_secs(1));
         assert!(timelines.before_jump.is_none());
 
         // ...and drops it immediately when the UI paginates the jump's generation.
@@ -4848,7 +4855,7 @@ mod tests {
                 generation: 1,
                 kind: super::StreamKind::Live,
             }),
-            at: std::time::Instant::now(),
+            at: crate::time::Instant::now(),
         });
         timelines
             .handle(MatrixCmd::CancelOpenEvent { generation: 2 })

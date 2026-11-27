@@ -3,10 +3,9 @@
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
 use crate::action::{Action, Dir, Pane};
 use crate::config::{Config, KeyOverrideEdit, RawKeyConfig, RawKeyValue};
+use crate::input::{KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Context {
@@ -1011,7 +1010,7 @@ pub fn normalize(key: KeyEvent) -> (KeyCode, KeyModifiers) {
     let mut mods = key.modifiers & (CTRL | ALT | SHIFT);
     #[expect(
         clippy::wildcard_enum_match_arm,
-        reason = "foreign crossterm::event::KeyCode"
+        reason = "input events stand in for the terminal's (crate::input)"
     )]
     let code = match key.code {
         Char(c) => {
@@ -1040,7 +1039,7 @@ pub fn validate_binding(context: Context, code: KeyCode, mods: KeyModifiers) -> 
     if mods == CTRL {
         #[expect(
             clippy::wildcard_enum_match_arm,
-            reason = "foreign crossterm::event::KeyCode"
+            reason = "input events stand in for the terminal's (crate::input)"
         )]
         match code {
             Char('i') => return Err("Ctrl-I collides with Tab in terminal input".to_owned()),
@@ -1161,7 +1160,7 @@ pub fn from_key_event(context: Context, key: KeyEvent) -> Result<(KeyCode, KeyMo
     let (code, mods) = normalize(key);
     #[expect(
         clippy::wildcard_enum_match_arm,
-        reason = "foreign crossterm::event::KeyCode"
+        reason = "input events stand in for the terminal's (crate::input)"
     )]
     match code {
         Char(_)
@@ -1202,7 +1201,7 @@ pub fn format_label(code: KeyCode, mods: KeyModifiers) -> String {
     }
     #[expect(
         clippy::wildcard_enum_match_arm,
-        reason = "foreign crossterm::event::KeyCode"
+        reason = "input events stand in for the terminal's (crate::input)"
     )]
     match code {
         KeyCode::Enter => out.push_str("Enter"),
@@ -1249,7 +1248,7 @@ pub fn format_config_key(code: KeyCode, mods: KeyModifiers) -> String {
     }
     #[expect(
         clippy::wildcard_enum_match_arm,
-        reason = "foreign crossterm::event::KeyCode"
+        reason = "input events stand in for the terminal's (crate::input)"
     )]
     match code {
         KeyCode::Enter => out.push_str("enter"),
@@ -2036,13 +2035,13 @@ impl Editor {
 
 /// Persists changes to the affected actions (plus optional preset change) in `config.toml`.
 pub fn persist_overrides(
-    path: Option<&std::path::Path>,
+    storage: Option<&dyn crate::storage::Storage>,
     keymap: &Keymap,
     preset: Option<Preset>,
     clear_all: bool,
     touched: &[(Context, Action)],
 ) -> std::io::Result<()> {
-    let Some(path) = path else {
+    let Some(storage) = storage else {
         return Ok(());
     };
     let mut computed: Vec<(Context, ActionSpec, Option<Vec<String>>)> = Vec::new();
@@ -2064,7 +2063,7 @@ pub fn persist_overrides(
             keys: keys.as_deref(),
         })
         .collect();
-    crate::config::save_key_changes(path, preset.map(Preset::name), clear_all, &edits)
+    crate::config::save_key_changes(storage, preset.map(Preset::name), clear_all, &edits)
         .map_err(std::io::Error::other)
 }
 

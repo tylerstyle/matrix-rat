@@ -7,6 +7,7 @@ use crate::devices::{
     check_passphrase, default_export_path, key_file_path, label, no_recovery_key_reason,
     wants_recovery_key,
 };
+use crate::input::{KeyCode, KeyModifiers};
 use crate::lineedit::{EditKeys, LineEdit};
 use crate::matrix::{
     DeviceTrust, DevicesCmd, DevicesEvent, MatrixCmd, Retried, SessionTrust, SignOutOutcome,
@@ -15,7 +16,6 @@ use crate::matrix::{
 use crate::modal::{Modal, RecoveryForm};
 use crate::model::{ItemRef, MsgKind};
 use crate::verify::VerifyPopup;
-use crossterm::event::{KeyCode, KeyModifiers};
 
 impl App {
     /// There is an account to ask; says so if not.
@@ -157,7 +157,8 @@ impl App {
             (SessionStage::SignOut(_), Click::Confirm) => self.submit_sign_out(),
             (SessionStage::SignOut(sign_out), Click::OpenWeb) => {
                 if let Some(Some(url)) = &sign_out.web {
-                    super::open_in_browser(url);
+                    let url = url.clone();
+                    self.open_externally(url);
                     self.show_toast("Opened in your browser");
                 }
             }
@@ -269,7 +270,7 @@ impl App {
                 let page = popup.page.max(1) as isize;
                 #[expect(
                     clippy::wildcard_enum_match_arm,
-                    reason = "foreign crossterm::event::KeyCode"
+                    reason = "input events stand in for the terminal's (crate::input)"
                 )]
                 match code {
                     KeyCode::Esc => Some(Click::Cancel),
@@ -308,7 +309,7 @@ impl App {
             {
                 #[expect(
                     clippy::wildcard_enum_match_arm,
-                    reason = "foreign crossterm::event::KeyCode"
+                    reason = "input events stand in for the terminal's (crate::input)"
                 )]
                 match code {
                     KeyCode::Esc => Some(Click::Cancel),
@@ -325,7 +326,7 @@ impl App {
             SessionStage::SignOut(sign_out) => {
                 #[expect(
                     clippy::wildcard_enum_match_arm,
-                    reason = "foreign crossterm::event::KeyCode"
+                    reason = "input events stand in for the terminal's (crate::input)"
                 )]
                 match code {
                     KeyCode::Esc => Some(Click::Cancel),
@@ -378,9 +379,13 @@ impl App {
             (KeysStage::Status, Click::Export) => {
                 let download_dir = download_dir.unwrap_or_default();
                 let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-                let path = default_export_path(&download_dir, &date, |path| {
-                    std::fs::symlink_metadata(path).is_ok()
-                });
+                // The browser has no files to look at: the worker answers there that
+                // key files are the terminal's.
+                #[cfg(not(target_family = "wasm"))]
+                let taken = |path: &std::path::Path| std::fs::symlink_metadata(path).is_ok();
+                #[cfg(target_family = "wasm")]
+                let taken = |_: &std::path::Path| false;
+                let path = default_export_path(&download_dir, &date, taken);
                 popup.stage = KeysStage::Export(ExportForm::new(&path));
             }
             (KeysStage::Status, Click::Import) => {
@@ -416,6 +421,8 @@ impl App {
             form.focus = 0;
             return;
         };
+        // In the browser the worker answers that key files are the terminal's.
+        #[cfg(not(target_family = "wasm"))]
         if path.is_dir() {
             form.error = Some("That is a folder. Add the name of the file to write.".to_owned());
             form.focus = 0;
@@ -434,6 +441,7 @@ impl App {
             return;
         }
         // The worker refuses too; this saves typing the passphrase for nothing.
+        #[cfg(not(target_family = "wasm"))]
         if std::fs::symlink_metadata(&path).is_ok() {
             form.error = Some(
                 "A file with that name exists already. Nothing is overwritten: choose \
@@ -472,6 +480,8 @@ impl App {
             form.focus = 0;
             return;
         };
+        // In the browser the worker answers that key files are the terminal's.
+        #[cfg(not(target_family = "wasm"))]
         match std::fs::metadata(&path) {
             Ok(meta) if meta.is_file() => {}
             Ok(meta) => {
@@ -518,7 +528,7 @@ impl App {
             KeysStage::Status => {
                 #[expect(
                     clippy::wildcard_enum_match_arm,
-                    reason = "foreign crossterm::event::KeyCode"
+                    reason = "input events stand in for the terminal's (crate::input)"
                 )]
                 let click = match code {
                     KeyCode::Esc => Some(Click::Cancel),
@@ -559,7 +569,7 @@ impl App {
         };
         #[expect(
             clippy::wildcard_enum_match_arm,
-            reason = "foreign crossterm::event::KeyCode"
+            reason = "input events stand in for the terminal's (crate::input)"
         )]
         let click = match code {
             KeyCode::Esc => Some(Click::Cancel),
@@ -933,9 +943,6 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{
-        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-    };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use tokio::sync::mpsc::UnboundedReceiver;
@@ -944,6 +951,9 @@ mod tests {
     use crate::app::App;
     use crate::config::Config;
     use crate::devices::{Click, KeysStage, SessionStage};
+    use crate::input::{
+        InputEvent, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use crate::matrix::{
         BackupStatus, BackupUpload, DeviceTrust, DevicesCmd, DevicesEvent, Identity, MatrixCmd,
         MatrixEvent, MatrixHandle, RecoveryStatus, Retried, RoomCategory, RoomSummary, Security,
@@ -960,12 +970,12 @@ mod tests {
     /// Midday, so that the date is the same in (nearly) every time zone.
     const SEEN: u64 = 1_699_963_200_000;
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
-    fn click(col: u16, row: u16) -> Event {
-        Event::Mouse(MouseEvent {
+    fn click(col: u16, row: u16) -> InputEvent {
+        InputEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: col,
             row,
@@ -1469,14 +1479,14 @@ mod tests {
         find(&text, "This server takes no password for this");
         find(&text, "https://account.example.org/account/");
         // The page opens only when chosen; Enter alone goes back.
-        crate::app::TEST_OPENED_URLS.with(|urls| urls.borrow_mut().clear());
+        let _ = app.take_opened();
         let (col, row) = find(&text, " Open in browser ");
         app.on_event(click(col + 1, row));
-        crate::app::TEST_OPENED_URLS.with(|urls| assert_eq!(*urls.borrow(), [url.to_owned()]));
+        assert_eq!(app.take_opened(), [url.to_owned()]);
         assert!(drain(&mut commands).is_empty());
         app.on_event(key(KeyCode::Enter));
         assert!(in_list(&app));
-        crate::app::TEST_OPENED_URLS.with(|urls| assert_eq!(urls.borrow().len(), 1));
+        assert!(app.take_opened().is_empty());
 
         // No page either: a plain explanation, and nothing to press but Back.
         let request = ask_to_sign_out(&mut app, &mut commands);
@@ -1882,7 +1892,7 @@ mod tests {
         app.on_event(key(KeyCode::Enter));
         find(&screen(&mut app, &mut terminal), "There is no such file.");
         // Dropped on the window: the path arrives as a paste.
-        app.on_event(Event::Paste(format!("'{}'\n", file.display())));
+        app.on_event(InputEvent::Paste(format!("'{}'\n", file.display())));
         assert!(
             import_form(&mut app)
                 .path
@@ -1894,7 +1904,7 @@ mod tests {
         find(&screen(&mut app, &mut terminal), "Enter the passphrase");
         assert!(drain(&mut commands).is_empty());
         // A paste that is no file is text for the field it lands in.
-        app.on_event(Event::Paste("open sesame".into()));
+        app.on_event(InputEvent::Paste("open sesame".into()));
         let text = screen(&mut app, &mut terminal);
         assert!(!text.contains("open sesame"));
         app.on_event(key(KeyCode::Enter));
@@ -2232,14 +2242,14 @@ mod tests {
         let target = dir.join("keys.txt");
         export_form(&mut app).path.set(target.to_str().unwrap());
         export_form(&mut app).focus = 1;
-        app.on_event(Event::Paste("  correct horse  \nnot this".into()));
+        app.on_event(InputEvent::Paste("  correct horse  \nnot this".into()));
         assert_eq!(
             export_form(&mut app).passphrase.as_str(),
             "  correct horse  "
         );
         app.on_event(key(KeyCode::Enter));
         // The repetition without the spaces is a different passphrase.
-        app.on_event(Event::Paste("correct horse".into()));
+        app.on_event(InputEvent::Paste("correct horse".into()));
         app.on_event(key(KeyCode::Enter));
         find(
             &screen(&mut app, &mut terminal),
@@ -2249,7 +2259,7 @@ mod tests {
         assert!(drain(&mut commands).is_empty());
         // A paste clears the error it answers.
         export_form(&mut app).again.set("");
-        app.on_event(Event::Paste("  correct horse  ".into()));
+        app.on_event(InputEvent::Paste("  correct horse  ".into()));
         assert!(export_form(&mut app).error.is_none());
         app.on_event(key(KeyCode::Enter));
         let sent = drain(&mut commands);
@@ -2266,7 +2276,7 @@ mod tests {
         app.on_event(key(KeyCode::Char('e')));
         export_form(&mut app).path.set("");
         export_form(&mut app).focus = 0;
-        app.on_event(Event::Paste("  /tmp/x.txt  \n".into()));
+        app.on_event(InputEvent::Paste("  /tmp/x.txt  \n".into()));
         assert_eq!(export_form(&mut app).path.as_str(), "/tmp/x.txt");
         // Too short: back to the passphrase itself, not to its repetition.
         export_form(&mut app).path.set(target.to_str().unwrap());
@@ -2285,7 +2295,7 @@ mod tests {
         app.on_event(key(KeyCode::Char('i')));
         import_form(&mut app).focus = 1;
         let dropped = format!("{}", file.display());
-        app.on_event(Event::Paste(dropped.clone()));
+        app.on_event(InputEvent::Paste(dropped.clone()));
         assert!(import_form(&mut app).path.is_empty());
         assert_eq!(import_form(&mut app).passphrase.as_str(), dropped);
         // A folder is not a key file.
@@ -2312,7 +2322,7 @@ mod tests {
             "Enter your account password.",
         );
         assert!(drain(&mut commands).is_empty());
-        app.on_event(Event::Paste(" pass word \r\n".into()));
+        app.on_event(InputEvent::Paste(" pass word \r\n".into()));
         assert!(sign_out_stage(&app).error.is_none());
         app.on_event(key(KeyCode::Enter));
         let sent = drain(&mut commands);
@@ -2327,7 +2337,7 @@ mod tests {
         // The other secrets go the same way: the login password, the recovery key,
         // the password for setting up cross-signing.
         app.modal = Some(Modal::Recovery(crate::modal::RecoveryForm::default()));
-        app.on_event(Event::Paste(" EsTj 1234 ".into()));
+        app.on_event(InputEvent::Paste(" EsTj 1234 ".into()));
         app.on_event(key(KeyCode::Enter));
         let sent = drain(&mut commands);
         assert!(
@@ -2338,19 +2348,19 @@ mod tests {
         set_up.password = Some(crate::lineedit::LineEdit::secret());
         set_up.field_focused = true;
         app.modal = Some(Modal::Verify(set_up));
-        app.on_event(Event::Paste(" pw ".into()));
+        app.on_event(InputEvent::Paste(" pw ".into()));
         assert!(matches!(&app.modal, Some(Modal::Verify(popup))
                 if popup.password.as_ref().is_some_and(|typed| typed.as_str() == " pw ")));
         let mut login = crate::modal::LoginForm::new(None);
         login.focus = 2;
         app.modal = Some(Modal::Login(login));
-        app.on_event(Event::Paste(" pw ".into()));
+        app.on_event(InputEvent::Paste(" pw ".into()));
         // The user name next to it is not a secret and is trimmed as before.
         if let Some(Modal::Login(form)) = &mut app.modal {
             assert_eq!(form.password.as_str(), " pw ");
             form.focus = 1;
         }
-        app.on_event(Event::Paste(" alice ".into()));
+        app.on_event(InputEvent::Paste(" alice ".into()));
         assert!(
             matches!(&app.modal, Some(Modal::Login(form)) if form.username.as_str() == "alice")
         );

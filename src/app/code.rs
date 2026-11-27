@@ -65,14 +65,14 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{
-        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-    };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
     use super::*;
     use crate::action::{Action, Pane};
+    use crate::input::{
+        InputEvent, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use crate::modal::Modal;
     use crate::model::Message;
 
@@ -113,12 +113,12 @@ mod tests {
         line[..line.rfind(needle).unwrap()].chars().count() as u16
     }
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
-    fn click(column: u16, row: u16) -> Event {
-        Event::Mouse(MouseEvent {
+    fn click(column: u16, row: u16) -> InputEvent {
+        InputEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column,
             row,

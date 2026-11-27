@@ -1,8 +1,7 @@
 //! The app's side of device verification: actions, popup keys and worker events.
 
-use crossterm::event::{KeyCode, KeyModifiers};
-
 use super::App;
+use crate::input::{KeyCode, KeyModifiers};
 use crate::lineedit::{EditKeys, LineEdit};
 use crate::matrix::{
     Answer, DeviceTrust, Identity, MatrixCmd, RecoveryStatus, Security, SetUpOutcome, VerifyCmd,
@@ -156,7 +155,7 @@ impl App {
         let typing = popup.field_focused && popup.has_field(state);
         #[expect(
             clippy::wildcard_enum_match_arm,
-            reason = "foreign crossterm::event::KeyCode"
+            reason = "input events stand in for the terminal's (crate::input)"
         )]
         let pressed = match code {
             KeyCode::Esc => {
@@ -349,9 +348,9 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
+    use crate::input::{InputEvent, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+    use crate::time::Instant;
 
-    use crossterm::event::{Event, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -360,12 +359,12 @@ mod tests {
     use crate::ui;
     use crate::verify::{GUARD, TYPING_PAUSE};
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
-    fn click(column: u16, row: u16) -> Event {
-        Event::Mouse(MouseEvent {
+    fn click(column: u16, row: u16) -> InputEvent {
+        InputEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column,
             row,
@@ -765,7 +764,7 @@ mod tests {
         let screen = redraw(&mut app, &mut terminal);
         find(&screen, "not accepted");
         app.on_event(key(KeyCode::Char('x')));
-        app.on_event(Event::Key(KeyEvent::new(
+        app.on_event(InputEvent::Key(KeyEvent::new(
             KeyCode::Char('u'),
             KeyModifiers::CONTROL,
         )));
@@ -882,9 +881,10 @@ mod tests {
     #[test]
     fn verify_password_edits_mid_text_and_clicks_to_place() {
         let (mut app, mut terminal, mut commands) = connected();
-        let ctrl = |c: char| Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
-        let ctrl_key = |code: KeyCode| Event::Key(KeyEvent::new(code, KeyModifiers::CONTROL));
-        let alt = |c: char| Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT));
+        let ctrl =
+            |c: char| InputEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+        let ctrl_key = |code: KeyCode| InputEvent::Key(KeyEvent::new(code, KeyModifiers::CONTROL));
+        let alt = |c: char| InputEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT));
 
         app.on_matrix(MatrixEvent::Security(Security {
             identity: Identity::Missing,

@@ -2,11 +2,10 @@
 //! facts from what the running app knows, the keys and clicks inside the popup, and
 //! copying the report as text.
 
-use crossterm::event::{KeyCode, KeyModifiers};
-
 use super::App;
 use crate::config::ImageMode;
 use crate::doctor::{Facts, Popup};
+use crate::input::{KeyCode, KeyModifiers};
 use crate::matrix::SecretStoreMode;
 use crate::modal::Modal;
 use crate::theme::Theme;
@@ -58,7 +57,7 @@ impl App {
             transcribe: self.notes_found().0,
             translate: self.notes_found().1,
             summary: crate::doctor::Summary::from_choice(&self.summary_command()),
-            ..Facts::from_environment()
+            ..self.probes.environment()
         }
     }
 
@@ -84,7 +83,7 @@ impl App {
         let page = popup.page.saturating_sub(1).max(1) as isize;
         #[expect(
             clippy::wildcard_enum_match_arm,
-            reason = "foreign crossterm::event::KeyCode"
+            reason = "input events stand in for the terminal's (crate::input)"
         )]
         match code {
             KeyCode::Esc => self.close_modal(),
@@ -125,19 +124,19 @@ impl App {
 mod tests {
     use super::*;
     use crate::action::{Action, Pane};
-    use crate::app::ui;
     use crate::config::Config;
+    use crate::input::{InputEvent, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
     use crate::matrix::MatrixHandle;
-    use crossterm::event::{Event, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+    use crate::ui;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
-    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> Event {
-        Event::Mouse(MouseEvent {
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> InputEvent {
+        InputEvent::Mouse(MouseEvent {
             kind,
             column,
             row,
@@ -256,7 +255,7 @@ mod tests {
         assert!(app.modal.is_none());
         // A paste does nothing to it.
         app.open_doctor_with(&crate::doctor::sample());
-        app.on_event(Event::Paste("pasted".into()));
+        app.on_event(InputEvent::Paste("pasted".into()));
         assert!(matches!(app.modal, Some(Modal::Doctor(_))));
         assert!(app.composer.is_empty());
     }
@@ -332,7 +331,7 @@ mod tests {
         app.found.ignored_settings = vec!["mouse".to_owned()];
         app.found.secret_store = SecretStoreMode::Keyring;
         app.found.image_mode = ImageMode::Off;
-        app.on_event(Event::FocusLost);
+        app.on_event(InputEvent::FocusLost);
         let config = Config::parse("[keys.timeline]\nreply = \"none\"\n").unwrap();
         app.keymap = crate::keymap::Keymap::from_config(&config).0;
         let facts = app.doctor_facts();
@@ -367,7 +366,7 @@ mod tests {
         let mut app = App::new(&config, dir.join("themes"), None);
         assert_eq!(app.found.ignored_settings, ["mouse"]);
         assert_eq!(app.found.key_problems, 1);
-        app.config_file = Some(file.clone());
+        app.set_config_file(&file);
         // Mended in an editor while the app runs.
         std::fs::write(&file, "images = \"sixel\"\n").unwrap();
         app.reload_theme();

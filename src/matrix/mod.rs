@@ -1,13 +1,16 @@
 //! The Matrix side of the app. Everything that talks to the SDK lives in this module and
 //! runs on its own task; the UI only sees [`MatrixCmd`] and [`MatrixEvent`].
 
+#[cfg(not(target_family = "wasm"))]
 mod agent;
+mod auth;
 mod collect;
 mod convert;
 mod devices;
 mod directory;
 mod drafts;
 mod emotes;
+#[cfg(not(target_family = "wasm"))]
 mod keyring;
 mod keywords;
 mod left;
@@ -22,8 +25,12 @@ mod receipts;
 mod rooms;
 mod safety;
 mod saved;
+mod sdk_error;
 pub(crate) mod search;
+#[cfg(not(target_family = "wasm"))]
 mod session;
+#[cfg(target_family = "wasm")]
+use auth::browser as session;
 #[cfg(test)]
 pub(crate) use rooms::measure::sample_messages;
 #[cfg(test)]
@@ -34,7 +41,9 @@ mod threads;
 mod upload;
 mod verify;
 
+#[cfg(not(target_family = "wasm"))]
 pub use agent::{AgentCmd, AgentEvent, MAX_WATCHED as AGENT_MAX_WATCHED};
+pub use auth::SecretStoreMode;
 pub use collect::{ARCHIVE_EVENTS, Archived, CollectCmd, CollectEvent, LAST_EVENTS, UnreadText};
 pub use devices::{
     BackupUpload, DevicesCmd, DevicesEvent, ServerBackup, Session, SessionList, SessionTrust,
@@ -46,8 +55,8 @@ pub use directory::{DirectoryPage, PreviewMembership, PublicRoom, RoomPreview};
 #[cfg(test)]
 pub use emotes::EmotePack;
 pub use emotes::{CustomEmoji, EmoteCatalog, MAX_SHORTCODE_LEN, StickerItem, is_valid_mxc};
-pub use keyring::SecretStoreMode;
 // For `crate::logsafe`, which turns it into a word for the log.
+#[cfg(not(target_family = "wasm"))]
 pub(crate) use keyring::KeyringError;
 pub use keywords::{KeywordsCmd, KeywordsEvent, MAX_KEYWORDS, shown_keywords};
 #[cfg(test)]
@@ -63,6 +72,9 @@ pub use people::{
     OwnProfile, OwnProfileAction, UserProfile, UserSharedRoom, UserVerifyStatus, fallback_localpart,
 };
 pub use saved::{MAX_FETCH as SAVED_MAX_FETCH, SavedCmd, SavedEvent};
+#[cfg(target_family = "wasm")]
+pub(crate) use sdk_error::CopiedError;
+use sdk_error::SdkResult;
 pub use search::SearchHit;
 pub use session::{ReauthKind, ReauthTarget};
 pub use source::{EventSource, SOURCE_MAX, SourceKind};
@@ -78,7 +90,7 @@ pub use verify::{
 
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use futures::{StreamExt, pin_mut};
 use matrix_sdk::encryption::recovery::RecoveryState;
 use matrix_sdk::notification_settings::RoomNotificationMode;
@@ -92,6 +104,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use crate::format::Outgoing;
 use crate::model::{ItemRef, Message, PinnedMessage, RoomPower};
 use crate::paths::Paths;
+use crate::rt;
 
 /// Rooms shown before the user scrolls for more. Paging arrives with the timeline work.
 const ROOM_PAGE: usize = 10_000;
@@ -469,6 +482,7 @@ pub enum MatrixCmd {
     },
     /// What `matrix-rat serve` asks for: send a text, read a room, watch a room.
     /// Never sent by the app.
+    #[cfg(not(target_family = "wasm"))]
     Agent(AgentCmd),
     /// A stretch of a room's messages as text: an archive of the room written to a
     /// file, or what is unread for a summary.
@@ -681,6 +695,7 @@ impl MatrixCmd {
                 ],
             ),
             // The inner command prints no room and no text.
+            #[cfg(not(target_family = "wasm"))]
             Self::Agent(command) => ("Agent", vec![Some(command.shown(ids))]),
             Self::Collect(command) => ("Collect", vec![Some(command.shown(ids))]),
         };
@@ -854,6 +869,11 @@ pub enum MatrixEvent {
     LoggedIn {
         user_id: String,
     },
+    /// The user logged out (`MatrixCmd::Logout`) and the session's files here are
+    /// gone. What the account kept in the app's storage (saved messages, kept notes)
+    /// is the app's to remove. Comes before the `NeedLogin` that follows; a session
+    /// that merely ended (expired, or logged out from elsewhere) sends none.
+    LoggedOut,
     Sync(SyncStatus),
     /// The first sync of the session is through: what was missed while the app was
     /// not running has arrived (or is arriving in the open room right now). Sent
@@ -1107,6 +1127,7 @@ pub enum MatrixEvent {
         generation: u64,
     },
     /// An answer to a [`MatrixCmd::Agent`], or news of a room that is watched.
+    #[cfg(not(target_family = "wasm"))]
     Agent(AgentEvent),
     /// An answer to a [`MatrixCmd::Collect`], or how far it is.
     Collect(CollectEvent),
@@ -1146,6 +1167,7 @@ impl MatrixEvent {
             Self::LoginFailed(error) => ("LoginFailed", vec![text(error)]),
             Self::BrowserLoginUrl(_) => ("BrowserLoginUrl", vec![]),
             Self::LoggedIn { user_id } => ("LoggedIn", vec![id(user_id)]),
+            Self::LoggedOut => ("LoggedOut", vec![]),
             Self::Sync(status) => ("Sync", vec![Some(format!("{status:?}"))]),
             Self::CaughtUp => ("CaughtUp", vec![]),
             Self::Rooms(rooms) => ("Rooms", vec![Some(rooms.len().to_string())]),
@@ -1366,6 +1388,7 @@ impl MatrixEvent {
             Self::Threads(page) => ("Threads", vec![Some(format!("{page:?}"))]),
             Self::ThreadsFailed { generation: g, .. } => ("ThreadsFailed", vec![generation(g)]),
             // The inner event prints no room, no message and no reason.
+            #[cfg(not(target_family = "wasm"))]
             Self::Agent(event) => ("Agent", vec![Some(event.shown(full))]),
             Self::Collect(event) => ("Collect", vec![Some(event.shown(full))]),
         };
@@ -1386,7 +1409,7 @@ impl MatrixHandle {
         (Self { commands }, receiver)
     }
 
-    pub fn send(&self, command: MatrixCmd) {
+    pub(crate) fn send(&self, command: MatrixCmd) {
         // A closed channel means the worker is gone, which only happens at shutdown.
         let _ = self.commands.send(command);
     }
@@ -1418,7 +1441,7 @@ pub fn spawn_with(
 ) -> (MatrixHandle, UnboundedReceiver<MatrixEvent>) {
     let (commands, command_rx) = unbounded_channel();
     let (events, event_rx) = unbounded_channel();
-    tokio::spawn(async move {
+    rt::spawn(async move {
         Worker {
             paths,
             secret_store,
@@ -1578,7 +1601,7 @@ impl Worker {
                 let target = active.target.clone();
                 let mut reason = None;
                 // Tell the server, but log out here even if it cannot be reached.
-                match tokio::time::timeout(Duration::from_secs(10), active.client.logout()).await {
+                match rt::timeout(Duration::from_secs(10), active.client.logout()).await {
                     Ok(Ok(())) => {}
                     outcome => {
                         let why = match &outcome {
@@ -1595,6 +1618,7 @@ impl Worker {
                 }
                 drop(active);
                 session::clear(&self.paths, Some(&target)).await;
+                self.emit(MatrixEvent::LoggedOut);
                 *pending = Some(PendingAuth::Fresh { reason });
             }
             Err(err) => {
@@ -1603,7 +1627,7 @@ impl Worker {
                 self.emit(MatrixEvent::Error(format!("{err:#}")));
                 // Keep the session on disk: this may be a temporary problem.
                 // Try again shortly, unless told to stop first.
-                let retry = tokio::time::sleep(Duration::from_secs(5));
+                let retry = rt::sleep(Duration::from_secs(5));
                 tokio::pin!(retry);
                 loop {
                     tokio::select! {
@@ -1707,8 +1731,9 @@ impl Worker {
                 | MatrixCmd::DirectoryNextPage { .. }
                 | MatrixCmd::CancelDirectorySearch
                 | MatrixCmd::ListThreads { .. }
-                | MatrixCmd::Agent(_)
                 | MatrixCmd::Collect(_) => continue,
+                #[cfg(not(target_family = "wasm"))]
+                MatrixCmd::Agent(_) => continue,
             };
             let login = async {
                 #[expect(
@@ -1836,7 +1861,7 @@ impl Worker {
         let mut session_changes = client.subscribe_to_session_changes();
         // In a set, which aborts it when dropped: it holds the client, and a session
         // that fails to start (an early return below) must not leave it running.
-        let mut token_saver = tokio::task::JoinSet::new();
+        let mut token_saver = rt::JoinSet::new();
         {
             let mut changes = client.subscribe_to_session_changes();
             let (paths, client, passphrase) =
@@ -1870,7 +1895,7 @@ impl Worker {
             .with_room_list_timeline_limit(20)
             .build()
             .await
-            .context("could not set up sync")?;
+            .sdk_context("could not set up sync")?;
         // Start listening for redecryption reports before sync begins so any
         // newly decrypted UTDs are forwarded into the search index.
         let mut searcher = search::Searcher::new(
@@ -1893,7 +1918,7 @@ impl Worker {
             .room_list_service()
             .all_rooms()
             .await
-            .context("could not open the room list")?;
+            .sdk_context("could not open the room list")?;
         let (entries, controller) = room_list.entries_with_dynamic_adapters(ROOM_PAGE);
         // Nothing is emitted until a filter is set.
         controller.set_filter(Box::new(new_filter_non_left()));
@@ -1977,6 +2002,7 @@ impl Worker {
             relist.clone(),
         );
         let mut devices = devices::Devices::new(client.clone(), self.events.clone());
+        #[cfg(not(target_family = "wasm"))]
         let mut agent = agent::Agent::new(
             client.clone(),
             self.events.clone(),
@@ -2089,12 +2115,12 @@ impl Worker {
         ];
         // What a command started and left running here (a recovery, a report): it
         // holds the client, so it ends with the session.
-        let mut session_tasks = tokio::task::JoinSet::new();
+        let mut session_tasks = rt::JoinSet::new();
         let end = loop {
             // A room's timeline left unused for long goes (see `rooms::IDLE_TIMELINE`).
             let timelines_idle = timelines.idle_due();
             tokio::select! {
-                () = timelines_idle => timelines.drop_idle(std::time::Instant::now()),
+                () = timelines_idle => timelines.drop_idle(crate::time::Instant::now()),
                 Some(diffs) = space_changes.next() => {
                     for diff in diffs {
                         diff.apply(&mut space_filters);
@@ -2224,6 +2250,7 @@ impl Worker {
                     Some(MatrixCmd::Manage(command)) => manager.handle(command),
                     Some(MatrixCmd::Devices(command)) => devices.handle(command),
                     Some(MatrixCmd::Keywords(command)) => keywords.handle(command),
+                    #[cfg(not(target_family = "wasm"))]
                     Some(MatrixCmd::Agent(command)) => agent.handle(command),
                     Some(MatrixCmd::Collect(command)) => collector.handle(command),
                     Some(MatrixCmd::SearchMessages { generation, query }) => {
@@ -2293,6 +2320,7 @@ impl Worker {
         manager.stop();
         devices.stop();
         keywords.stop();
+        #[cfg(not(target_family = "wasm"))]
         agent.stop();
         collector.stop();
         emote_mgr.stop();
@@ -2309,7 +2337,7 @@ impl Worker {
         }
         timelines.stop();
         // Do not hang on exit if the server is unreachable.
-        let _ = tokio::time::timeout(Duration::from_secs(2), sync.stop()).await;
+        let _ = rt::timeout(Duration::from_secs(2), sync.stop()).await;
         token_saver.abort_all();
         // Waited for: a save that is running must not write the session file again
         // after the session was forgotten.
@@ -2422,7 +2450,7 @@ struct Previews {
     >,
     /// Rooms the SDK has been asked to keep a latest message for.
     listening: std::collections::HashSet<matrix_sdk::ruma::OwnedRoomId>,
-    tasks: tokio::task::JoinSet<()>,
+    tasks: rt::JoinSet<()>,
 }
 
 impl Previews {

@@ -3,13 +3,13 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crossterm::event::{KeyCode, KeyModifiers};
 use matrix_sdk::ruma::events::Mentions;
 
 use super::App;
 use crate::action::Pane;
 use crate::complete::{self, Completion, Context, Member, MentionMark, RoomTarget};
 use crate::format::{self, Outgoing};
+use crate::input::{KeyCode, KeyModifiers};
 use crate::matrix::MatrixCmd;
 use crate::model::{Message, MsgKind, OWN_NAME, RoomKind};
 
@@ -512,19 +512,20 @@ pub(super) fn mentions_empty(mentions: &Option<Mentions>) -> bool {
 mod tests {
     use super::*;
     use crate::action::Action;
-    use crate::app::{Config, MatrixHandle, ui};
+    use crate::app::{Config, MatrixHandle};
     use crate::complete::Kind;
+    use crate::input::{InputEvent, KeyEvent};
     use crate::matrix::{MatrixEvent, RoomCategory, RoomSummary};
     use crate::model::{ItemRef, Message};
+    use crate::ui;
     use crate::ui::hit::HitId;
-    use crossterm::event::{Event, KeyEvent};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use std::path::PathBuf;
     use tokio::sync::mpsc::UnboundedReceiver;
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
     fn redraw(app: &mut App, terminal: &mut Terminal<TestBackend>) {
@@ -700,14 +701,12 @@ mod tests {
             .flat_map(|x| (0..size.height).map(move |y| (x, y)))
             .find(|&(x, y)| matches!(app.hits.at(x, y), Some(HitId::Complete(1))));
         let (x, y) = pos.expect("expected clickable Complete(1) hit rect");
-        app.on_event(crossterm::event::Event::Mouse(
-            crossterm::event::MouseEvent {
-                kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-                column: x,
-                row: y,
-                modifiers: KeyModifiers::NONE,
-            },
-        ));
+        app.on_event(crate::input::InputEvent::Mouse(crate::input::MouseEvent {
+            kind: crate::input::MouseEventKind::Down(crate::input::MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        }));
         assert_eq!(app.composer.text(), "ping Bob ");
         assert!(app.complete.active.is_none());
     }

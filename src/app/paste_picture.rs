@@ -10,13 +10,16 @@
 
 use super::App;
 use crate::action::Pane;
-use crate::clipboard::{self, Done, Failure, Request, Tool};
+#[cfg(any(not(target_family = "wasm"), test))]
+use crate::clipboard::Done;
+use crate::clipboard::{Failure, Request, Tool};
+#[cfg(any(not(target_family = "wasm"), test))]
 use crate::upload;
 
 impl App {
     /// `Action::PastePicture`.
     pub(super) fn request_paste_picture(&mut self) {
-        self.request_paste_with(clipboard::tools_from_env());
+        self.request_paste_with(self.probes.clipboard_tools());
     }
 
     /// With the tools already worked out (a test passes its own).
@@ -47,14 +50,16 @@ impl App {
     }
 
     /// What the run loop is to read, once.
-    pub fn take_paste_request(&mut self) -> Option<Request> {
+    #[cfg(any(not(target_family = "wasm"), test))]
+    pub(crate) fn take_paste_request(&mut self) -> Option<Request> {
         self.attach.paste_request.take()
     }
 
     /// The clipboard was read: the picture is attached to the conversation it was asked
     /// for, as a file picked by hand would be, or a toast says why not. An answer to a
     /// reading that was given up (by a logout) is dropped, and its file with it.
-    pub fn finish_paste(&mut self, done: Done) {
+    #[cfg(any(not(target_family = "wasm"), test))]
+    pub(crate) fn finish_paste(&mut self, done: Done) {
         self.dirty = true;
         let Some((_, scope)) = self.attach.reading.take_if(|(id, _)| *id == done.id) else {
             return;
@@ -98,19 +103,19 @@ mod tests {
     use std::io::Cursor;
     use std::path::{Path, PathBuf};
 
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use tokio::sync::mpsc::UnboundedReceiver;
 
     use super::*;
     use crate::action::Action;
     use crate::app::ComposeMode;
-    use crate::clipboard::Ran;
+    use crate::clipboard::{self, Ran};
+    use crate::input::{InputEvent, KeyCode, KeyEvent, KeyModifiers};
     use crate::matrix::{MatrixCmd, MatrixEvent, MatrixHandle};
     use crate::model::{ItemRef, Message, Room, RoomKind};
     use crate::upload::tests::Scratch;
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
     fn remote(id: &str, body: &str) -> Message {
@@ -144,7 +149,7 @@ mod tests {
     }
 
     /// A Wayland clipboard holding `content` as a PNG.
-    fn clipboard(content: Vec<u8>) -> impl FnMut(&[&str], u64, std::time::Instant) -> Ran {
+    fn clipboard(content: Vec<u8>) -> impl FnMut(&[&str], u64, crate::time::Instant) -> Ran {
         move |argv, _, _| {
             if argv.contains(&"--list-types") {
                 Ran::Output(b"text/html\nimage/png\n".to_vec())
@@ -159,7 +164,7 @@ mod tests {
     fn paste_with(
         app: &mut App,
         dir: &Path,
-        runner: impl FnMut(&[&str], u64, std::time::Instant) -> Ran,
+        runner: impl FnMut(&[&str], u64, crate::time::Instant) -> Ran,
     ) -> Option<Request> {
         app.request_paste_with(vec![Tool::WlPaste]);
         let request = app.take_paste_request()?;
@@ -262,7 +267,7 @@ mod tests {
         paste(&mut app, &dir.0);
         let path = attached(&app);
         app.composer.insert("caption");
-        app.on_event(Event::Key(KeyEvent::new(
+        app.on_event(InputEvent::Key(KeyEvent::new(
             KeyCode::Char('c'),
             KeyModifiers::CONTROL,
         )));
@@ -294,7 +299,7 @@ mod tests {
         // Taken off while another send is out: it goes when that one is answered.
         let notes = dir.file("notes.txt", b"hello");
         app.open_room(1);
-        app.on_event(Event::Paste(notes.display().to_string()));
+        app.on_event(InputEvent::Paste(notes.display().to_string()));
         app.on_event(key(KeyCode::Enter));
         assert_eq!(sent_files(&mut commands), std::slice::from_ref(&notes));
         app.open_room(0);
@@ -536,7 +541,7 @@ mod tests {
 
     #[test]
     fn the_key_works_in_the_composer_only() {
-        let alt_i = || Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::ALT));
+        let alt_i = || InputEvent::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::ALT));
         // What it does depends on the desktop of the machine running the test: a
         // request, or the toast that says there is no clipboard. Nothing is run.
         let (mut app, _commands) = connected();

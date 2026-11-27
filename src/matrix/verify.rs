@@ -9,10 +9,9 @@ use std::future::{Future, pending};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use futures::{Stream, StreamExt, pin_mut};
-use matrix_sdk::Client;
 use matrix_sdk::config::RequestConfig;
 use matrix_sdk::encryption::VerificationState;
 use matrix_sdk::encryption::backups::BackupState;
@@ -41,12 +40,14 @@ use matrix_sdk::ruma::to_device::DeviceIdOrAllDevices;
 use matrix_sdk::ruma::{
     DeviceId, MilliSecondsSinceUnixEpoch, OwnedDeviceId, OwnedUserId, TransactionId, UserId,
 };
+use matrix_sdk::{Client, SendOutsideWasm};
 use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
-use tokio::task::{JoinHandle, JoinSet};
 
 use super::{MatrixEvent, RecoveryStatus, Secret, recovery_status};
+use crate::rt::{self, JoinHandle, JoinSet};
 use crate::text::sanitize_line;
+use crate::time::Instant;
 
 // ----- what the UI sees ---------------------------------------------------------------
 
@@ -665,7 +666,7 @@ impl Verifier {
     }
 
     /// Runs `work` for this session only.
-    fn spawn(&mut self, work: impl Future<Output = ()> + Send + 'static) {
+    fn spawn(&mut self, work: impl Future<Output = ()> + SendOutsideWasm + 'static) {
         // Forget the ones that are done.
         while self.tasks.try_join_next().is_some() {}
         self.tasks.spawn(work);
@@ -842,7 +843,7 @@ impl Verifier {
             last: None,
         };
         let client = self.client.clone();
-        let task = tokio::spawn(flow.run(client, request, answer_rx));
+        let task = rt::spawn(flow.run(client, request, answer_rx));
         self.running = Some(Running {
             flow: self.next_flow,
             answers,
@@ -865,7 +866,7 @@ impl Verifier {
             if !running.finished.load(Ordering::SeqCst) {
                 let _ = running.answers.send(Answer::Cancel);
                 let mut task = running.task;
-                if tokio::time::timeout(Duration::from_secs(2), &mut task)
+                if rt::timeout(Duration::from_secs(2), &mut task)
                     .await
                     .is_err()
                 {
@@ -957,7 +958,7 @@ async fn refresh_own_keys(client: &Client) {
 /// one a moment after the verification ends. Look until it is there.
 async fn await_own_signature(client: &Client, refresh: &Notify) {
     for delay in [0, 1, 2, 4, 8] {
-        tokio::time::sleep(Duration::from_secs(delay)).await;
+        rt::sleep(Duration::from_secs(delay)).await;
         if matches!(
             client.encryption().get_own_device().await,
             Ok(Some(device)) if device.is_cross_signed_by_owner()
@@ -969,7 +970,12 @@ async fn await_own_signature(client: &Client, refresh: &Notify) {
     }
 }
 
+/// `Sas::changes`, boxed: `Send` on native, as the verification's task must be, and not in
+/// the browser, where the stream is not `Send` (as matrix-sdk's own `BoxFuture`).
+#[cfg(not(target_family = "wasm"))]
 type SasStream = Pin<Box<dyn Stream<Item = SasState> + Send>>;
+#[cfg(target_family = "wasm")]
+type SasStream = Pin<Box<dyn Stream<Item = SasState>>>;
 
 /// One verification, from request to result. Runs on its own task.
 struct Flow {
@@ -1389,7 +1395,7 @@ async fn request_user(client: &Client, user_id: &UserId) -> Result<VerificationR
         .map_err(|err| format!("Could not read the encryption store: {err}"))?
     {
         Some(identity) => identity,
-        None => tokio::time::timeout(
+        None => rt::timeout(
             Duration::from_secs(15),
             encryption.request_user_identity(user_id),
         )
@@ -2060,8 +2066,8 @@ pub(super) mod tests {
     pub(in crate::matrix) async fn new_account(prefix: &str) -> (String, String) {
         let token = std::env::var("MATRIX_RAT_TEST_REGISTRATION_TOKEN")
             .unwrap_or_else(|_| "devtoken".to_owned());
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let stamp = crate::time::SystemTime::now()
+            .duration_since(crate::time::UNIX_EPOCH)
             .unwrap()
             .as_millis();
         let name = format!("{prefix}{stamp}");
@@ -2388,8 +2394,8 @@ pub(super) mod tests {
             .unwrap_or_else(|_| "http://127.0.0.1:6167".to_owned());
         let token = std::env::var("MATRIX_RAT_TEST_REGISTRATION_TOKEN")
             .unwrap_or_else(|_| "devtoken".to_owned());
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let stamp = crate::time::SystemTime::now()
+            .duration_since(crate::time::UNIX_EPOCH)
             .unwrap()
             .as_millis();
         let name = format!("rathistory{stamp}");
@@ -2752,7 +2758,7 @@ pub(super) mod tests {
             answer: Answer::Accept,
         }));
         let requester = tokio::spawn(run_requester(v_request));
-        let began = std::time::Instant::now();
+        let began = crate::time::Instant::now();
         let run = async {
             loop {
                 let update = next_update(&mut u_events, "U").await;

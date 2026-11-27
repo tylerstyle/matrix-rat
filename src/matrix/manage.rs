@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use matrix_sdk::notification_settings::{NotificationSettings, RoomNotificationMode};
 use matrix_sdk::ruma::api::client::membership::get_member_events;
@@ -25,14 +25,17 @@ use matrix_sdk::ruma::{
     Int, OwnedRoomAliasId, OwnedRoomOrAliasId, OwnedServerName, OwnedUserId, RoomAliasId, RoomId,
     RoomOrAliasId, ServerName, UInt, UserId,
 };
-use matrix_sdk::{Client, NotificationSettingsError, Room, RoomMemberships, RoomState};
+use matrix_sdk::{
+    Client, NotificationSettingsError, Room, RoomMemberships, RoomState, SendOutsideWasm,
+};
 use tokio::sync::{Notify, mpsc::UnboundedSender, watch};
-use tokio::task::JoinHandle;
 
 use super::MatrixEvent;
 use super::spaces::{SpaceDetails, SpaceEdit};
 use crate::model::RoomPower;
+use crate::rt::{self, JoinHandle};
 use crate::text::{sanitize, sanitize_line, truncate};
+use crate::time::Instant;
 
 /// Above this many members, the list is asked for again at most this often while the
 /// room info is open: the request is a big one.
@@ -825,7 +828,7 @@ pub struct Manager {
     relist: Arc<Notify>,
     /// The commands still running (see `handle`). They hold the session's client: given
     /// up with the session (see `stop`).
-    tasks: tokio::task::JoinSet<()>,
+    tasks: rt::JoinSet<()>,
 }
 
 /// Wakes the open room info watcher when the watched room changes.
@@ -893,7 +896,7 @@ impl Manager {
             left,
             notify,
             relist,
-            tasks: tokio::task::JoinSet::new(),
+            tasks: rt::JoinSet::new(),
         }
     }
 
@@ -918,7 +921,10 @@ impl Manager {
     }
 
     /// Starts `work` among [`Self::tasks`], letting go of those that are done.
-    fn spawn_task(&mut self, work: impl std::future::Future<Output = ()> + Send + 'static) {
+    fn spawn_task(
+        &mut self,
+        work: impl std::future::Future<Output = ()> + SendOutsideWasm + 'static,
+    ) {
         while self.tasks.try_join_next().is_some() {}
         self.tasks.spawn(work);
     }
@@ -1038,7 +1044,7 @@ impl Manager {
                 // store read still mark this watcher's receiver dirty.
                 let refresh = self.refresh.watch(&room_id);
                 let own_room_names = self.own_room_names.clone();
-                self.watcher = Some(tokio::spawn(watch(
+                self.watcher = Some(rt::spawn(watch(
                     client,
                     room_id,
                     self.events.clone(),
@@ -1323,7 +1329,7 @@ impl Manager {
                     move |client, room| async move {
                         let (mime, bytes) =
                             super::people::prepare_avatar_upload(&client, &path).await?;
-                        tokio::time::timeout(
+                        rt::timeout(
                             Duration::from_secs(60),
                             room.upload_avatar(&mime, bytes, None),
                         )
@@ -1460,8 +1466,8 @@ impl Manager {
 
     fn spawn_setting<F, Fut>(&mut self, room_id: String, change: Change, work: F)
     where
-        F: FnOnce(Client, Room) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = Result<(), String>> + Send,
+        F: FnOnce(Client, Room) -> Fut + SendOutsideWasm + 'static,
+        Fut: std::future::Future<Output = Result<(), String>> + SendOutsideWasm,
     {
         let client = self.client.clone();
         let events = self.events.clone();
@@ -1484,8 +1490,8 @@ impl Manager {
 
     fn spawn_tag<F, Fut>(&mut self, room_id: String, what: &'static str, change: Change, work: F)
     where
-        F: FnOnce(Room) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = matrix_sdk::Result<()>> + Send,
+        F: FnOnce(Room) -> Fut + SendOutsideWasm + 'static,
+        Fut: std::future::Future<Output = matrix_sdk::Result<()>> + SendOutsideWasm,
     {
         let client = self.client.clone();
         let events = self.events.clone();
@@ -1510,8 +1516,8 @@ impl Manager {
         change: Change,
         work: F,
     ) where
-        F: FnOnce(Room, OwnedUserId) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = matrix_sdk::Result<()>> + Send,
+        F: FnOnce(Room, OwnedUserId) -> Fut + SendOutsideWasm + 'static,
+        Fut: std::future::Future<Output = matrix_sdk::Result<()>> + SendOutsideWasm,
     {
         let client = self.client.clone();
         let events = self.events.clone();
@@ -2276,7 +2282,7 @@ async fn fetch_member_events(
 ) -> Result<ServerMembers, String> {
     let mut request = get_member_events::v3::Request::new(room.room_id().to_owned());
     request.membership = membership;
-    let response = tokio::time::timeout(MEMBERS_TIMEOUT, client.send(request))
+    let response = rt::timeout(MEMBERS_TIMEOUT, client.send(request))
         .await
         .map_err(|_| "The member list took too long to arrive.".to_owned())?
         .map_err(|err| failed("load the member list", &err.into()))?;
@@ -2505,7 +2511,7 @@ fn parse_room_aliases(
 
 async fn fetch_local_aliases(client: &Client, room: &Room) -> Result<Vec<String>, String> {
     let req = AliasesRequest::new(room.room_id().to_owned());
-    let resp = tokio::time::timeout(Duration::from_secs(5), client.send(req))
+    let resp = rt::timeout(Duration::from_secs(5), client.send(req))
         .await
         .map_err(|_| "Asking for local room addresses took too long.".to_owned())?
         .map_err(|err| failed("list local addresses", &err.into()))?;
@@ -2854,7 +2860,7 @@ async fn watch(
             }
         }
         // Until the room changes, a moderation event or knock arrives, or a postponed fetch is due.
-        let deadline = wait.map(|time| tokio::time::Instant::now() + time);
+        let deadline = wait.map(|time| Instant::now() + time);
         let burst = tokio::select! {
             change = changes.next() => {
                 if change.is_none() {
@@ -2887,14 +2893,14 @@ async fn watch(
             }
             () = async {
                 match deadline {
-                    Some(at) => tokio::time::sleep_until(at).await,
+                    Some(at) => rt::sleep_until(at).await,
                     None => std::future::pending().await,
                 }
             } => false,
         };
         if burst {
             // Changes come in bursts (a sync brings several); one look afterwards is enough.
-            tokio::time::sleep(Duration::from_millis(300)).await;
+            rt::sleep(Duration::from_millis(300)).await;
             while futures::FutureExt::now_or_never(changes.next())
                 .flatten()
                 .is_some()

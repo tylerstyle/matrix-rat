@@ -1,23 +1,27 @@
 //! Pictures in the app: fetching what the timeline shows, and the viewer.
 
-use std::io::Write;
-
+#[cfg(not(target_family = "wasm"))]
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use super::*;
+#[cfg(not(target_family = "wasm"))]
 use crate::images::{EncodeDone, Graphics, ImageStore};
 
 impl App {
     /// Sets up pictures for the real terminal. The receiver delivers viewer pictures
     /// that were prepared on another thread; pass them to [`App::on_image_encoded`].
-    pub(super) fn start_images(&mut self, graphics: Graphics) -> UnboundedReceiver<EncodeDone> {
+    /// The terminal's alone: the browser has no thread to encode on, and draws no
+    /// pictures into cells yet.
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) fn start_images(&mut self, graphics: Graphics) -> UnboundedReceiver<EncodeDone> {
         let (sender, receiver) = unbounded_channel();
         self.images = ImageStore::new(graphics);
         self.images.set_encoder(sender);
         receiver
     }
 
-    pub(super) fn on_image_encoded(&mut self, done: EncodeDone) {
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) fn on_image_encoded(&mut self, done: EncodeDone) {
         self.images.on_encoded(done);
         self.dirty = true;
     }
@@ -46,15 +50,11 @@ impl App {
         self.send_avatar_requests();
     }
 
-    /// Tells the terminal to free the pictures that are no longer shown (`all`: every
-    /// picture, before quitting). Written between frames, never during a draw.
-    pub(super) fn flush_images(&mut self, all: bool) {
-        let sequence = self.images.cleanup_sequence(all);
-        if !sequence.is_empty() {
-            let mut out = std::io::stdout();
-            let _ = out.write_all(sequence.as_bytes());
-            let _ = out.flush();
-        }
+    /// What tells the terminal to free the pictures that are no longer shown (`all`:
+    /// every picture, before quitting), for the event loop to write between frames.
+    #[cfg(any(not(target_family = "wasm"), test))]
+    pub(crate) fn image_cleanup(&mut self, all: bool) -> String {
+        self.images.cleanup_sequence(all)
     }
 
     /// Opens the viewer for the picture of a message. False if it has none.
@@ -116,7 +116,7 @@ impl App {
         }
         if self.keymap.lookup(
             crate::keymap::Context::Timeline,
-            crossterm::event::KeyEvent::new(code, mods),
+            crate::input::KeyEvent::new(code, mods),
         ) == Some(crate::action::Action::Save)
         {
             if !self.save_attachment(false) {
@@ -126,7 +126,7 @@ impl App {
         }
         if self.keymap.lookup(
             crate::keymap::Context::Timeline,
-            crossterm::event::KeyEvent::new(code, mods),
+            crate::input::KeyEvent::new(code, mods),
         ) == Some(crate::action::Action::OpenExternal)
         {
             if !self.save_attachment_for(true, crate::action::Action::OpenExternal) {
@@ -147,6 +147,7 @@ mod tests {
     use super::*;
     use crate::images::testing::{decoded, kitty, remote_image};
     use crate::model::{ImageInfo, RoomKind};
+    use crate::ui;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
@@ -154,12 +155,12 @@ mod tests {
 
     const KEY: &str = "mxc://example.org/cat";
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
-    fn click(column: u16, row: u16) -> Event {
-        Event::Mouse(MouseEvent {
+    fn click(column: u16, row: u16) -> InputEvent {
+        InputEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column,
             row,
@@ -464,7 +465,7 @@ mod tests {
         assert!(screen(&terminal).contains("cat.png: too large to show (34 MB)"));
 
         // The wheel does not scroll what is behind; a click anywhere closes.
-        app.on_event(Event::Mouse(MouseEvent {
+        app.on_event(InputEvent::Mouse(MouseEvent {
             kind: MouseEventKind::ScrollUp,
             column: 40,
             row: 10,
@@ -615,14 +616,14 @@ mod tests {
 
         // Narrower than the picture: it is fitted to the pane again.
         terminal.backend_mut().resize(36, 20);
-        app.on_event(Event::Resize(36, 20));
+        app.on_event(InputEvent::Resize(36, 20));
         frame(&mut app, &mut terminal);
         let cells = picture_cells(terminal.backend().buffer());
         assert!(!cells.is_empty() && cells.len() < 320);
         assert!(cells.iter().all(|(x, _)| *x < 35));
 
         terminal.backend_mut().resize(80, 30);
-        app.on_event(Event::Resize(80, 30));
+        app.on_event(InputEvent::Resize(80, 30));
         app.open_room(1);
         frame(&mut app, &mut terminal);
         assert!(screen(&terminal).contains("nothing to see"));
@@ -697,7 +698,7 @@ mod tests {
 
         // After a resize the terminal may have forgotten it: sent again, old one freed.
         app.timeline.scroll = usize::MAX;
-        app.on_event(Event::Resize(80, 30));
+        app.on_event(InputEvent::Resize(80, 30));
         frame(&mut app, &mut terminal);
         let cells = kitty_cells(terminal.backend().buffer());
         assert!(cells[0].2.starts_with("\x1b_G"));
@@ -1302,12 +1303,12 @@ mod tests {
 
         // The room list hidden in a narrow window: nothing of it stays.
         terminal.backend_mut().resize(50, 20);
-        app.on_event(Event::Resize(50, 20));
+        app.on_event(InputEvent::Resize(50, 20));
         frame(&mut app, &mut terminal);
         assert!(kitty_cells(terminal.backend().buffer()).is_empty());
         // Back: after a resize it is sent to the terminal again.
         terminal.backend_mut().resize(80, 30);
-        app.on_event(Event::Resize(80, 30));
+        app.on_event(InputEvent::Resize(80, 30));
         frame(&mut app, &mut terminal);
         let cells = kitty_cells(terminal.backend().buffer());
         assert_eq!(cells.len(), 2);

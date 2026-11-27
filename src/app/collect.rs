@@ -9,16 +9,19 @@
 
 use std::path::PathBuf;
 
-use crossterm::event::{KeyCode, KeyModifiers};
 use tokio::sync::oneshot;
 
 use super::App;
-use crate::catchup::{self, NoCommand, Outcome};
+#[cfg(any(not(target_family = "wasm"), test))]
+use crate::catchup::Outcome;
+use crate::catchup::{self, NoCommand};
 use crate::collect::{Cut, SUMMARY_MESSAGES, Span};
 use crate::files;
+use crate::input::{KeyCode, KeyModifiers};
 use crate::matrix::{ARCHIVE_EVENTS, Archived, CollectCmd, CollectEvent, MatrixCmd, UnreadText};
 use crate::modal::Modal;
 use crate::model::MsgKind;
+use crate::probes::Probes;
 
 /// What a click in the popup is on (see `HitId::Collect`): a row of the "how far
 /// back" list by its place, or one of these.
@@ -81,13 +84,13 @@ impl CollectState {
     }
 
     /// Takes the setting and looks its program up.
-    pub(super) fn set_summary_setting(&mut self, setting: &str) {
+    pub(super) fn set_summary_setting(&mut self, setting: &str, probes: &dyn Probes) {
         self.summary_setting = setting.trim().to_owned();
-        self.look_up();
+        self.look_up(probes);
     }
 
-    fn look_up(&mut self) {
-        self.command = catchup::choose_here(&self.summary_setting);
+    fn look_up(&mut self, probes: &dyn Probes) {
+        self.command = probes.summary(&self.summary_setting);
     }
 }
 
@@ -173,6 +176,13 @@ pub enum CatchUpStage {
         of: Of,
     },
     /// The summary, for the user alone.
+    #[cfg_attr(
+        target_family = "wasm",
+        expect(
+            dead_code,
+            reason = "made from what the summary command answers, and only the terminal runs it"
+        )
+    )]
     Done {
         summary: String,
         messages: usize,
@@ -421,7 +431,7 @@ impl App {
 
     /// Enter on the summary command row: the setting is kept, and looked up at once.
     pub(super) fn set_summary_command(&mut self, text: &str) {
-        self.collect.set_summary_setting(text);
+        self.collect.set_summary_setting(text, self.probes.as_ref());
         self.save_setting("summary_command", self.collect.summary_setting().to_owned());
         let said = match self.summary_command() {
             Ok(command) => format!(
@@ -489,7 +499,7 @@ impl App {
     /// been told why there is none.
     fn catch_up_target(&mut self) -> Option<(catchup::Command, usize)> {
         // The program may have come or gone since the setting was made.
-        self.collect.look_up();
+        self.collect.look_up(self.probes.as_ref());
         let command = match self.summary_command() {
             Ok(command) => command,
             Err(why) => {
@@ -619,7 +629,8 @@ impl App {
     /// A summary command to start, once. Also the place where a command whose popup
     /// is gone (closed, or another one took its place) is stopped: the event loop
     /// asks here on every turn.
-    pub fn take_summary_start(&mut self) -> Option<catchup::Request> {
+    #[cfg(any(not(target_family = "wasm"), test))]
+    pub(crate) fn take_summary_start(&mut self) -> Option<catchup::Request> {
         let wanted = match (&self.modal, &self.collect.running) {
             (Some(Modal::Collect(Popup::CatchUp(popup))), Some((running, _))) => {
                 matches!(popup.stage, CatchUpStage::Summarising { run, .. } if run == *running)
@@ -641,7 +652,8 @@ impl App {
     }
 
     /// The summary command has ended.
-    pub fn on_summary(&mut self, done: catchup::Done) {
+    #[cfg(any(not(target_family = "wasm"), test))]
+    pub(crate) fn on_summary(&mut self, done: catchup::Done) {
         self.dirty = true;
         if !matches!(&self.collect.running, Some((running, _)) if *running == done.id) {
             return;
@@ -755,7 +767,7 @@ impl App {
                 let page = popup.page.saturating_sub(1).max(1) as isize;
                 #[expect(
                     clippy::wildcard_enum_match_arm,
-                    reason = "foreign crossterm::event::KeyCode"
+                    reason = "input events stand in for the terminal's (crate::input)"
                 )]
                 match code {
                     KeyCode::Esc => self.close_collect(),
@@ -833,19 +845,19 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{Event, KeyEvent};
     use tokio::sync::mpsc::UnboundedReceiver;
 
     use super::*;
     use crate::action::{Action, Pane};
-    use crate::app::ui;
+    use crate::input::{InputEvent, KeyEvent};
     use crate::matrix::{LAST_EVENTS, MatrixHandle};
     use crate::model::{Room, RoomKind};
+    use crate::ui;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
     fn app() -> (App, UnboundedReceiver<MatrixCmd>) {
@@ -890,7 +902,8 @@ mod tests {
     /// A summary command that is never started: `sh` is on every machine the tests
     /// run on, and only looked up.
     fn with_command(app: &mut App) {
-        app.collect.set_summary_setting("/bin/sh -c 'never run'");
+        app.collect
+            .set_summary_setting("/bin/sh -c 'never run'", app.probes.as_ref());
         assert!(app.summary_command().is_ok());
     }
 
@@ -1180,7 +1193,7 @@ mod tests {
         assert!(app.toast.clone().unwrap().0.contains("summary_command"));
 
         app.collect
-            .set_summary_setting("no-such-summary-program-anywhere");
+            .set_summary_setting("no-such-summary-program-anywhere", app.probes.as_ref());
         app.perform(Action::CatchUp);
         assert!(app.modal.is_none());
         assert!(app.toast.clone().unwrap().0.contains("was not found"));

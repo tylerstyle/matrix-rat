@@ -7,6 +7,8 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+use super::{TempAudio, extension};
+
 /// How the names of our own files start: nothing else in the folder is touched.
 const SOUND: &str = "play-";
 const SOCKET: &str = "ipc-";
@@ -14,19 +16,6 @@ const VOICE: &str = "voice-";
 /// A unix socket's address holds 108 bytes, the closing zero included; some room is
 /// kept.
 const MAX_SOCKET_PATH: usize = 100;
-
-/// A downloaded sound in a file of its own while it plays: owner-only, gone when this
-/// is dropped.
-pub struct TempAudio {
-    path: PathBuf,
-}
-
-/// Hand-written: the path names the user's runtime folder.
-impl std::fmt::Debug for TempAudio {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("TempAudio")
-    }
-}
 
 impl TempAudio {
     /// Writes `bytes` to a new file in `dir` (made if need be, owner-only), named
@@ -67,36 +56,11 @@ impl TempAudio {
         }
         Err(last)
     }
-
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
 }
 
 impl Drop for TempAudio {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
-    }
-}
-
-/// The ending of a file of the stated type: one of a fixed few, `audio` for anything
-/// else. The players look at what is in the file, not at its name.
-pub fn extension(mime: Option<&str>) -> &'static str {
-    let essence = mime
-        .and_then(|mime| mime.split(';').next())
-        .map(|mime| mime.trim().to_ascii_lowercase());
-    match essence.as_deref() {
-        Some("audio/ogg" | "audio/x-ogg" | "application/ogg" | "audio/vorbis") => "ogg",
-        Some("audio/opus") => "opus",
-        Some("audio/mpeg" | "audio/mp3" | "audio/x-mp3" | "audio/mpeg3") => "mp3",
-        Some("audio/mp4" | "audio/x-m4a" | "audio/m4a") => "m4a",
-        Some("audio/aac" | "audio/x-aac" | "audio/aacp") => "aac",
-        Some("audio/flac" | "audio/x-flac") => "flac",
-        Some("audio/wav" | "audio/x-wav" | "audio/wave" | "audio/vnd.wave") => "wav",
-        Some("audio/webm") => "webm",
-        Some("audio/3gpp") => "3gp",
-        Some("audio/amr") => "amr",
-        _ => "audio",
     }
 }
 
@@ -136,8 +100,8 @@ fn random_hex() -> String {
         .map(|()| u64::from_ne_bytes(bytes))
         .unwrap_or_else(|_| {
             use std::hash::BuildHasher;
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            let nanos = crate::time::SystemTime::now()
+                .duration_since(crate::time::UNIX_EPOCH)
                 .map_or(0, |since| since.as_nanos());
             std::hash::RandomState::new().hash_one((nanos, std::process::id()))
         });
@@ -221,28 +185,6 @@ mod tests {
         let link = root.0.join("link");
         std::os::unix::fs::symlink(&dir, &link).unwrap();
         assert!(TempAudio::create(&link, None, b"x").is_err());
-    }
-
-    #[test]
-    fn endings_come_from_a_fixed_list() {
-        for (mime, ending) in [
-            (Some("audio/ogg"), "ogg"),
-            (Some("AUDIO/OGG; codecs=opus"), "ogg"),
-            (Some("audio/opus"), "opus"),
-            (Some("audio/mpeg"), "mp3"),
-            (Some("audio/mp4"), "m4a"),
-            (Some("audio/x-m4a"), "m4a"),
-            (Some("audio/aac"), "aac"),
-            (Some("audio/flac"), "flac"),
-            (Some("audio/x-wav"), "wav"),
-            (Some("audio/webm"), "webm"),
-            (Some("audio/ogg/../../x"), "audio"),
-            (Some("text/x-shellscript"), "audio"),
-            (Some(""), "audio"),
-            (None, "audio"),
-        ] {
-            assert_eq!(extension(mime), ending, "{mime:?}");
-        }
     }
 
     #[test]

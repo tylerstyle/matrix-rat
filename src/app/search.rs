@@ -2,10 +2,9 @@
 //! contains the text, Enter and the arrows step through the others, and stepping past
 //! the oldest loaded one loads older history and keeps looking.
 
-use crossterm::event::{KeyCode, KeyModifiers};
-
 use super::App;
 use crate::action::Pane;
+use crate::input::{KeyCode, KeyModifiers};
 use crate::lineedit::{EditKeys, LineEdit};
 use crate::matrix::MatrixCmd;
 use crate::modal::Modal;
@@ -449,15 +448,15 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{Event, KeyEvent};
 
     use super::*;
     use crate::action::Action;
+    use crate::input::{InputEvent, KeyEvent};
     use crate::matrix::{MatrixEvent, MatrixHandle};
     use crate::model::{ItemRef, Message, Room};
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
     fn message(id: &str, body: &str) -> Message {
@@ -661,13 +660,13 @@ mod tests {
 
     #[test]
     fn the_wheel_steps_through_the_matches() {
-        use crossterm::event::{MouseEvent, MouseEventKind};
+        use crate::input::{MouseEvent, MouseEventKind};
         let (mut app, _commands) = app_with(&["rat one", "x", "rat two", "y", "rat three"]);
         app.timeline.reached_start = true;
         app.perform(Action::Search);
         type_text(&mut app, "rat");
         let wheel = |kind| {
-            Event::Mouse(MouseEvent {
+            InputEvent::Mouse(MouseEvent {
                 kind,
                 column: 10,
                 row: 10,
@@ -742,7 +741,7 @@ mod tests {
         app.perform(Action::Search);
         type_text(&mut app, "ANN");
         assert_eq!(bar(&app).total, 1);
-        app.on_event(Event::Paste("\u{1b}[31m x\nsecond".into()));
+        app.on_event(InputEvent::Paste("\u{1b}[31m x\nsecond".into()));
         assert_eq!(bar(&app).query, "ANN[31m x");
         // Typed control characters never get into the text.
         app.on_event(key(KeyCode::Char('\u{202e}')));
@@ -760,16 +759,17 @@ mod tests {
 
     #[test]
     fn search_bar_edits_mid_text_and_clicks_to_place() {
-        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use crate::input::{MouseButton, MouseEvent, MouseEventKind};
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
         let (mut app, _commands) = app_with(&["rat alpha", "rat three"]);
         app.timeline.reached_start = true;
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
-        let ctrl = |c: char| Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
-        let ctrl_key = |code: KeyCode| Event::Key(KeyEvent::new(code, KeyModifiers::CONTROL));
-        let alt = |c: char| Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT));
+        let ctrl =
+            |c: char| InputEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+        let ctrl_key = |code: KeyCode| InputEvent::Key(KeyEvent::new(code, KeyModifiers::CONTROL));
+        let alt = |c: char| InputEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT));
 
         app.perform(Action::Search);
         type_text(&mut app, "rat👍🏽 typo");
@@ -801,7 +801,7 @@ mod tests {
                     .map(|byte| ((crate::text::width(&line[..byte]) - 1) as u16, r as u16))
             })
             .unwrap();
-        app.on_event(Event::Mouse(MouseEvent {
+        app.on_event(InputEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: col + 3, // after "rat", before " alpha"
             row,

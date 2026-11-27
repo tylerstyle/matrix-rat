@@ -163,6 +163,15 @@ mod tests {
 
     use crate::action::{Action, Pane};
     use crate::app::App;
+    use crate::input::{InputEvent, KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> InputEvent {
+        key_mod(code, KeyModifiers::NONE)
+    }
+
+    fn key_mod(code: KeyCode, mods: KeyModifiers) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, mods))
+    }
 
     fn render(app: &mut App, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -377,10 +386,8 @@ mod tests {
     #[test]
     #[ignore = "writes docs/screenshots"]
     fn write_screenshots() {
-        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/screenshots");
         std::fs::create_dir_all(&dir).unwrap();
-        let key = |code| Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
 
         // The main view, with room previews and a picture.
         let mut app = App::demo();
@@ -723,7 +730,6 @@ mod tests {
 
     #[test]
     fn keybinds_editor_and_vim_help() {
-        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
         let mut app = App::demo();
         app.perform(Action::OpenSettings);
         // Move to Setting::Keys and press Enter to open the key-bindings editor.
@@ -731,25 +737,16 @@ mod tests {
         insta::assert_snapshot!("keybinds_editor", render(&mut app, 100, 30));
 
         // Select "Next pane" (Tab) -> Capture -> press Ctrl-Q -> no, press Alt-E -> conflict prompt.
-        app.on_event(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
-        app.on_event(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
-        app.on_event(Event::Key(KeyEvent::new(
-            KeyCode::Enter,
-            KeyModifiers::NONE,
-        )));
-        app.on_event(Event::Key(KeyEvent::new(
-            KeyCode::Char('e'),
-            KeyModifiers::ALT,
-        )));
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Enter));
+        app.on_event(key_mod(KeyCode::Char('e'), KeyModifiers::ALT));
         insta::assert_snapshot!("keybinds_conflict", render(&mut app, 100, 30));
 
         // Switch to vim preset, close editor, open F1 help overlay to inspect rendered vim bindings.
-        app.on_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
-        app.on_event(Event::Key(KeyEvent::new(
-            KeyCode::Right,
-            KeyModifiers::NONE,
-        )));
-        app.on_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        app.on_event(key(KeyCode::Esc));
+        app.on_event(key(KeyCode::Right));
+        app.on_event(key(KeyCode::Esc));
         app.perform(Action::ToggleHelp);
         insta::assert_snapshot!("keybinds_vim_help", render(&mut app, 100, 30));
     }
@@ -771,12 +768,7 @@ mod tests {
         render(&mut app, 100, 30);
         app.perform(Action::Search);
         for c in "cache".chars() {
-            app.on_event(crossterm::event::Event::Key(
-                crossterm::event::KeyEvent::new(
-                    crossterm::event::KeyCode::Char(c),
-                    crossterm::event::KeyModifiers::NONE,
-                ),
-            ));
+            app.on_event(key(KeyCode::Char(c)));
         }
         insta::assert_snapshot!(render(&mut app, 100, 30));
         // Small windows: it shrinks, and below a minimum it is simply not drawn.
@@ -791,12 +783,7 @@ mod tests {
         render(&mut app, 100, 30);
         app.perform(Action::OpenEmoji);
         for c in "cat".chars() {
-            app.on_event(crossterm::event::Event::Key(
-                crossterm::event::KeyEvent::new(
-                    crossterm::event::KeyCode::Char(c),
-                    crossterm::event::KeyModifiers::NONE,
-                ),
-            ));
+            app.on_event(key(KeyCode::Char(c)));
         }
         insta::assert_snapshot!(render(&mut app, 100, 30));
     }
@@ -830,12 +817,7 @@ mod tests {
         // custom emoji.
         render(&mut app, 80, 24);
         for _ in 0..2 {
-            app.on_event(crossterm::event::Event::Key(
-                crossterm::event::KeyEvent::new(
-                    crossterm::event::KeyCode::Down,
-                    crossterm::event::KeyModifiers::NONE,
-                ),
-            ));
+            app.on_event(key(KeyCode::Down));
         }
         insta::assert_snapshot!(render(&mut app, 80, 24));
     }
@@ -984,12 +966,7 @@ mod tests {
         insta::assert_snapshot!(render(&mut app, 100, 30));
         insta::assert_snapshot!("command_palette_narrow", render(&mut app, 46, 16));
         for c in "rat".chars() {
-            app.on_event(crossterm::event::Event::Key(
-                crossterm::event::KeyEvent::new(
-                    crossterm::event::KeyCode::Char(c),
-                    crossterm::event::KeyModifiers::NONE,
-                ),
-            ));
+            app.on_event(key(KeyCode::Char(c)));
         }
         insta::assert_snapshot!("command_palette_filtered", render(&mut app, 100, 30));
     }
@@ -1035,20 +1012,13 @@ mod tests {
     fn composer_completions() {
         let mut app = App::demo();
         for c in "hey @".chars() {
-            app.on_event(crossterm::event::Event::Key(
-                crossterm::event::KeyEvent::new(
-                    crossterm::event::KeyCode::Char(c),
-                    crossterm::event::KeyModifiers::NONE,
-                ),
-            ));
+            app.on_event(key(KeyCode::Char(c)));
         }
         insta::assert_snapshot!(render(&mut app, 100, 30));
     }
 
     #[test]
     fn every_key_in_the_help_can_be_reached() {
-        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-        let key = |code| Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
         let mut app = App::demo();
         let last = app.keymap.bindings().last().unwrap().description;
         // When tall enough, everything is there at once; smaller windows scroll.
@@ -1251,12 +1221,7 @@ mod tests {
         // Also exercise the completion popup across all tiny sizes.
         let mut completed = App::demo();
         for c in "@".chars() {
-            completed.on_event(crossterm::event::Event::Key(
-                crossterm::event::KeyEvent::new(
-                    crossterm::event::KeyCode::Char(c),
-                    crossterm::event::KeyModifiers::NONE,
-                ),
-            ));
+            completed.on_event(key(KeyCode::Char(c)));
         }
         for (w, h) in [
             (1, 1),

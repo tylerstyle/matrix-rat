@@ -16,6 +16,7 @@ nix-shell --run scripts/check.sh
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
+RUSTFLAGS="-D warnings" cargo check --lib --target wasm32-unknown-unknown  # the core for the browser (docs/WEB-PHASE-1.md)
 cargo deny check
 # Server-backed ignored tests (requires local dev homeserver):
 cargo test -- --ignored --test-threads=1

@@ -13,6 +13,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use super::MatrixEvent;
 use super::moderation::{self, EventSummary, PinnedCache, SummaryKind};
+use crate::rt;
 use crate::saved::{SavedDetails, SavedText};
 
 /// The most messages looked up for one request; the list asks for what it shows.
@@ -138,7 +139,7 @@ where
         sender,
         sender_id,
         kind,
-    }) = tokio::time::timeout(wait, loading).await
+    }) = rt::timeout(wait, loading).await
     else {
         return details;
     };

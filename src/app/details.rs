@@ -1,10 +1,9 @@
 //! The message details popup on `App`: opening it for the selected message, asking the
 //! worker for the message's source, and the keys and clicks inside it.
 
-use crossterm::event::{KeyCode, KeyModifiers};
-
 use super::App;
 use crate::details::{DetailsPopup, DetailsView, SourceState};
+use crate::input::{KeyCode, KeyModifiers};
 use crate::matrix::{EventSource, MatrixCmd};
 use crate::modal::Modal;
 use crate::model::ItemRef;
@@ -81,7 +80,7 @@ impl App {
         let page = popup.page.saturating_sub(1).max(1) as isize;
         #[expect(
             clippy::wildcard_enum_match_arm,
-            reason = "foreign crossterm::event::KeyCode"
+            reason = "input events stand in for the terminal's (crate::input)"
         )]
         match code {
             KeyCode::Esc => self.escape_details(),
@@ -145,19 +144,19 @@ impl App {
 mod tests {
     use super::*;
     use crate::action::Action;
-    use crate::app::ui;
     use crate::config::Config;
+    use crate::input::{InputEvent, KeyEvent};
     use crate::matrix::{MatrixEvent, MatrixHandle, RoomCategory, RoomSummary, SourceKind};
     use crate::model::{Message, MsgKind, SendState};
-    use crossterm::event::{Event, KeyEvent};
+    use crate::ui;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use tokio::sync::mpsc::UnboundedReceiver;
 
     const ROOM: &str = "!rats:example.org";
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
     fn summary(id: &str, name: &str) -> RoomSummary {

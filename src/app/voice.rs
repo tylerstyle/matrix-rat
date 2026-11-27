@@ -10,19 +10,22 @@
 use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use super::App;
 use super::attach::Scope;
-use crate::action::{Action, Pane};
-use crate::audio::record::{
-    Failure, Limits, RecordControl, RecordEvent, RecordRequest, RecordUpdate, Recording,
-};
+use crate::action::Action;
+#[cfg(any(not(target_family = "wasm"), test))]
+use crate::action::Pane;
+#[cfg(any(not(target_family = "wasm"), test))]
+use crate::audio::record::{Failure, RecordEvent, RecordUpdate, Recording};
+use crate::audio::record::{Limits, RecordControl, RecordRequest};
 use crate::audio::{self, TempAudio, recorder};
 use crate::keymap::Context;
 use crate::matrix::VoiceMeta;
+use crate::time::Instant;
 use crate::ui::Mic;
 
 /// A press on the microphone shorter than this is a click: the recording runs on until
@@ -31,6 +34,7 @@ use crate::ui::Mic;
 const HOLD: Duration = Duration::from_millis(400);
 /// What a recording is called among the waiting files; the room sees another, fixed
 /// name (the worker's).
+#[cfg(any(not(target_family = "wasm"), test))]
 pub const VOICE_NAME: &str = "Voice message";
 
 /// The recording that runs.
@@ -61,6 +65,13 @@ impl fmt::Debug for Take {
 pub enum TakePhase {
     /// The programs were started; no sound has arrived.
     Starting,
+    #[cfg_attr(
+        target_family = "wasm",
+        expect(
+            dead_code,
+            reason = "set when the terminal's recorder reports: the browser records nothing before phase 2"
+        )
+    )]
     Running,
     /// Told to end: the encoder finishes, the file is written.
     Saving,
@@ -113,6 +124,7 @@ impl VoiceNote {
 }
 
 /// Why there is no recording, in the user's words.
+#[cfg(any(not(target_family = "wasm"), test))]
 fn failure_text(failure: Failure) -> &'static str {
     match failure {
         Failure::Start => "The recorder could not be started",
@@ -174,18 +186,7 @@ impl App {
     /// What `setting` comes to on this machine as it is now. Nothing is run. Over
     /// SSH is what the player goes by too.
     fn look_for_recorder(&self, setting: &str) -> Result<recorder::Recorder, recorder::NoRecorder> {
-        #[cfg(not(test))]
-        let env = recorder::Env::here();
-        // Tests name their own machine: an empty one unless they say otherwise.
-        #[cfg(test)]
-        let env = self.audio.recorder_env.clone();
-        recorder::choose(
-            setting,
-            &recorder::Env {
-                ssh: self.audio.ssh,
-                ..env
-            },
-        )
+        self.probes.recorder(setting, self.audio.ssh)
     }
 
     /// Whether a voice message can be recorded into this chat; says why not. Where a
@@ -256,7 +257,8 @@ impl App {
     }
 
     /// A recording for the event loop to start.
-    pub(super) fn take_record_start(&mut self) -> Option<RecordRequest> {
+    #[cfg(any(not(target_family = "wasm"), test))]
+    pub(crate) fn take_record_start(&mut self) -> Option<RecordRequest> {
         self.audio.record_start.take()
     }
 
@@ -422,7 +424,7 @@ impl App {
     }
 
     /// Ends the recording and keeps nothing, at any moment of it. False if none ran.
-    pub(super) fn cancel_recording(&mut self) -> bool {
+    pub(crate) fn cancel_recording(&mut self) -> bool {
         // Not started yet: it never is.
         self.audio.record_start = None;
         let Some(take) = self.audio.take.take() else {
@@ -445,7 +447,8 @@ impl App {
         }
     }
 
-    pub(super) fn on_recording(&mut self, update: RecordUpdate) {
+    #[cfg(any(not(target_family = "wasm"), test))]
+    pub(crate) fn on_recording(&mut self, update: RecordUpdate) {
         // Of a recording given up meanwhile: a file that came with it goes with it.
         if self
             .audio
@@ -486,6 +489,7 @@ impl App {
     /// A finished recording joins the files waiting in the conversation it was begun
     /// in, also when that is not the open one any more. Where that conversation's room
     /// is gone, or the session, it is dropped, and its file with it.
+    #[cfg(any(not(target_family = "wasm"), test))]
     fn keep_recording(&mut self, scope: Scope, recording: Recording) {
         if self.logged_out || !self.rooms.iter().any(|room| room.id == scope.0) {
             return;
@@ -544,6 +548,12 @@ impl App {
         self.show_toast(said);
     }
 
+    /// For tests: the recorder is looked for on the machine `env` describes.
+    #[cfg(test)]
+    pub(crate) fn set_recorder_env(&mut self, env: recorder::Env) {
+        self.probes = Box::new(crate::probes::TestProbes { recorder_env: env });
+    }
+
     /// For tests: recording is offered, with two programs that are never started
     /// unless the test starts them.
     #[cfg(test)]
@@ -556,14 +566,13 @@ impl App {
 mod tests {
     use std::path::PathBuf;
 
-    use crossterm::event::{
-        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-    };
-
     use super::*;
     use crate::action::{Action, Pane};
     use crate::app::ComposeMode;
     use crate::audio::recorder::{Env, NoRecorder, Seen, Tool};
+    use crate::input::{
+        InputEvent, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use crate::modal::Modal;
     use crate::ui::hit::HitId;
 
@@ -609,12 +618,12 @@ mod tests {
         request.control.try_recv().ok()
     }
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
-    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> Event {
-        Event::Mouse(MouseEvent {
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> InputEvent {
+        InputEvent::Mouse(MouseEvent {
             kind,
             column,
             row,
@@ -646,8 +655,8 @@ mod tests {
         format!("{}", terminal.backend())
     }
 
-    fn alt_m() -> Event {
-        Event::Key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT))
+    fn alt_m() -> InputEvent {
+        InputEvent::Key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT))
     }
 
     /// A folder of programs that are never run, removed at the end.
@@ -658,8 +667,8 @@ mod tests {
             let dir = std::env::temp_dir().join(format!(
                 "matrix-rat-voice-{name}-{}-{}",
                 std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
+                crate::time::SystemTime::now()
+                    .duration_since(crate::time::UNIX_EPOCH)
                     .unwrap()
                     .as_nanos()
             ));
@@ -903,7 +912,7 @@ mod tests {
         type Way = fn(&mut App);
         let ways: [(&str, Way); 4] = [
             ("another room", |app| app.open_room(1)),
-            ("the window", |app| app.on_event(Event::FocusLost)),
+            ("the window", |app| app.on_event(InputEvent::FocusLost)),
             ("suspend", |app| app.perform(Action::Suspend)),
             ("a tick elsewhere", |app| {
                 app.active = 1;
@@ -1165,7 +1174,7 @@ mod tests {
     fn a_refused_recording_looks_at_the_machine_again() {
         let bin = Bin::new("again", &["arecord"]);
         let mut app = App::demo();
-        app.audio.recorder_env = bin.env();
+        app.set_recorder_env(bin.env());
         // Set by the event loop: there is somewhere to keep a recording.
         app.audio.dir = Some(PathBuf::from("/nonexistent/matrix-rat-voice"));
         app.perform(Action::RecordVoice);
@@ -1189,7 +1198,7 @@ mod tests {
     fn over_ssh_recording_is_refused_as_playing_is_unless_the_user_names_a_recorder() {
         let bin = Bin::new("ssh", &["arecord", "ffmpeg"]);
         let mut app = App::demo();
-        app.audio.recorder_env = bin.env();
+        app.set_recorder_env(bin.env());
         app.set_audio_recorder("auto");
         assert_eq!(app.mic_button(), Mic::Idle);
 
@@ -1226,10 +1235,10 @@ mod tests {
             "auto: no microphone found"
         );
         // No microphone is seen on this machine: with a command that is not asked.
-        app.audio.recorder_env = Env {
+        app.set_recorder_env(Env {
             seen: Seen::default(),
             ..bin.env()
-        };
+        });
         let command = format!("{} --raw", bin.0.join("my-recorder").display());
         app.set_audio_recorder(&command);
         assert_eq!(app.audio.recorder_setting_text(), command);
@@ -1275,7 +1284,10 @@ mod tests {
         assert_eq!(app.audio.recorder_setting_text(), "auto: capture + encoder");
         // Debug output names neither the setting nor the programs nor the folders.
         app.audio.recorder_setting = "/home/alice/bin/secret-recorder".to_owned();
-        app.audio.recorder_env.path = Some("/home/alice/secret-bin".into());
+        app.set_recorder_env(Env {
+            path: Some("/home/alice/secret-bin".into()),
+            ..Env::default()
+        });
         app.set_test_recorder(tool("secret-capture"), tool("secret-encoder"));
         let shown = format!("{app:?}");
         assert!(shown.contains("recorder_auto: false"), "{shown}");
@@ -1652,7 +1664,7 @@ mod tests {
     fn clicking_play_on_a_waiting_voice_note_plays_and_stops_it_without_removing_the_file() {
         use crate::audio::{Control, End, Kind, NoPlayer, PlayerEvent, PlayerUpdate};
 
-        let alt_l = || Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::ALT));
+        let alt_l = || InputEvent::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::ALT));
         let down = MouseEventKind::Down(MouseButton::Left);
 
         let dir = Bin::new("preview", &[]);
@@ -1760,7 +1772,7 @@ mod tests {
     fn multiple_waiting_voice_notes_can_be_played_removed_and_sent_independently() {
         use crate::audio::{Control, Kind};
 
-        let alt_l = || Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::ALT));
+        let alt_l = || InputEvent::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::ALT));
         let dir = Bin::new("multi", &[]);
         let mut app = offered();
         app.set_test_player(Kind::Other, dir.0.clone());

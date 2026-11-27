@@ -22,15 +22,14 @@ use anyhow::{Context, Result, anyhow, bail};
 use futures::{FutureExt, Stream, StreamExt, pin_mut};
 use matrix_sdk::deserialized_responses::{DeviceLinkProblem, VerificationLevel, VerificationState};
 use matrix_sdk::ruma::events::room::message::{MessageType, RoomMessageEventContent};
-use matrix_sdk::ruma::{EventId, RoomId, UserId};
-use matrix_sdk::{Client, Room, RoomState};
+use matrix_sdk::ruma::{EventId, UserId};
+use matrix_sdk::{Client, Room};
 use matrix_sdk_ui::eyeball_im::{Vector, VectorDiff};
 use matrix_sdk_ui::timeline::{
     MsgLikeKind, RoomExt, Timeline, TimelineFocus, TimelineItem, TimelineItemContent,
 };
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::watch;
-use tokio::task::{JoinHandle, JoinSet};
 
 use super::MatrixEvent;
 use super::paging::{self, PageError};
@@ -38,6 +37,8 @@ use super::safety::IgnoredSet;
 use crate::agent::proto::{self, Msg};
 use crate::logsafe;
 use crate::model::Shield;
+use crate::rt::{self, JoinHandle, JoinSet};
+use crate::time::Instant;
 
 /// The newest messages of a watched room that are told on every change.
 pub const WATCH_TAIL: usize = 100;
@@ -261,7 +262,7 @@ impl Agent {
 
     /// The room a request is for: one the account is in, and nothing else.
     fn room(&self, room_id: &str) -> Result<Room> {
-        joined_room(&self.client, &self.left, room_id)
+        super::left::joined_room(&self.client, &self.left, room_id)
     }
 
     /// The room, unless as much is running already as may run at once.
@@ -340,26 +341,9 @@ impl Agent {
         };
         let events = self.events.clone();
         let ignored = self.ignored.clone();
-        let watcher = tokio::spawn(watch_room(room, room_id.clone(), events, ignored));
+        let watcher = rt::spawn(watch_room(room, room_id.clone(), events, ignored));
         self.watchers.insert(room_id, watcher);
     }
-}
-
-/// The room with this id, if the account is in it (and has not left it in this
-/// session, whatever a late sync answer makes it look like).
-pub(super) fn joined_room(
-    client: &Client,
-    left: &super::left::LeftRooms,
-    room_id: &str,
-) -> Result<Room> {
-    let id = RoomId::parse(room_id).map_err(|_| anyhow!("invalid room id"))?;
-    let room = client
-        .get_room(&id)
-        .ok_or_else(|| anyhow!("this room is not known"))?;
-    if room.state() != RoomState::Joined || left.gone(&room) {
-        bail!("the account is not in this room");
-    }
-    Ok(room)
 }
 
 /// A room's live timeline for looking at: with what was said in threads, and without
@@ -373,7 +357,7 @@ async fn open(room: &Room) -> Result<Timeline> {
             hide_threaded_events: false,
         })
         .build();
-    tokio::time::timeout(OPEN_TIMEOUT, build)
+    rt::timeout(OPEN_TIMEOUT, build)
         .await
         .map_err(|_| anyhow!("opening the room's messages timed out"))?
         .context("could not open the room's messages")
@@ -389,7 +373,7 @@ fn content_of(text: &str) -> Result<RoomMessageEventContent> {
 /// the caller wants to know now, not to have it tried again later.
 async fn send_text(room: &Room, text: &str) -> Result<String> {
     let content = content_of(text)?;
-    let sent = tokio::time::timeout(SEND_TIMEOUT, room.send(content))
+    let sent = rt::timeout(SEND_TIMEOUT, room.send(content))
         .await
         .map_err(|_| anyhow!("timed out; the message may or may not have been sent"))?
         .context("could not send")?;
@@ -409,7 +393,7 @@ async fn read_latest(
     let own = room.own_user_id().to_owned();
     let (mut items, changes) = timeline.subscribe().await;
     pin_mut!(changes);
-    let give_up = tokio::time::Instant::now() + READ_BUDGET;
+    let give_up = Instant::now() + READ_BUDGET;
     let mut pages = 0;
     let mut done = false;
     loop {
@@ -425,8 +409,8 @@ async fn read_latest(
             return Ok(found);
         }
         pages += 1;
-        let limit_at = give_up.min(tokio::time::Instant::now() + PAGE_TIMEOUT);
-        match tokio::time::timeout_at(limit_at, paging::backwards(&timeline, PAGE)).await {
+        let limit_at = give_up.min(Instant::now() + PAGE_TIMEOUT);
+        match rt::timeout_at(limit_at, paging::backwards(&timeline, PAGE)).await {
             Ok(Ok(reached_start)) => done = reached_start,
             // All caches were cleared after a panic: the next page is of them.
             Ok(Err(PageError::Panicked { cleared: true })) => {}
@@ -437,7 +421,7 @@ async fn read_latest(
             Err(_) => done = true,
         }
         // What was loaded reaches the timeline a moment later.
-        if let Ok(Some(diffs)) = tokio::time::timeout(SETTLE, changes.next()).await {
+        if let Ok(Some(diffs)) = rt::timeout(SETTLE, changes.next()).await {
             for diff in diffs {
                 diff.apply(&mut items);
             }
@@ -472,7 +456,7 @@ async fn watch_room(
     // would all look new: older ones are loaded first until a message is there (a
     // page may hold none: who joined, what was set), within a few pages and a short
     // time, so that what is told first is what the room holds.
-    let give_up = tokio::time::Instant::now() + WATCH_LOAD_BUDGET;
+    let give_up = Instant::now() + WATCH_LOAD_BUDGET;
     for _ in 0..WATCH_LOAD_PAGES {
         while let Some(Some(diffs)) = changes.next().now_or_never() {
             for diff in diffs {
@@ -485,7 +469,7 @@ async fn watch_room(
             break;
         }
         let page = paging::backwards(&timeline, PAGE);
-        let done = match tokio::time::timeout_at(give_up, page).await {
+        let done = match rt::timeout_at(give_up, page).await {
             Ok(Ok(reached_start)) => reached_start,
             // All caches were cleared after a panic: the next page is of them.
             Ok(Err(PageError::Panicked { cleared: true })) => false,
@@ -497,7 +481,7 @@ async fn watch_room(
         };
         // What was loaded reaches the timeline a moment later, also when it was
         // all the room has.
-        if let Ok(Some(diffs)) = tokio::time::timeout(SETTLE, changes.next()).await {
+        if let Ok(Some(diffs)) = rt::timeout(SETTLE, changes.next()).await {
             for diff in diffs {
                 diff.apply(&mut items);
             }
@@ -781,6 +765,8 @@ fn warning(shield: Shield) -> &'static str {
 mod tests {
     use std::time::Duration;
 
+    use matrix_sdk::RoomState;
+    use matrix_sdk::ruma::RoomId;
     use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
     use super::*;

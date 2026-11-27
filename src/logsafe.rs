@@ -16,7 +16,9 @@ use std::sync::Arc;
 
 use matrix_sdk::ruma::api::error::Error as ServerError;
 
-use crate::matrix::{KeyringError, PageError};
+#[cfg(not(target_family = "wasm"))]
+use crate::matrix::KeyringError;
+use crate::matrix::PageError;
 
 /// The reduced form of an error, safe to log. Small and `Copy`, so it can be made in
 /// the log line itself.
@@ -156,6 +158,12 @@ fn recognise(err: &(dyn Error + 'static)) -> Option<Why> {
     if let Some(err) = find::<matrix_sdk_ui::timeline::Error>(err) {
         return Some(timeline(err));
     }
+    // In the browser an SDK error reaches `anyhow` as a copy, which knows what this
+    // function made of the original (see `crate::matrix::sdk_error`).
+    #[cfg(target_family = "wasm")]
+    if let Some(err) = find::<crate::matrix::CopiedError>(err) {
+        return Some(err.why());
+    }
     if let Some(err) = find::<std::io::Error>(err) {
         return Some(Why::Io(err.kind()));
     }
@@ -167,19 +175,22 @@ fn recognise(err: &(dyn Error + 'static)) -> Option<Why> {
     if let Some(PageError::Panicked { .. }) = find::<PageError>(err) {
         return Some(Why::Word("SDK panicked"));
     }
-    if let Some(err) = find::<tokio::task::JoinError>(err) {
+    if let Some(err) = find::<crate::rt::JoinError>(err) {
         return Some(Why::Word(if err.is_panic() {
             "task panicked"
         } else {
             "task cancelled"
         }));
     }
-    if find::<tokio::time::error::Elapsed>(err).is_some() {
+    if find::<crate::rt::Elapsed>(err).is_some() {
         return Some(TIMED_OUT);
     }
+    // D-Bus, file watches and the keyring are the terminal's alone.
+    #[cfg(not(target_family = "wasm"))]
     if let Some(err) = find::<zbus::Error>(err) {
         return Some(dbus(err));
     }
+    #[cfg(not(target_family = "wasm"))]
     if let Some(err) = find::<notify::Error>(err) {
         #[expect(clippy::wildcard_enum_match_arm, reason = "foreign notify::ErrorKind")]
         let why = match &err.kind {
@@ -190,6 +201,7 @@ fn recognise(err: &(dyn Error + 'static)) -> Option<Why> {
         };
         return Some(why);
     }
+    #[cfg(not(target_family = "wasm"))]
     if let Some(err) = find::<KeyringError>(err) {
         return Some(Why::Word(match err {
             KeyringError::Unavailable(_) => "keyring unavailable",
@@ -277,9 +289,14 @@ fn network(err: &matrix_sdk::reqwest::Error) -> Why {
             code: None,
         };
     }
+    #[cfg(not(target_family = "wasm"))]
+    let connect = err.is_connect();
+    // reqwest in the browser (over `fetch`) does not tell a failed connection apart.
+    #[cfg(target_family = "wasm")]
+    let connect = false;
     Why::Network(if err.is_timeout() {
         "timed out"
-    } else if err.is_connect() {
+    } else if connect {
         "no connection"
     } else if err.is_body() || err.is_decode() {
         "broken answer"
@@ -304,6 +321,7 @@ fn timeline(err: &matrix_sdk_ui::timeline::Error) -> Why {
 }
 
 /// D-Bus errors can carry the bus address and the other side's own words.
+#[cfg(not(target_family = "wasm"))]
 fn dbus(err: &zbus::Error) -> Why {
     #[expect(clippy::wildcard_enum_match_arm, reason = "foreign zbus::Error")]
     match err {
@@ -377,6 +395,16 @@ mod tests {
         for private in ["alice", "secret", "example.org", "session.json", "draft"] {
             assert!(!text.contains(private), "{private} in {text}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_timeout_and_a_task_that_gave_no_output_are_named_by_a_word() {
+        let late = crate::rt::timeout(std::time::Duration::ZERO, std::future::pending::<()>());
+        let err = anyhow::Error::from(late.await.unwrap_err()).context("!secret:example.org");
+        assert_eq!(kind_any(&err), TIMED_OUT);
+        let task = crate::rt::spawn(std::future::pending::<()>());
+        task.abort();
+        assert_eq!(kind(&task.await.unwrap_err()), Why::Word("task cancelled"));
     }
 
     #[test]

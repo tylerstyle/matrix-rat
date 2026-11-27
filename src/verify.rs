@@ -1,12 +1,13 @@
 //! What the UI knows about encryption: this device's status, a running device
 //! verification, and the state of the popup that shows it.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::lineedit::LineEdit;
 use crate::matrix::{
     BackupStatus, DeviceTrust, Identity, RecoveryStatus, Security, VerifyStage, VerifyUpdate,
 };
+use crate::time::Instant;
 
 /// After the popup's buttons appear or change, clicks and Enter are ignored this long,
 /// so that a key or click meant for what was there before cannot answer what is there

@@ -1,15 +1,14 @@
 //! Room management on `App`: joining, direct chats, creating, inviting, leaving, and
 //! the room info view. The popups' state lives in `crate::manage`.
 
-use std::time::{Duration, Instant};
-
-use crossterm::event::{KeyCode, KeyModifiers};
+use std::time::Duration;
 
 use super::{
     App, PathCompleteResult, bump_search_gen, complete_path_field, dropped_single_image_path,
     search_debounce_deadline, take_due_search_debounce, validate_avatar_path,
 };
 use crate::action::{Action, Pane};
+use crate::input::{KeyCode, KeyModifiers};
 use crate::lineedit::{EditKeys, LineEdit};
 use crate::manage::{
     Address, BanPrompt, Click, Confirm, FIELD_MAX, InfoPopup, InfoRow, NAME_MAX, NewPopup, Pending,
@@ -24,6 +23,7 @@ use crate::matrix::{
 use crate::modal::Modal;
 use crate::model::{MsgKind, RoomKind};
 use crate::text::sanitize_line;
+use crate::time::Instant;
 
 /// A room that was joined or created shows up in the room list a moment later. Longer
 /// than this and opening it by itself would come as a surprise.
@@ -378,7 +378,7 @@ impl App {
             let mut entered = false;
             #[expect(
                 clippy::wildcard_enum_match_arm,
-                reason = "foreign crossterm::event::KeyCode"
+                reason = "input events stand in for the terminal's (crate::input)"
             )]
             match code {
                 KeyCode::Up | KeyCode::BackTab => popup.step(-1),
@@ -402,7 +402,7 @@ impl App {
         if popup.stage == Stage::Browse {
             #[expect(
                 clippy::wildcard_enum_match_arm,
-                reason = "foreign crossterm::event::KeyCode"
+                reason = "input events stand in for the terminal's (crate::input)"
             )]
             match code {
                 KeyCode::Up => {
@@ -453,7 +453,7 @@ impl App {
         if popup.stage == Stage::Preview {
             #[expect(
                 clippy::wildcard_enum_match_arm,
-                reason = "foreign crossterm::event::KeyCode"
+                reason = "input events stand in for the terminal's (crate::input)"
             )]
             match code {
                 KeyCode::Tab | KeyCode::Down => {
@@ -494,7 +494,7 @@ impl App {
         if search_stage && !popup.user_results.is_empty() {
             #[expect(
                 clippy::wildcard_enum_match_arm,
-                reason = "foreign crossterm::event::KeyCode"
+                reason = "input events stand in for the terminal's (crate::input)"
             )]
             match code {
                 KeyCode::Down => {
@@ -516,7 +516,7 @@ impl App {
         }
         #[expect(
             clippy::wildcard_enum_match_arm,
-            reason = "foreign crossterm::event::KeyCode"
+            reason = "input events stand in for the terminal's (crate::input)"
         )]
         match code {
             KeyCode::Tab | KeyCode::Down => popup.step(1),
@@ -605,11 +605,11 @@ impl App {
         }
     }
 
-    pub(super) fn dir_search_debounce_deadline(&self) -> Option<tokio::time::Instant> {
+    pub fn dir_search_debounce_deadline(&self) -> Option<Instant> {
         search_debounce_deadline(self.dir_search_debounce)
     }
 
-    pub(super) fn tick_dir_search(&mut self) {
+    pub fn tick_dir_search(&mut self) {
         if take_due_search_debounce(&mut self.dir_search_debounce) {
             self.dispatch_armed_dir_search();
         }
@@ -1172,7 +1172,7 @@ impl App {
         if let Some(chooser) = &mut info.role_chooser {
             #[expect(
                 clippy::wildcard_enum_match_arm,
-                reason = "foreign crossterm::event::KeyCode"
+                reason = "input events stand in for the terminal's (crate::input)"
             )]
             match code {
                 KeyCode::Up => chooser.step(-1),
@@ -1199,7 +1199,7 @@ impl App {
         let blind = info.typing_blind();
         #[expect(
             clippy::wildcard_enum_match_arm,
-            reason = "foreign crossterm::event::KeyCode"
+            reason = "input events stand in for the terminal's (crate::input)"
         )]
         match code {
             KeyCode::F(4) if mods.is_empty() => self.close_manage(),
@@ -2690,7 +2690,7 @@ impl App {
                 let len = RoomJoinRule::EDITABLE.len() as isize;
                 #[expect(
                     clippy::wildcard_enum_match_arm,
-                    reason = "foreign crossterm::event::KeyCode"
+                    reason = "input events stand in for the terminal's (crate::input)"
                 )]
                 match code {
                     KeyCode::Up | KeyCode::Char('k') if code == KeyCode::Up || plain => {
@@ -2710,7 +2710,7 @@ impl App {
                 let len = RoomHistory::ALL.len() as isize;
                 #[expect(
                     clippy::wildcard_enum_match_arm,
-                    reason = "foreign crossterm::event::KeyCode"
+                    reason = "input events stand in for the terminal's (crate::input)"
                 )]
                 match code {
                     KeyCode::Up | KeyCode::Char('k') if code == KeyCode::Up || plain => {
@@ -2734,7 +2734,7 @@ impl App {
             {
                 #[expect(
                     clippy::wildcard_enum_match_arm,
-                    reason = "foreign crossterm::event::KeyCode"
+                    reason = "input events stand in for the terminal's (crate::input)"
                 )]
                 match code {
                     KeyCode::Tab if mods.is_empty() => {
@@ -2776,7 +2776,7 @@ impl App {
                 let btn_stops: &[usize] = if has_avatar { &[1, 2, 3] } else { &[1, 3] };
                 #[expect(
                     clippy::wildcard_enum_match_arm,
-                    reason = "foreign crossterm::event::KeyCode"
+                    reason = "input events stand in for the terminal's (crate::input)"
                 )]
                 match code {
                     KeyCode::Tab if mods.is_empty() && *focus == 0 && !path.is_empty() => {
@@ -2814,7 +2814,7 @@ impl App {
                 if !can_edit_addresses {
                     #[expect(
                         clippy::wildcard_enum_match_arm,
-                        reason = "foreign crossterm::event::KeyCode"
+                        reason = "input events stand in for the terminal's (crate::input)"
                     )]
                     match code {
                         KeyCode::Up | KeyCode::Char('k') if code == KeyCode::Up || plain => {
@@ -2837,7 +2837,7 @@ impl App {
                 let btn_stops: &[usize] = if has_canonical { &[1, 2, 3] } else { &[1, 2] };
                 #[expect(
                     clippy::wildcard_enum_match_arm,
-                    reason = "foreign crossterm::event::KeyCode"
+                    reason = "input events stand in for the terminal's (crate::input)"
                 )]
                 match code {
                     KeyCode::Tab if mods.is_empty() => {
@@ -2909,7 +2909,7 @@ impl App {
                 let max_sel = rows + 1;
                 #[expect(
                     clippy::wildcard_enum_match_arm,
-                    reason = "foreign crossterm::event::KeyCode"
+                    reason = "input events stand in for the terminal's (crate::input)"
                 )]
                 match code {
                     KeyCode::Up | KeyCode::Char('k') if code == KeyCode::Up || plain => {
@@ -3568,9 +3568,9 @@ fn display_user_label(name: &str, user_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::ui;
+    use crate::input::{InputEvent, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
     use crate::matrix::{MatrixEvent, MatrixHandle, RoomCategory, RoomSummary};
-    use crossterm::event::{Event, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+    use crate::ui;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use tokio::sync::mpsc::UnboundedReceiver;
@@ -3578,16 +3578,16 @@ mod tests {
     const ROOM: &str = "!rats:example.org";
     const CHAT: &str = "!bob:example.org";
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
-    fn ctrl(c: char) -> Event {
-        Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL))
+    fn ctrl(c: char) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL))
     }
 
-    fn click(column: u16, row: u16) -> Event {
-        Event::Mouse(MouseEvent {
+    fn click(column: u16, row: u16) -> InputEvent {
+        InputEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column,
             row,
@@ -3781,7 +3781,7 @@ mod tests {
         }
         // A member's row takes Del only without Ctrl or Alt.
         select(&mut app, InfoRow::Member(2));
-        app.on_event(Event::Key(KeyEvent::new(
+        app.on_event(InputEvent::Key(KeyEvent::new(
             KeyCode::Delete,
             KeyModifiers::CONTROL,
         )));
@@ -3862,7 +3862,7 @@ mod tests {
         find(&screen(&mut app, &mut terminal), "not a room address");
         // A pasted link, as it is.
         app.on_event(ctrl('u'));
-        app.on_event(Event::Paste(
+        app.on_event(InputEvent::Paste(
             "https://matrix.to/#/#new:example.org?via=example.org\n".into(),
         ));
         assert!(new_popup(&app).error.is_none());
@@ -4474,7 +4474,7 @@ mod tests {
         assert_eq!(info(&app).room_id, ROOM);
         assert_eq!(sent(&mut commands).len(), 1);
         // The wheel scrolls the view without touching what is behind it.
-        app.on_event(Event::Mouse(MouseEvent {
+        app.on_event(InputEvent::Mouse(MouseEvent {
             kind: MouseEventKind::ScrollDown,
             column: 50,
             row: 15,
@@ -4602,7 +4602,7 @@ mod tests {
         // helpers. What is typed is validated before it is sent anywhere.
         let (mut app, mut terminal, mut commands) = connected();
         app.perform(Action::Manage(Click::Stage(Stage::Join)));
-        app.on_event(Event::Paste("#room:example.org\u{1b}[2J".into()));
+        app.on_event(InputEvent::Paste("#room:example.org\u{1b}[2J".into()));
         app.on_event(key(KeyCode::Enter));
         assert!(sent(&mut commands).is_empty());
         let text = screen(&mut app, &mut terminal);
@@ -5021,7 +5021,7 @@ mod tests {
             info_mut(&mut app).select(row);
             assert_eq!(info(&app).current(), Some(row));
             app.on_event(key(KeyCode::Enter));
-            app.on_event(Event::Paste("y".repeat(FIELD_MAX + 10)));
+            app.on_event(InputEvent::Paste("y".repeat(FIELD_MAX + 10)));
             let typed = info(&app).editing.as_ref().unwrap().1.len();
             assert_eq!(
                 typed,
@@ -5148,7 +5148,7 @@ mod tests {
         // Every one-line input of the forms, by paste and by key.
         for stage in [Stage::Join, Stage::Direct, Stage::Create] {
             app.perform(Action::Manage(Click::Stage(stage)));
-            app.on_event(Event::Paste(format!("{nasty}\nsecond line")));
+            app.on_event(InputEvent::Paste(format!("{nasty}\nsecond line")));
             for c in nasty.chars() {
                 app.on_event(key(KeyCode::Char(c)));
             }
@@ -5190,13 +5190,13 @@ mod tests {
 
         // The room info: the member filter and the name while it is edited.
         with_info(&mut app, &mut commands);
-        app.on_event(Event::Paste(nasty.into()));
+        app.on_event(InputEvent::Paste(nasty.into()));
         assert_eq!(info(&app).filter, clean);
         app.on_event(ctrl('u'));
         info_mut(&mut app).select(InfoRow::Name);
         assert_eq!(info(&app).current(), Some(InfoRow::Name));
         app.on_event(key(KeyCode::Enter));
-        app.on_event(Event::Paste(nasty.into()));
+        app.on_event(InputEvent::Paste(nasty.into()));
         for c in nasty.chars() {
             app.on_event(key(KeyCode::Char(c)));
         }
@@ -5216,7 +5216,7 @@ mod tests {
         app.on_event(key(KeyCode::Esc));
         app.perform(Action::Manage(Click::Stage(Stage::Join)));
         for _ in 0..40 {
-            app.on_event(Event::Paste("x".repeat(100)));
+            app.on_event(InputEvent::Paste("x".repeat(100)));
         }
         assert_eq!(new_popup(&app).address.len(), FIELD_MAX);
     }
@@ -5376,8 +5376,8 @@ mod tests {
     #[test]
     fn manage_forms_and_room_info_edit_mid_text_and_click_to_place() {
         let (mut app, mut terminal, mut commands) = connected();
-        let ctrl_key = |code: KeyCode| Event::Key(KeyEvent::new(code, KeyModifiers::CONTROL));
-        let alt = |c: char| Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT));
+        let ctrl_key = |code: KeyCode| InputEvent::Key(KeyEvent::new(code, KeyModifiers::CONTROL));
+        let alt = |c: char| InputEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT));
 
         // 1. NewPopup (Stage::Create): mid-text edit and click-to-place incl. #alias offset.
         app.on_event(ctrl('n'));
@@ -6282,7 +6282,7 @@ mod tests {
         }));
 
         // Alt-B opens BanPrompt and sends BanKnock with optional reason.
-        app.on_event(Event::Key(KeyEvent::new(
+        app.on_event(InputEvent::Key(KeyEvent::new(
             KeyCode::Char('b'),
             KeyModifiers::ALT,
         )));
@@ -6309,7 +6309,7 @@ mod tests {
         let text = screen(&mut app, &mut terminal);
         find(&text, "not allowed to decline");
 
-        app.on_event(Event::Key(KeyEvent::new(
+        app.on_event(InputEvent::Key(KeyEvent::new(
             KeyCode::Char('b'),
             KeyModifiers::ALT,
         )));
@@ -6538,7 +6538,7 @@ mod tests {
         // Drag-and-drop paste fills path and sets ready notice even if non-empty.
         app.on_event(key(KeyCode::Enter));
         let pasted = format!("'{}'\n", pic_file.display());
-        app.on_event(Event::Paste(pasted));
+        app.on_event(InputEvent::Paste(pasted));
         let text = screen(&mut app, &mut terminal);
         find(&text, "Image file ready");
         app.on_event(key(KeyCode::Enter));

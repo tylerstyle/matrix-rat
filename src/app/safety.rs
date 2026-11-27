@@ -1,8 +1,7 @@
 //! UI state and handlers for ignoring users, reporting content, and finding people.
 
-use std::time::Instant;
-
-use crossterm::event::{KeyCode, KeyModifiers};
+use crate::input::{KeyCode, KeyModifiers};
+use crate::time::Instant;
 
 use super::{bump_search_gen, search_debounce_deadline, take_due_search_debounce};
 use crate::lineedit::EditKeys;
@@ -318,11 +317,11 @@ impl super::App {
         }
     }
 
-    pub(super) fn user_search_debounce_deadline(&self) -> Option<tokio::time::Instant> {
+    pub fn user_search_debounce_deadline(&self) -> Option<Instant> {
         search_debounce_deadline(self.user_search_debounce)
     }
 
-    pub(super) fn tick_user_search(&mut self) {
+    pub fn tick_user_search(&mut self) {
         if !take_due_search_debounce(&mut self.user_search_debounce) {
             return;
         }
@@ -387,11 +386,12 @@ impl super::App {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
-
-    use crossterm::event::{
-        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    use crate::input::{
+        InputEvent, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
+    use crate::time::Instant;
+    use std::time::Duration;
+
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use tokio::sync::mpsc::UnboundedReceiver;
@@ -412,16 +412,16 @@ mod tests {
     const BOB: &str = "@bob:example.org";
     const CAROL: &str = "@carol:example.org";
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
-    fn key_mod(code: KeyCode, mods: KeyModifiers) -> Event {
-        Event::Key(KeyEvent::new(code, mods))
+    fn key_mod(code: KeyCode, mods: KeyModifiers) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, mods))
     }
 
-    fn click(col: u16, row: u16) -> Event {
-        Event::Mouse(MouseEvent {
+    fn click(col: u16, row: u16) -> InputEvent {
+        InputEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: col,
             row,

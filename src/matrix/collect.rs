@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use futures::{FutureExt, StreamExt, pin_mut};
 use matrix_sdk::ruma::events::fully_read::FullyReadEventContent;
 use matrix_sdk::ruma::{OwnedUserId, UserId};
@@ -39,14 +39,15 @@ use matrix_sdk_ui::timeline::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::watch;
-use tokio::task::JoinSet;
 
-use super::MatrixEvent;
 use super::paging::{self, PageError};
 use super::safety::IgnoredSet;
+use super::{MatrixEvent, SdkResult};
 use crate::collect::{self, Cut, Span};
 use crate::logsafe;
 use crate::model::{Message, Namesakes};
+use crate::rt::{self, JoinSet};
+use crate::time::Instant;
 
 /// The most events one archive takes; of a room with more, the newest.
 pub const ARCHIVE_EVENTS: usize = 5_000;
@@ -326,7 +327,7 @@ impl Collector {
                 dir,
                 room_name,
             } => {
-                let room = super::agent::joined_room(&self.client, &self.left, &room_id);
+                let room = super::left::joined_room(&self.client, &self.left, &room_id);
                 let events = self.events.clone();
                 let ignored = self.ignored.clone();
                 self.running.spawn(async move {
@@ -350,7 +351,7 @@ impl Collector {
     /// Collects the text for a summary that `wanted` says, and answers with
     /// [`CollectEvent::Unread`].
     fn summary_text(&mut self, request: u64, room_id: &str, wanted: Wanted) {
-        let room = super::agent::joined_room(&self.client, &self.left, room_id);
+        let room = super::left::joined_room(&self.client, &self.left, room_id);
         let events = self.events.clone();
         let ignored = self.ignored.clone();
         self.running.spawn(async move {
@@ -364,7 +365,7 @@ impl Collector {
                     Wanted::Last(count) => last(&room, count, &ignored, &progress).await,
                 }
             };
-            let result = match tokio::time::timeout(UNREAD_BUDGET, work).await {
+            let result = match rt::timeout(UNREAD_BUDGET, work).await {
                 Ok(result) => result,
                 Err(_) => Err(anyhow!("loading the messages took too long")),
             };
@@ -422,10 +423,10 @@ async fn open(room: &Room) -> Result<Timeline> {
         })
         .track_read_marker_and_receipts(TimelineReadReceiptTracking::MessageLikeEvents)
         .build();
-    tokio::time::timeout(OPEN_TIMEOUT, build)
+    rt::timeout(OPEN_TIMEOUT, build)
         .await
         .map_err(|_| anyhow!("opening the room's messages timed out"))?
-        .context("could not open the room's messages")
+        .sdk_context("could not open the room's messages")
 }
 
 type Items = Vector<Arc<TimelineItem>>;
@@ -560,12 +561,12 @@ where
     S: futures::Stream<Item = Vec<VectorDiff<T>>>,
 {
     let ask = usize::from(ask);
-    let mut deadline = tokio::time::Instant::now() + times.page;
+    let mut deadline = Instant::now() + times.page;
     let mut waiting_second = false;
     let mut saw_start_wait = false;
 
     loop {
-        let Ok(next) = tokio::time::timeout_at(deadline, changes.as_mut().next()).await else {
+        let Ok(next) = rt::timeout_at(deadline, changes.as_mut().next()).await else {
             return true;
         };
         let Some(diffs) = next else {
@@ -599,7 +600,7 @@ where
                 *lazy_possible = false;
                 waiting_second = true;
                 anchor = PageAnchor::of(items);
-                deadline = deadline.min(tokio::time::Instant::now() + times.more);
+                deadline = deadline.min(Instant::now() + times.more);
                 continue;
             }
             if added_events > 0 {
@@ -610,7 +611,7 @@ where
             }
             if has_start && !saw_start_wait {
                 saw_start_wait = true;
-                deadline = deadline.min(tokio::time::Instant::now() + times.more);
+                deadline = deadline.min(Instant::now() + times.more);
             }
             continue;
         }
@@ -630,7 +631,7 @@ where
             // for the event-cache task's disk or network batch before asking again.
             waiting_second = true;
             anchor = PageAnchor::of(items);
-            deadline = deadline.min(tokio::time::Instant::now() + times.more);
+            deadline = deadline.min(Instant::now() + times.more);
             continue;
         }
 
@@ -824,7 +825,7 @@ async fn load(
         |loaded| progress.tell(loaded),
         enough,
         |ask| async move {
-            match tokio::time::timeout(PAGE_TIMEOUT, paging::backwards(timeline, ask)).await {
+            match rt::timeout(PAGE_TIMEOUT, paging::backwards(timeline, ask)).await {
                 Ok(Ok(reached_start)) => Some(reached_start),
                 // All caches were cleared after a panic: the timeline's reset comes through
                 // its changes like any page, and the next page, of the cleared caches, is
@@ -1174,8 +1175,13 @@ async fn archive(
     // The file first: a folder that cannot be written to is said at once, not after
     // the whole room was loaded. Nothing of it stays if this is given up.
     let name = crate::archive::file_name(&room_name, now.date_naive());
-    let file = tokio::task::spawn_blocking(move || crate::files::NewFile::create(&dir, &name))
-        .await
+    #[cfg(not(target_family = "wasm"))]
+    let file =
+        tokio::task::spawn_blocking(move || crate::files::NewFile::create(&dir, &name)).await;
+    // The browser has the page's thread only: the work is done in place.
+    #[cfg(target_family = "wasm")]
+    let file = Ok::<_, rt::JoinError>(crate::files::NewFile::create(&dir, &name));
+    let file = file
         .map_err(|_| anyhow!("could not write to the folder"))?
         .map_err(|err| anyhow!("could not write to the folder: {err}"))?;
     let timeline = open(room).await?;
@@ -1195,14 +1201,18 @@ async fn archive(
     let stop = Arc::new(AtomicBool::new(false));
     // Given up while the file is written: the writing ends at the next message.
     let _guard = StopOnDrop(stop.clone());
-    let written = tokio::task::spawn_blocking(move || {
+    let work = move || {
         let messages = || messages_of(&items, &own, &ignored);
         write(
             file, messages, &members, since, cut, &room_name, &now, &stop,
         )
-    })
-    .await
-    .map_err(|_| anyhow!("writing the file failed"))?;
+    };
+    #[cfg(not(target_family = "wasm"))]
+    let written = tokio::task::spawn_blocking(work).await;
+    // The browser has the page's thread only: the work is done in place.
+    #[cfg(target_family = "wasm")]
+    let written = Ok::<_, rt::JoinError>(work());
+    let written = written.map_err(|_| anyhow!("writing the file failed"))?;
     let (path, messages) = written.map_err(|err| anyhow!("could not write the file: {err}"))?;
     Ok(Archived {
         path,
@@ -1264,6 +1274,13 @@ fn pairs(members: &[(String, String)]) -> impl Iterator<Item = (&str, &str)> {
 /// it. Only those: a message between newer ones stays whatever time it claims, so
 /// nobody can keep their message out of an archive with a forged date.
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(
+    target_family = "wasm",
+    expect(
+        unreachable_code,
+        reason = "the browser's NewFile is never made (crate::files), so nothing gets past the writer"
+    )
+)]
 fn write<Tz: chrono::TimeZone, I: Iterator<Item = Message>>(
     file: crate::files::NewFile,
     messages: impl Fn() -> I,

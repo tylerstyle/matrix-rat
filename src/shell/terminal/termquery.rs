@@ -7,9 +7,10 @@
 //! arrive in between) and before anything else reads the terminal's input.
 
 use std::os::fd::RawFd;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::theme::ColorScheme;
+use crate::time::Instant;
 
 /// Five questions in one write:
 /// - the kitty graphics protocol, by asking it to check a one-pixel picture (`i=31`);

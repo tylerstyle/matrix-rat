@@ -45,6 +45,7 @@ impl Threads {
 
     /// Replaces a waiting thread draft with `replacement()` if it still holds `/upload`,
     /// removing the entry when that leaves it empty.
+    #[cfg(any(not(target_family = "wasm"), test))]
     pub(super) fn replace_draft_if_upload(
         &mut self,
         room_id: &str,
@@ -185,7 +186,7 @@ impl ThreadView {
 
 impl App {
     /// Whether the messages pane shows a thread.
-    pub fn thread_open(&self) -> bool {
+    pub(crate) fn thread_open(&self) -> bool {
         self.threads.open.is_some()
     }
 
@@ -584,8 +585,9 @@ impl App {
                 | MatrixCmd::DirectoryNextPage { .. }
                 | MatrixCmd::CancelDirectorySearch
                 | MatrixCmd::ListThreads { .. }
-                | MatrixCmd::Agent(_)
                 | MatrixCmd::Collect(_) => false,
+                #[cfg(not(target_family = "wasm"))]
+                MatrixCmd::Agent(_) => false,
             }
         {
             return command;
@@ -665,20 +667,20 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{
-        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-    };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use tokio::sync::mpsc::UnboundedReceiver;
 
     use super::*;
     use crate::action::Action;
+    use crate::input::{
+        InputEvent, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use crate::matrix::{MatrixEvent, MatrixHandle, SyncStatus};
     use crate::model::Room;
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
     fn type_text(app: &mut App, text: &str) {
@@ -709,7 +711,7 @@ mod tests {
         let before = &line[..line.find(needle).unwrap()];
         // The backend prints a quote before each row; wide characters shift nothing here.
         let column = crate::text::width(before) as u16 - 1;
-        app.on_event(Event::Mouse(MouseEvent {
+        app.on_event(InputEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: column + 1,
             row: row as u16,

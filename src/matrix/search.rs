@@ -4,10 +4,18 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::Path;
 
+#[cfg(any(not(target_family = "wasm"), test))]
 use chrono::{DateTime, Local};
+#[cfg(not(target_family = "wasm"))]
 use futures::StreamExt;
+#[cfg(any(not(target_family = "wasm"), test))]
+use matrix_sdk::RoomState;
 use matrix_sdk::deserialized_responses::TimelineEvent;
-use matrix_sdk::event_cache::{RedecryptorReport, RoomEventCache};
+#[cfg(not(target_family = "wasm"))]
+use matrix_sdk::event_cache::RedecryptorReport;
+use matrix_sdk::event_cache::RoomEventCache;
+#[cfg(any(not(target_family = "wasm"), test))]
+use matrix_sdk::ruma::OwnedEventId;
 use matrix_sdk::ruma::events::relation::RelationType;
 use matrix_sdk::ruma::events::room::encrypted::OriginalSyncRoomEncryptedEvent;
 use matrix_sdk::ruma::events::room::message::{
@@ -16,19 +24,25 @@ use matrix_sdk::ruma::events::room::message::{
 use matrix_sdk::ruma::events::{
     AnySyncMessageLikeEvent, AnySyncTimelineEvent, OriginalSyncMessageLikeEvent,
 };
-use matrix_sdk::ruma::{EventId, OwnedEventId, OwnedRoomId, OwnedUserId, RoomId, UserId};
-use matrix_sdk::{Client, Room, RoomState};
+use matrix_sdk::ruma::{EventId, OwnedRoomId, OwnedUserId, RoomId, UserId};
+use matrix_sdk::{Client, Room};
 use matrix_sdk_base::event_cache::store::EventCacheStoreLockState;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
 use unicode_segmentation::UnicodeSegmentation;
 
+use super::MatrixEvent;
+#[cfg(any(not(target_family = "wasm"), test))]
+use super::convert;
 use super::left::LeftRooms;
-use super::safety::{IgnoredSet, is_ignored_in};
-use super::{MatrixEvent, convert};
+use super::safety::IgnoredSet;
+#[cfg(any(not(target_family = "wasm"), test))]
+use super::safety::is_ignored_in;
+use crate::rt::{self, JoinHandle};
 
+#[cfg(any(not(target_family = "wasm"), test))]
 const SEARCH_BATCH_SIZE: usize = 16;
+#[cfg(any(not(target_family = "wasm"), test))]
 const MAX_SEARCH_RESULTS: usize = 200;
 const MAX_SNIPPET_CHARS: usize = 400;
 
@@ -54,6 +68,7 @@ impl fmt::Debug for SearchHit {
 /// joined. Called when no `RoomIndex` handles are open (startup before sync/search, and
 /// session shutdown after dropping the `Client`) because `matrix-sdk 0.19.1` keeps an
 /// in-memory `HashMap<OwnedRoomId, RoomIndex>` without a public room-removal API.
+#[cfg(not(target_family = "wasm"))]
 fn prune_search_dir(search_dir: &Path, joined_room_ids: &HashSet<String>) {
     let Ok(entries) = std::fs::read_dir(search_dir) else {
         return;
@@ -89,6 +104,7 @@ pub(super) fn joined_room_ids(client: &Client, left: &LeftRooms) -> HashSet<Stri
 }
 
 /// Prunes non-joined room search index directories using the client's restored room list.
+#[cfg(not(target_family = "wasm"))]
 pub(crate) async fn prune_stale_search_indexes(client: &Client, search_dir: &Path) {
     // Before the session: nothing was left in it yet.
     let joined = joined_room_ids(client, &LeftRooms::default());
@@ -97,10 +113,15 @@ pub(crate) async fn prune_stale_search_indexes(client: &Client, search_dir: &Pat
 
 /// [`prune_search_dir`] on the blocking threads: an index is a folder of many files,
 /// and the worker's loop must not stop for them.
+#[cfg(not(target_family = "wasm"))]
 pub(crate) async fn prune_search_dir_off_loop(search_dir: &Path, joined: HashSet<String>) {
     let search_dir = search_dir.to_owned();
     let _ = tokio::task::spawn_blocking(move || prune_search_dir(&search_dir, &joined)).await;
 }
+
+/// The browser keeps no index (no `experimental-search`): there is nothing to prune.
+#[cfg(target_family = "wasm")]
+pub(crate) async fn prune_search_dir_off_loop(_search_dir: &Path, _joined: HashSet<String>) {}
 
 pub(super) struct Searcher {
     client: Client,
@@ -118,7 +139,11 @@ impl Searcher {
         ignored: watch::Receiver<IgnoredSet>,
         left: LeftRooms,
     ) -> Self {
-        let redecrypt_task = Some(tokio::spawn(index_redecrypted(client.clone())));
+        #[cfg(not(target_family = "wasm"))]
+        let redecrypt_task = Some(rt::spawn(index_redecrypted(client.clone())));
+        // The browser keeps no index to add to.
+        #[cfg(target_family = "wasm")]
+        let redecrypt_task = None;
         Self {
             client,
             events,
@@ -135,7 +160,7 @@ impl Searcher {
         let events = self.events.clone();
         let ignored = self.ignored.clone();
         let left = self.left.clone();
-        self.task = Some(tokio::spawn(async move {
+        self.task = Some(rt::spawn(async move {
             run_search(client, events, ignored, &left, generation, query).await;
         }));
     }
@@ -167,6 +192,7 @@ impl Drop for Searcher {
 /// `RoomEventCacheUpdate`, bypassing `RoomEventCacheLinkedChunkUpdate` where
 /// the SDK's `search_indexing_task` listens. Forwarding `ResolvedUtds` reports
 /// keeps encrypted rooms searchable once keys arrive later.
+#[cfg(not(target_family = "wasm"))]
 async fn index_redecrypted(client: Client) {
     let stream = client.event_cache().subscribe_to_decryption_reports();
     tokio::pin!(stream);
@@ -289,6 +315,7 @@ async fn try_decrypt_utd(room: &Room, event: &TimelineEvent) -> Option<TimelineE
     (!decrypted.kind.is_utd()).then_some(decrypted)
 }
 
+#[cfg(not(target_family = "wasm"))]
 async fn run_search(
     client: Client,
     events: UnboundedSender<MatrixEvent>,
@@ -392,7 +419,27 @@ async fn run_search(
     });
 }
 
+/// The browser has no local index (no `experimental-search`): a search ends at once,
+/// with nothing found and a note that says why.
+#[cfg(target_family = "wasm")]
+async fn run_search(
+    _client: Client,
+    events: UnboundedSender<MatrixEvent>,
+    _ignored: watch::Receiver<IgnoredSet>,
+    _left: &LeftRooms,
+    generation: u64,
+    _query: String,
+) {
+    let _ = events.send(MatrixEvent::SearchResults {
+        generation,
+        hits: Vec::new(),
+        done: true,
+        note: Some("Searching messages is not available in the browser".to_owned()),
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(not(target_family = "wasm"), test))]
 async fn resolve_hit(
     client: &Client,
     ignored: &watch::Receiver<IgnoredSet>,
@@ -463,6 +510,7 @@ async fn resolve_hit(
     })
 }
 
+#[cfg(any(not(target_family = "wasm"), test))]
 fn replacement_target(event: &TimelineEvent) -> Option<OwnedEventId> {
     let Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(msg))) =
         event.raw().deserialize()
@@ -476,6 +524,7 @@ fn replacement_target(event: &TimelineEvent) -> Option<OwnedEventId> {
     }
 }
 
+#[cfg(any(not(target_family = "wasm"), test))]
 fn extract_thread_root(event: &TimelineEvent) -> Option<String> {
     let Ok(AnySyncTimelineEvent::MessageLike(msg)) = event.raw().deserialize() else {
         return None;
@@ -490,6 +539,7 @@ fn extract_thread_root(event: &TimelineEvent) -> Option<String> {
     thread_root_from_raw(event.raw().json().get())
 }
 
+#[cfg(any(not(target_family = "wasm"), test))]
 fn thread_root_from_raw(raw_json: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(raw_json).ok()?;
     let rel = value.get("content")?.get("m.relates_to")?;
@@ -634,6 +684,7 @@ pub(super) fn bundled_replacement(
     }
 }
 
+#[cfg(any(not(target_family = "wasm"), test))]
 async fn cached_room_name(room: &Room, cache: &mut HashMap<OwnedRoomId, String>) -> String {
     let id = room.room_id().to_owned();
     if let Some(name) = cache.get(&id) {
@@ -685,6 +736,7 @@ pub(super) async fn member_name(room: &Room, user_id: &UserId) -> String {
 
 /// Strips Tantivy query-parser syntax punctuation so partial quotes, parentheses, or URL
 /// colons still work as plain-term queries when the strict parser rejects them.
+#[cfg(any(not(target_family = "wasm"), test))]
 pub(crate) fn sanitize_query(query: &str) -> String {
     let mut out = String::with_capacity(query.len());
     let mut prev_space = true;
@@ -1018,8 +1070,8 @@ mod tests {
     fn prune_search_dir_removes_only_non_joined_room_dirs() {
         let dir = std::env::temp_dir().join(format!(
             "matrix-rat-prune-search-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            crate::time::SystemTime::now()
+                .duration_since(crate::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
@@ -1175,8 +1227,8 @@ mod tests {
             .unwrap_or_else(|_| "http://127.0.0.1:6167".to_owned());
         let token = std::env::var("MATRIX_RAT_TEST_REGISTRATION_TOKEN")
             .unwrap_or_else(|_| "devtoken".to_owned());
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let stamp = crate::time::SystemTime::now()
+            .duration_since(crate::time::UNIX_EPOCH)
             .unwrap()
             .as_millis();
         let username = format!("ratsearch{stamp}");

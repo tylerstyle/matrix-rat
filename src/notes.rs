@@ -3,8 +3,9 @@
 //! wrote when the user asked for it (see `crate::textcmd`); nothing is sent to the room.
 //!
 //! This file holds the pure parts: the notes and where they are kept, which program
-//! with which arguments, and how its output becomes text for the screen. The app's side
-//! is `app::notes`, the drawing `ui::timeline::notes`.
+//! with which arguments, and how its output becomes text for the screen. Finding the
+//! programs on this machine is in [`find`]. The app's side is `app::notes`, the
+//! drawing `ui::timeline::notes`.
 //!
 //! Transcribing is local: `"auto"` means `whisper-cli` of whisper.cpp with a model
 //! file, and where `ffmpeg` is found the sound is first made a 16 kHz mono WAV, which
@@ -13,17 +14,27 @@
 //! the user names one, and whether that is a local model or a service is theirs to
 //! decide.
 
+#[cfg(not(target_family = "wasm"))]
+mod find;
+
 use std::collections::BTreeMap;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::fmt;
-use std::io::{self, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::textcmd::{self, BadCommand, Command, Failure, MAX_OUTPUT, Step};
+use crate::storage::{Key, Removal, Storage};
+#[cfg(any(not(target_family = "wasm"), test))]
+use crate::textcmd::Failure;
+use crate::textcmd::{Command, MAX_OUTPUT, Step};
+
+#[cfg(test)]
+pub use find::translator;
+#[cfg(not(target_family = "wasm"))]
+pub use find::{transcriber_here, translator_here};
 
 /// The most notes kept; the oldest go first.
 pub const MAX_NOTES: usize = 200;
@@ -271,52 +282,33 @@ impl Notes {
             .collect()
     }
 
-    /// Writes the finished notes of `owner` to `file`, owner-only, in one step. They
-    /// are message text in plain form: only done where the user turned `keep_notes` on.
-    pub fn save(&self, file: &Path, owner: &str) -> io::Result<()> {
+    /// Writes the finished notes of `owner` to `storage` (on this system the file,
+    /// owner-only, in one step). They are message text in plain form: only done where
+    /// the user turned `keep_notes` on.
+    pub fn save(&self, storage: &dyn Storage, owner: &str) -> anyhow::Result<()> {
         let kept = FileOut {
             version: FILE_VERSION,
             owner,
             notes: self.kept(),
         };
         let json = serde_json::to_vec(&kept).map_err(io::Error::other)?;
-        let temporary = file.with_extension("json.new");
-        // A leftover of an earlier try, or anything else lying there, is not written
-        // through: the file is made anew, for the owner only.
-        let _ = std::fs::remove_file(&temporary);
-        let mut out = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temporary)?;
-        let written = out
-            .write_all(&json)
-            .and_then(|()| out.flush())
-            .and_then(|()| std::fs::rename(&temporary, file));
-        if written.is_err() {
-            let _ = std::fs::remove_file(&temporary);
-        }
-        written
+        storage.write(&Key::Notes, &json)
     }
 
-    /// Takes in the notes of `owner` from `file`, as far as they are sound: bounded in
-    /// number and size, and made safe for the screen again (the file may have been
+    /// Takes in the notes of `owner` from `storage`, as far as they are sound: bounded
+    /// in number and size, and made safe for the screen again (the file may have been
     /// written by anything). A file that is not there, not a plain file (a link is not
-    /// followed), too large, of another version or not readable gives none.
+    /// followed), too large (see `FsStorage`), of another version or not readable
+    /// gives none.
     ///
     /// A file without an owner (from before notes named their account) or belonging to
     /// another account is ignored and removed from disk, so its plain message text is
     /// never shown to the wrong person.
-    pub fn load(&mut self, file: &Path, owner: &str) {
+    pub fn load(&mut self, storage: &dyn Storage, owner: &str) {
         if owner.is_empty() {
             return;
         }
-        let plain = std::fs::symlink_metadata(file)
-            .is_ok_and(|meta| meta.file_type().is_file() && meta.len() <= MAX_FILE);
-        if !plain {
-            return;
-        }
-        let Ok(bytes) = std::fs::read(file) else {
+        let Ok(Some(bytes)) = storage.read(&Key::Notes) else {
             return;
         };
         let kept = match serde_json::from_slice::<FileIn>(&bytes) {
@@ -328,7 +320,7 @@ impl Notes {
         };
         if kept.owner.as_deref() != Some(owner) {
             tracing::debug!("dropping kept notes file without a matching owner");
-            let _ = remove_file(file);
+            let _ = storage.remove(&Key::Notes, Removal::Value);
             return;
         }
         // Only what is sound counts toward the bound, and the newest of that stay.
@@ -353,16 +345,9 @@ impl Notes {
 
 /// The file's format; a file of another is not read.
 const FILE_VERSION: u32 = 1;
-/// The largest file read: far more than `save` ever writes.
-const MAX_FILE: u64 = 16 * 1024 * 1024;
-
-/// Removes the file of kept notes (the setting was turned off). Not there: fine.
-pub fn remove_file(file: &Path) -> io::Result<()> {
-    match std::fs::remove_file(file) {
-        Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err),
-        _ => Ok(()),
-    }
-}
+/// The largest file read (by `FsStorage`): far more than `save` ever writes.
+#[cfg(any(not(target_family = "wasm"), test))]
+pub(crate) const MAX_FILE: u64 = 16 * 1024 * 1024;
 
 #[derive(Serialize)]
 struct FileOut<'a> {
@@ -412,6 +397,7 @@ pub fn clean(output: &str, one_paragraph: bool) -> String {
 
 /// What a note says of a run that brought no text; `None` where it was given up (the
 /// note goes).
+#[cfg(any(not(target_family = "wasm"), test))]
 pub fn failure_text(failure: Failure) -> Option<String> {
     match failure {
         Failure::Start => Some("the program could not be started".to_owned()),
@@ -474,50 +460,6 @@ impl NoTranscriber {
             NoTranscriber::Missing => "the program named by transcribe_command was not found",
         }
     }
-}
-
-/// The transcriber for the `transcribe_command` and `transcribe_model` settings.
-/// `"auto"` looks for `whisper-cli` (and `ffmpeg`) on `path` without running anything,
-/// and wants the model file to be there; anything else is a command line of the
-/// user's (see [`textcmd::parse`]).
-pub fn transcriber(
-    command: &str,
-    model: &str,
-    path: Option<&OsStr>,
-    home: Option<&OsStr>,
-) -> Result<Transcriber, NoTranscriber> {
-    if !crate::audio::is_auto(command) {
-        return match textcmd::parse(command, path, home) {
-            Ok((program, args)) => Ok(Transcriber::Own { program, args }),
-            Err(BadCommand::Unreadable) => Err(NoTranscriber::BadCommand),
-            Err(BadCommand::Missing) => Err(NoTranscriber::Missing),
-        };
-    }
-    let program =
-        crate::audio::find_on_path("whisper-cli", path).ok_or(NoTranscriber::NoProgram)?;
-    let model = model.trim();
-    if model.is_empty() {
-        return Err(NoTranscriber::NoModel);
-    }
-    let model = textcmd::expand_home(model, home);
-    if !model.is_absolute() || !model.is_file() {
-        return Err(NoTranscriber::ModelMissing);
-    }
-    Ok(Transcriber::Whisper {
-        program,
-        model,
-        ffmpeg: crate::audio::find_on_path("ffmpeg", path),
-    })
-}
-
-/// [`transcriber`] with this process's `PATH` and `HOME`.
-pub fn transcriber_here(command: &str, model: &str) -> Result<Transcriber, NoTranscriber> {
-    transcriber(
-        command,
-        model,
-        std::env::var_os("PATH").as_deref(),
-        std::env::var_os("HOME").as_deref(),
-    )
 }
 
 impl Transcriber {
@@ -635,31 +577,6 @@ impl NoTranslator {
     }
 }
 
-/// The translator for the `translate_command` setting: empty means none.
-pub fn translator(
-    command: &str,
-    path: Option<&OsStr>,
-    home: Option<&OsStr>,
-) -> Result<Translator, NoTranslator> {
-    if command.trim().is_empty() {
-        return Err(NoTranslator::NotSet);
-    }
-    match textcmd::parse(command, path, home) {
-        Ok((program, args)) => Ok(Translator { program, args }),
-        Err(BadCommand::Unreadable) => Err(NoTranslator::BadCommand),
-        Err(BadCommand::Missing) => Err(NoTranslator::Missing),
-    }
-}
-
-/// [`translator`] with this process's `PATH` and `HOME`.
-pub fn translator_here(command: &str) -> Result<Translator, NoTranslator> {
-    translator(
-        command,
-        std::env::var_os("PATH").as_deref(),
-        std::env::var_os("HOME").as_deref(),
-    )
-}
-
 /// The `translate_language` setting as it is handed on: one line, and the default
 /// where it is empty.
 pub fn language(setting: &str) -> String {
@@ -734,178 +651,9 @@ impl TranslateFound {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::FsStorage;
     use crate::textcmd::tests::Dir;
     use std::os::unix::fs::PermissionsExt;
-
-    fn words(step: &Step) -> Vec<String> {
-        std::iter::once(step.command.program.clone().into_os_string())
-            .chain(step.command.args.iter().cloned())
-            .map(|word| word.into_string().unwrap())
-            .collect()
-    }
-
-    #[test]
-    fn auto_wants_whisper_cli_and_a_model_and_takes_ffmpeg_where_it_is() {
-        let bin = Dir::new("notes-bin");
-        let home = Dir::new("notes-home");
-        // Never run: programs that would leave a mark if they were.
-        let mark = bin.0.join("ran");
-        let script = format!("#!/bin/sh\ntouch {}\n", mark.display());
-        let path = Some(bin.0.as_os_str());
-        let home_dir = Some(home.0.as_os_str());
-        let model = home.file("ggml-base.bin", "model", 0o600);
-        let model_text = model.display().to_string();
-
-        assert_eq!(
-            transcriber("auto", &model_text, path, home_dir),
-            Err(NoTranscriber::NoProgram)
-        );
-        bin.file("whisper-cli", &script, 0o755);
-        assert_eq!(
-            transcriber("auto", "  ", path, home_dir),
-            Err(NoTranscriber::NoModel)
-        );
-        assert_eq!(
-            transcriber("", "~/no-such-model.bin", path, home_dir),
-            Err(NoTranscriber::ModelMissing)
-        );
-        // A folder, or a path from wherever the app was started, is no model.
-        assert_eq!(
-            transcriber("auto", &home.0.display().to_string(), path, home_dir),
-            Err(NoTranscriber::ModelMissing)
-        );
-        assert_eq!(
-            transcriber("auto", "ggml-base.bin", path, home_dir),
-            Err(NoTranscriber::ModelMissing)
-        );
-
-        // Without ffmpeg the file goes to whisper-cli as it is.
-        let found = transcriber(" Auto ", "~/ggml-base.bin", path, home_dir).unwrap();
-        assert!(!found.converts() && found.one_paragraph());
-        let steps = found.steps(Path::new("/run/a/play-1.ogg"), None);
-        assert_eq!(steps.len(), 1);
-        let whisper = bin.0.join("whisper-cli").display().to_string();
-        assert_eq!(
-            words(&steps[0]),
-            [
-                whisper.as_str(),
-                "-m",
-                model_text.as_str(),
-                "-l",
-                "auto",
-                "-nt",
-                "-np",
-                "-f",
-                "/run/a/play-1.ogg"
-            ]
-        );
-        assert!(steps[0].command.stdin.is_none());
-
-        // With it, a WAV is made first and whisper-cli reads that.
-        bin.file("ffmpeg", &script, 0o755);
-        let found = transcriber("auto", &model_text, path, home_dir).unwrap();
-        assert!(found.converts());
-        let steps = found.steps(
-            Path::new("/run/a/play-1.ogg"),
-            Some(Path::new("/run/a/play-2.wav")),
-        );
-        assert_eq!(steps.len(), 2);
-        let ffmpeg = bin.0.join("ffmpeg").display().to_string();
-        assert_eq!(
-            words(&steps[0]),
-            [
-                ffmpeg.as_str(),
-                "-nostdin",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-y",
-                "-protocol_whitelist",
-                "file",
-                "-i",
-                "/run/a/play-1.ogg",
-                "-vn",
-                "-t",
-                "1800",
-                "-ar",
-                "16000",
-                "-ac",
-                "1",
-                "-c:a",
-                "pcm_s16le",
-                "-f",
-                "wav",
-                "/run/a/play-2.wav"
-            ]
-        );
-        assert_eq!(words(&steps[1]).last().unwrap(), "/run/a/play-2.wav");
-        assert!(!mark.exists(), "nothing was run");
-        assert_eq!(format!("{found:?}"), "Whisper(ffmpeg: true)");
-        assert_eq!(
-            TranscribeFound::of(&Ok(found)),
-            TranscribeFound::Whisper { ffmpeg: true }
-        );
-    }
-
-    #[test]
-    fn a_transcribe_command_of_the_users_gets_the_file_as_its_last_argument() {
-        let bin = Dir::new("notes-own");
-        bin.file("my-stt", "", 0o755);
-        let path = Some(bin.0.as_os_str());
-        // No model is asked for: the command is the user's business.
-        let found = transcriber("my-stt --lang 'de at' ; x", "", path, None).unwrap();
-        assert!(!found.converts() && !found.one_paragraph());
-        let steps = found.steps(Path::new("/run/a/play-1.ogg"), None);
-        assert_eq!(
-            words(&steps[0])[1..],
-            ["--lang", "de at", ";", "x", "/run/a/play-1.ogg"]
-        );
-        assert_eq!(format!("{found:?}"), "Own");
-        assert_eq!(
-            transcriber("'open", "", path, None),
-            Err(NoTranscriber::BadCommand)
-        );
-        assert_eq!(
-            transcriber("no-such-stt", "", path, None),
-            Err(NoTranscriber::Missing)
-        );
-    }
-
-    #[test]
-    fn a_translator_gets_the_language_in_its_arguments_and_environment_and_the_text_to_read() {
-        let bin = Dir::new("notes-trans");
-        bin.file("trans", "", 0o755);
-        let path = Some(bin.0.as_os_str());
-        assert_eq!(translator("  ", path, None), Err(NoTranslator::NotSet));
-        assert_eq!(
-            translator("'open", path, None),
-            Err(NoTranslator::BadCommand)
-        );
-        assert_eq!(
-            translator("deepl-cli", path, None),
-            Err(NoTranslator::Missing)
-        );
-        let found = translator("trans -b -t {lang} --note=to-{lang}", path, None).unwrap();
-        let step = found.step("Guten Morgen", "English");
-        assert_eq!(
-            words(&step)[1..],
-            ["-b", "-t", "English", "--note=to-English"]
-        );
-        assert_eq!(
-            step.command.env,
-            [("MATRIX_RAT_TRANSLATE_TO", "English".to_owned())]
-        );
-        assert_eq!(step.command.stdin.as_deref(), Some(&b"Guten Morgen"[..]));
-        // A very long message is cut before it is handed over.
-        let long = "ä".repeat(MAX_INPUT + 10);
-        let step = found.step(&long, "en");
-        assert_eq!(step.command.stdin.unwrap().len(), MAX_INPUT * 2);
-        assert_eq!(format!("{found:?}"), "Translator");
-
-        assert_eq!(language("  "), "en");
-        assert_eq!(language(" German \n"), "German");
-        assert_eq!(language("pt\u{1b}[31m-BR"), "pt[31m-BR");
-    }
 
     #[test]
     fn program_output_is_made_safe_tidy_and_bounded() {
@@ -1000,15 +748,16 @@ mod tests {
         notes.set("$b", NoteKind::Translation, NoteState::Running);
         notes.set("$c", NoteKind::Translation, NoteState::Failed("no".into()));
         let owner = "@alice:example.org";
+        let files = FsStorage::default().with_notes(&file);
         // Something lying where the new file is made first is not written through.
         std::fs::write(dir.0.join("notes.json.new"), b"old").unwrap();
-        notes.save(&file, owner).unwrap();
+        notes.save(&files, owner).unwrap();
         let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
         assert!(!dir.0.join("notes.json.new").exists());
 
         let mut back = Notes::default();
-        back.load(&file, owner);
+        back.load(&files, owner);
         assert_eq!(back.map.len(), 2, "only what was finished is kept");
         assert_eq!(
             back.get("$a", NoteKind::Transcript).unwrap().state,
@@ -1020,7 +769,7 @@ mod tests {
 
         // Another account's file is dropped (not loaded, and removed).
         let mut wrong = Notes::default();
-        wrong.load(&file, "@bob:example.org");
+        wrong.load(&files, "@bob:example.org");
         assert!(wrong.is_empty());
         assert!(!file.exists());
 
@@ -1031,7 +780,7 @@ mod tests {
         )
         .unwrap();
         let mut legacy = Notes::default();
-        legacy.load(&file, owner);
+        legacy.load(&files, owner);
         assert!(legacy.is_empty());
         assert!(!file.exists());
 
@@ -1048,7 +797,7 @@ mod tests {
         );
         std::fs::write(&file, json).unwrap();
         let mut back = Notes::default();
-        back.load(&file, owner);
+        back.load(&files, owner);
         // 204 of them are sound: the two that are not take nobody's place.
         assert_eq!(back.map.len(), MAX_NOTES);
         assert_eq!(
@@ -1065,20 +814,23 @@ mod tests {
         );
         std::fs::write(&file, &json).unwrap();
         let mut back = Notes::default();
-        back.load(&file, owner);
+        back.load(&files, owner);
         assert!(back.is_empty());
         assert!(file.exists());
 
         // Not JSON, or not there: no notes, no error.
         std::fs::write(&file, b"not json").unwrap();
         let mut back = Notes::default();
-        back.load(&file, owner);
-        back.load(&dir.0.join("missing.json"), owner);
+        back.load(&files, owner);
+        back.load(
+            &FsStorage::default().with_notes(dir.0.join("missing.json")),
+            owner,
+        );
         assert!(back.is_empty());
 
-        remove_file(&file).unwrap();
+        files.remove(&Key::Notes, Removal::Value).unwrap();
         assert!(!file.exists());
-        remove_file(&file).unwrap();
+        files.remove(&Key::Notes, Removal::Value).unwrap();
     }
 
     #[test]
@@ -1086,6 +838,7 @@ mod tests {
         let dir = Dir::new("notes-odd");
         let file = dir.0.join("notes.json");
         let owner = "@alice:example.org";
+        let files = FsStorage::default().with_notes(&file);
         let good = format!(
             r#"{{"version":1,"owner":"{owner}","notes":[{{"event":"$a","kind":"transcript","text":"t"}}]}}"#
         );
@@ -1102,9 +855,9 @@ mod tests {
         std::fs::write(&elsewhere, &good).unwrap();
         std::os::unix::fs::symlink(&elsewhere, &file).unwrap();
         let mut back = Notes::default();
-        back.load(&file, owner);
+        back.load(&files, owner);
         assert!(back.is_empty());
-        notes.save(&file, owner).unwrap();
+        notes.save(&files, owner).unwrap();
         assert!(
             std::fs::symlink_metadata(&file)
                 .unwrap()
@@ -1123,7 +876,7 @@ mod tests {
             .set_len(MAX_FILE + 1)
             .unwrap();
         let mut back = Notes::default();
-        back.load(&file, owner);
+        back.load(&files, owner);
         assert!(back.is_empty());
         std::fs::remove_file(&file).unwrap();
 
@@ -1131,12 +884,12 @@ mod tests {
         std::fs::create_dir(&file).unwrap();
         std::fs::write(file.join("inside"), b"kept").unwrap();
         let mut back = Notes::default();
-        back.load(&file, owner);
+        back.load(&files, owner);
         assert!(back.is_empty());
-        assert!(notes.save(&file, owner).is_err());
+        assert!(notes.save(&files, owner).is_err());
         assert_eq!(std::fs::read(file.join("inside")).unwrap(), b"kept");
         assert!(!dir.0.join("notes.json.new").exists());
-        assert!(remove_file(&file).is_err());
+        assert!(files.remove(&Key::Notes, Removal::Value).is_err());
     }
 
     #[test]
@@ -1156,10 +909,10 @@ mod tests {
         assert!(note.is_of(7) && !note.is_of(8));
         // Kept with the note.
         let dir = Dir::new("notes-source");
-        let file = dir.0.join("notes.json");
-        notes.save(&file, "@alice:example.org").unwrap();
+        let files = FsStorage::default().with_notes(dir.0.join("notes.json"));
+        notes.save(&files, "@alice:example.org").unwrap();
         let mut back = Notes::default();
-        back.load(&file, "@alice:example.org");
+        back.load(&files, "@alice:example.org");
         assert_eq!(back.get("$a", NoteKind::Translation).unwrap().source, 7);
         // One of which nothing is known is taken as it is.
         notes.set_from("$b", NoteKind::Translation, NoteState::Done("t".into()), 0);

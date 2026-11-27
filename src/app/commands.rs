@@ -831,13 +831,13 @@ mod tests {
     }
 
     mod in_the_app {
-        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
         use tokio::sync::mpsc::UnboundedReceiver;
 
         use crate::action::{Action, Pane};
         use crate::app::App;
         use crate::complete::Member;
         use crate::config::Config;
+        use crate::input::{InputEvent, KeyCode, KeyEvent, KeyModifiers};
         use crate::manage::{Confirm, InfoRow, Stage};
         use crate::matrix::{
             ManageCmd, MatrixCmd, MatrixEvent, MatrixHandle, RoomCategory, RoomSummary,
@@ -942,8 +942,8 @@ mod tests {
             app.toast.as_ref().map_or("", |(text, _)| text.as_str())
         }
 
-        fn key(code: KeyCode) -> Event {
-            Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+        fn key(code: KeyCode) -> InputEvent {
+            InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
         }
 
         #[test]
@@ -960,9 +960,7 @@ mod tests {
             assert!(app.composer.is_empty());
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
-            terminal
-                .draw(|f| crate::app::ui::draw(f, &mut app))
-                .unwrap();
+            terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
             let text = format!("{}", terminal.backend());
             assert!(text.contains("Remove this member from the room?"), "{text}");
             assert!(text.contains("Bob (@bob:example.org)"), "{text}");

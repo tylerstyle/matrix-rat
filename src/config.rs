@@ -1,10 +1,14 @@
 //! User configuration (`~/.config/matrix-rat/config.toml`). Everything is optional.
 
+#[cfg(not(target_family = "wasm"))]
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+#[cfg(not(target_family = "wasm"))]
+use crate::storage::FsStorage;
+use crate::storage::{Key, Storage};
 use crate::theme::DEFAULT_THEME;
 
 #[derive(Clone, Deserialize)]
@@ -291,13 +295,19 @@ impl Default for Config {
 impl Config {
     /// A missing file gives the defaults; a file that is not TOML at all is an error the
     /// user should see. One setting with a value we do not understand is not: see `parse`.
+    #[cfg(not(target_family = "wasm"))]
     pub fn load(path: &Path) -> Result<Config> {
-        if !path.exists() {
+        Self::load_from(&FsStorage::default().with_config(path))
+    }
+
+    /// As [`Self::load`], from where `storage` keeps the configuration.
+    pub fn load_from(storage: &dyn Storage) -> Result<Config> {
+        if !storage.exists(&Key::Config) {
             return Ok(Config::default());
         }
-        let source = std::fs::read_to_string(path)
-            .with_context(|| format!("could not read {}", path.display()))?;
-        Self::parse(&source).with_context(|| format!("invalid config {}", path.display()))
+        let source = crate::storage::read_found(storage, &Key::Config)?;
+        Self::parse(&source)
+            .with_context(|| format!("invalid config {}", storage.describe(&Key::Config)))
     }
 
     /// Parses TOML text into `Config`, keeping declaration order inside `[keys]`.
@@ -531,23 +541,19 @@ fn raw_from_serde(preset: Option<&toml::Value>, keys: Option<&toml::Value>) -> R
     raw
 }
 
-fn edit_document(path: &Path, edit: impl FnOnce(&mut toml_edit::DocumentMut)) -> Result<()> {
-    let source = match std::fs::read_to_string(path) {
-        Ok(source) => source,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(err) => return Err(err).with_context(|| format!("could not read {}", path.display())),
-    };
+/// Reads the configuration as a document (none yet: an empty one), changes it with
+/// `edit` and writes it back in one step. `toml_edit` keeps what is not changed as
+/// the user wrote it, comments included; a file that is not TOML is left alone.
+fn edit_document(
+    storage: &dyn Storage,
+    edit: impl FnOnce(&mut toml_edit::DocumentMut),
+) -> Result<()> {
+    let source = crate::storage::read_text(storage, &Key::Config)?.unwrap_or_default();
     let mut document: toml_edit::DocumentMut = source
         .parse()
-        .with_context(|| format!("invalid config {}", path.display()))?;
+        .with_context(|| format!("invalid config {}", storage.describe(&Key::Config)))?;
     edit(&mut document);
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let temporary = path.with_extension("toml.new");
-    std::fs::write(&temporary, document.to_string())
-        .and_then(|()| std::fs::rename(&temporary, path))
-        .with_context(|| format!("could not write {}", path.display()))
+    storage.write(&Key::Config, document.to_string().as_bytes())
 }
 
 fn set_value_preserving_decor(
@@ -606,20 +612,24 @@ impl Config {
 
 /// Changes one setting in the configuration file, keeping everything else in it
 /// (comments included) as it is. The file is replaced in one step.
-pub fn save_setting(path: &Path, key: &str, value: impl Into<toml_edit::Value>) -> Result<()> {
+pub fn save_setting(
+    storage: &dyn Storage,
+    key: &str,
+    value: impl Into<toml_edit::Value>,
+) -> Result<()> {
     let value = value.into();
-    edit_document(path, |document| {
+    edit_document(storage, |document| {
         set_value_preserving_decor(document.as_table_mut(), key, value);
     })
 }
 
 /// Removes one top-level setting from the configuration file if the file exists, keeping
 /// everything else (comments included) intact.
-pub fn remove_setting(path: &Path, key: &str) -> Result<()> {
-    if !path.exists() {
+pub fn remove_setting(storage: &dyn Storage, key: &str) -> Result<()> {
+    if !storage.exists(&Key::Config) {
         return Ok(());
     }
-    edit_document(path, |document| {
+    edit_document(storage, |document| {
         document.as_table_mut().remove(key);
     })
 }
@@ -627,12 +637,12 @@ pub fn remove_setting(path: &Path, key: &str) -> Result<()> {
 /// Persists key-binding changes (`preset` and/or `[keys]` action overrides) into `config.toml`
 /// via `toml_edit`, leaving unrelated keys and comments untouched.
 pub fn save_key_changes(
-    path: &Path,
+    storage: &dyn Storage,
     preset: Option<&str>,
     clear_all_keys: bool,
     changes: &[KeyOverrideEdit<'_>],
 ) -> Result<()> {
-    edit_document(path, |document| {
+    edit_document(storage, |document| {
         if clear_all_keys {
             document.remove("keys");
             document.remove("preset");
@@ -733,6 +743,11 @@ pub fn save_key_changes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The configuration in the file at `path`, as the app keeps it.
+    fn at(path: &Path) -> FsStorage {
+        FsStorage::default().with_config(path)
+    }
 
     #[test]
     fn one_bad_value_does_not_take_the_rest_of_the_file_with_it() {
@@ -855,15 +870,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("nested").join("config.toml");
         // No file yet: one is created.
-        save_setting(&path, "mouse", false).unwrap();
+        save_setting(&at(&path), "mouse", false).unwrap();
         assert!(!Config::load(&path).unwrap().mouse);
         std::fs::write(
             &path,
             "# my colours\ntheme = \"terminal\" # follows kitty\nmouse = false\n",
         )
         .unwrap();
-        save_setting(&path, "sidebar_width", 30).unwrap();
-        save_setting(&path, "theme", "gruvbox-dark").unwrap();
+        save_setting(&at(&path), "sidebar_width", 30).unwrap();
+        save_setting(&at(&path), "theme", "gruvbox-dark").unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("# my colours"), "{text}");
         assert!(text.contains("# follows kitty"), "{text}");
@@ -873,7 +888,7 @@ mod tests {
         assert!(!config.mouse);
         // A broken file is left alone.
         std::fs::write(&path, "theme = [").unwrap();
-        assert!(save_setting(&path, "mouse", true).is_err());
+        assert!(save_setting(&at(&path), "mouse", true).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "theme = [");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -900,7 +915,7 @@ mod tests {
 
         // Update settings override and add a multi-key reply override; reset help.
         save_key_changes(
-            &path,
+            &at(&path),
             Some("vim"),
             false,
             &[
@@ -935,7 +950,7 @@ mod tests {
         assert!(text.contains("reply = [\"enter\", \"R\"]"), "{text}");
 
         // Reset all removes preset and [keys] while preserving unrelated config and comments.
-        save_key_changes(&path, None, true, &[]).unwrap();
+        save_key_changes(&at(&path), None, true, &[]).unwrap();
         let reset = std::fs::read_to_string(&path).unwrap();
         assert!(reset.contains("# top comment"), "{reset}");
         assert!(reset.contains("theme = \"nord\""), "{reset}");
@@ -1030,15 +1045,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
-        remove_setting(&path, "theme_dark").unwrap();
+        remove_setting(&at(&path), "theme_dark").unwrap();
         assert!(!path.exists());
         std::fs::write(&path, "# keep\ntheme = \"rat-dark\"\n").unwrap();
-        save_setting(&path, "theme_dark", "nord").unwrap();
-        save_setting(&path, "theme_light", "gruvbox-light").unwrap();
+        save_setting(&at(&path), "theme_dark", "nord").unwrap();
+        save_setting(&at(&path), "theme_light", "gruvbox-light").unwrap();
         let loaded = Config::load(&path).unwrap();
         assert_eq!(loaded.theme_for(ColorScheme::Dark), "nord");
         assert_eq!(loaded.theme_for(ColorScheme::Light), "gruvbox-light");
-        remove_setting(&path, "theme_dark").unwrap();
+        remove_setting(&at(&path), "theme_dark").unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("# keep"), "{text}");
         let loaded = Config::load(&path).unwrap();

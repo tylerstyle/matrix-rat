@@ -25,6 +25,7 @@ use crate::notes::{
     self, NoTranscriber, NoTranslator, NoteKind, NoteState, Notes, Transcriber, Translator,
 };
 use crate::palette::{NoteCaps, NoteOffer};
+use crate::storage::{Key, Removal, Storage};
 use crate::textcmd;
 
 /// The notes, what makes them, and what is on its way.
@@ -40,8 +41,8 @@ pub struct NotesState {
     pub translate_language: String,
     /// The `keep_notes` setting.
     pub keep: bool,
-    /// Where kept notes go; `None` in the demo and in tests: nothing is written.
-    file: Option<PathBuf>,
+    /// Kept notes go to the storage; not in the demo and in tests: nothing is written.
+    stored: bool,
     /// Which account the kept notes belong to; set once logged in and cleared when the
     /// session ends. Nothing is read or written without one.
     owner: Option<String>,
@@ -52,6 +53,8 @@ pub struct NotesState {
     runs: Vec<Run>,
     /// Programs to start; the event loop takes them (see [`App::take_note_starts`]).
     starts: Vec<textcmd::Request>,
+    /// Files for converted sounds, asked of the shell (see [`App::take_wav_requests`]).
+    wavs: Vec<WavRequest>,
 }
 
 /// Before the app knows its system and its settings: nothing transcribes, nothing
@@ -67,12 +70,13 @@ impl Default for NotesState {
             translator: Err(NoTranslator::NotSet),
             translate_language: notes::DEFAULT_LANGUAGE.to_owned(),
             keep: notes::KEEP_BY_DEFAULT,
-            file: None,
+            stored: false,
             owner: None,
             dir: None,
             next_id: 0,
             runs: Vec::new(),
             starts: Vec::new(),
+            wavs: Vec::new(),
         }
     }
 }
@@ -85,11 +89,12 @@ impl fmt::Debug for NotesState {
             .field("transcriber", &self.transcriber)
             .field("translator", &self.translator)
             .field("keep", &self.keep)
-            .field("file", &self.file.is_some())
+            .field("stored", &self.stored)
             .field("owner", &self.owner.is_some())
             .field("dir", &self.dir.is_some())
             .field("runs", &self.runs)
             .field("starts", &self.starts)
+            .field("wavs", &self.wavs)
             .finish_non_exhaustive()
     }
 }
@@ -103,6 +108,13 @@ struct Run {
     kind: NoteKind,
     phase: Phase,
     /// The program's lines are joined into one paragraph (see `notes::clean`).
+    #[cfg_attr(
+        target_family = "wasm",
+        expect(
+            dead_code,
+            reason = "read when the program's output comes back: in the browser none runs"
+        )
+    )]
     one_paragraph: bool,
 }
 
@@ -120,21 +132,56 @@ impl fmt::Debug for Run {
 enum Phase {
     /// The sound's file is on its way from the worker.
     Fetching,
+    /// The sound is fetched and the program known; the shell makes the file the
+    /// converted sound goes to (see [`WavRequest`]).
+    #[cfg_attr(
+        target_family = "wasm",
+        expect(
+            dead_code,
+            reason = "read when the terminal's shell has made the file: the browser runs no programs"
+        )
+    )]
+    Converting {
+        sound: TempAudio,
+        transcriber: Transcriber,
+    },
     /// The program runs; a word on this, or dropping it, stops it.
     Running(oneshot::Sender<()>),
 }
 
+/// An empty file for a transcription's converted sound, asked of the shell: in `dir`,
+/// the private folder of sounds, next to the fetched one and under the same kind of
+/// name; it goes with the run. Answered with [`App::on_wav_file`].
+#[cfg_attr(
+    target_family = "wasm",
+    expect(
+        dead_code,
+        reason = "made into a file by the terminal's shell only: the browser runs no programs"
+    )
+)]
+pub struct WavRequest {
+    /// The run it is for.
+    pub id: u64,
+    pub dir: PathBuf,
+}
+
+/// Hand-written: the folder is in the user's runtime folder.
+impl fmt::Debug for WavRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WavRequest")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
+}
+
 impl NotesState {
-    /// For the app on this system, from the settings.
-    pub fn new(config: &crate::config::Config) -> Self {
+    /// For the app on this system, from the settings, as `probes` find the programs.
+    pub fn new(config: &crate::config::Config, probes: &dyn crate::probes::Probes) -> Self {
         Self {
-            transcriber: notes::transcriber_here(
-                &config.transcribe_command,
-                &config.transcribe_model,
-            ),
+            transcriber: probes.transcriber(&config.transcribe_command, &config.transcribe_model),
             transcribe_command: config.transcribe_command.clone(),
             transcribe_model: config.transcribe_model.clone(),
-            translator: notes::translator_here(&config.translate_command),
+            translator: probes.translator(&config.translate_command),
             translate_command: config.translate_command.clone(),
             translate_language: notes::language(&config.translate_language),
             keep: config.keep_notes,
@@ -176,9 +223,9 @@ impl NotesState {
         self.runs.iter().find(|run| run.event == event)
     }
 
-    fn save(&self) -> std::io::Result<()> {
-        match (&self.file, &self.owner, self.keep) {
-            (Some(file), Some(owner), true) => self.notes.save(file, owner),
+    fn save(&self, storage: &dyn Storage) -> anyhow::Result<()> {
+        match (self.stored, &self.owner, self.keep) {
+            (true, Some(owner), true) => self.notes.save(storage, owner),
             _ => Ok(()),
         }
     }
@@ -213,15 +260,24 @@ fn own_text(message: &Message) -> Option<String> {
 }
 
 impl App {
-    /// Where the copies of sounds go, and where notes are kept across restarts.
-    /// Notes are read only once `LoggedIn` names the account (see [`Self::load_notes`]);
-    /// a file left from when `keep_notes` was on is removed if the setting is off.
-    pub(super) fn set_note_paths(&mut self, dir: PathBuf, file: PathBuf) {
+    /// Where the copies of sounds go, and that notes are kept in the storage across
+    /// restarts. Notes are read only once `LoggedIn` names the account (see
+    /// [`Self::load_notes`]); what was kept while `keep_notes` was on is removed if
+    /// the setting is off.
+    pub fn keep_notes_stored(&mut self, dir: PathBuf) {
         self.notes.dir = Some(dir);
         if !self.notes.keep {
-            let _ = notes::remove_file(&file);
+            let _ = self.storage.remove(&Key::Notes, Removal::Value);
         }
-        self.notes.file = Some(file);
+        self.notes.stored = true;
+    }
+
+    /// For tests: notes are kept in the file `file`, the copies of sounds go to `dir`.
+    #[cfg(test)]
+    pub(super) fn set_note_paths(&mut self, dir: PathBuf, file: PathBuf) {
+        let files = self.storage.files().expect("the app's storage is files");
+        *files = std::mem::take(files).with_notes(file);
+        self.keep_notes_stored(dir);
     }
 
     /// Reads the kept notes for `owner` once the session is up. A file with no owner,
@@ -229,17 +285,18 @@ impl App {
     pub(super) fn load_notes(&mut self, owner: &str) {
         self.notes.notes.clear();
         self.notes.owner = Some(owner.to_owned());
-        if let Some(file) = &self.notes.file {
+        if self.notes.stored {
             if self.notes.keep {
-                self.notes.notes.load(file, owner);
+                self.notes.notes.load(self.storage.as_ref(), owner);
             } else {
-                let _ = notes::remove_file(file);
+                let _ = self.storage.remove(&Key::Notes, Removal::Value);
             }
         }
     }
 
     /// Programs for the event loop to start.
-    pub(super) fn take_note_starts(&mut self) -> Vec<textcmd::Request> {
+    #[cfg(any(not(target_family = "wasm"), test))]
+    pub(crate) fn take_note_starts(&mut self) -> Vec<textcmd::Request> {
         std::mem::take(&mut self.notes.starts)
     }
 
@@ -252,7 +309,7 @@ impl App {
     }
 
     /// The notes, for drawing.
-    pub fn notes(&self) -> &Notes {
+    pub(crate) fn notes(&self) -> &Notes {
         &self.notes.notes
     }
 
@@ -289,7 +346,12 @@ impl App {
     /// that was edited since or into another language than the one set, and nothing
     /// under a deleted message. A stale note is as good as none: it is not drawn, and
     /// the action makes it anew.
-    pub fn note_current(&self, message: &Message, kind: NoteKind, note: &notes::Note) -> bool {
+    pub(crate) fn note_current(
+        &self,
+        message: &Message,
+        kind: NoteKind,
+        note: &notes::Note,
+    ) -> bool {
         if message.kind == MsgKind::Redacted {
             return false;
         }
@@ -302,7 +364,7 @@ impl App {
     }
 
     /// What the action of `kind` would do with `message` now.
-    pub fn note_offer(&self, message: &Message, kind: NoteKind) -> NoteOffer {
+    pub(crate) fn note_offer(&self, message: &Message, kind: NoteKind) -> NoteOffer {
         let Some(event) = message.event_id() else {
             return NoteOffer::NotThis;
         };
@@ -345,7 +407,7 @@ impl App {
     /// What the two actions would do with the selected message, for the palette, the
     /// menu and the hints. With no message for it selected: why it is not set up, if
     /// it is not.
-    pub fn note_caps(&self) -> NoteCaps {
+    pub(crate) fn note_caps(&self) -> NoteCaps {
         let selected = self
             .timeline
             .selected
@@ -554,8 +616,11 @@ impl App {
         let run = self.notes.runs.remove(at);
         // A program not started yet goes with its request (and its files).
         self.notes.starts.retain(|request| request.id != run.id);
+        self.notes.wavs.retain(|request| request.id != run.id);
         match run.phase {
             Phase::Fetching => self.send_matrix(MatrixCmd::CancelSpeech { id: run.id }),
+            // The fetched sound's file goes with it.
+            Phase::Converting { .. } => {}
             // The program's task kills it (also if it has gone already).
             Phase::Running(stop) => {
                 let _ = stop.send(());
@@ -588,20 +653,30 @@ impl App {
     /// in memory. What runs is stopped (a sound still on its way from the worker would
     /// never come), the in-memory notes are forgotten, and the owner is cleared. The
     /// file on disk stays across a soft logout (`NeedReauth`) and is removed separately
-    /// on logout or `NeedLogin` ([`Self::remove_notes_file`]).
+    /// on `NeedLogin` ([`Self::remove_notes_file`]) or a logout ([`Self::remove_all_notes`]).
     pub(super) fn forget_notes(&mut self) {
         self.stop_notes();
         self.notes.notes.clear();
         self.notes.owner = None;
     }
 
-    /// Deletes the kept-notes file on disk (when logging out or when the profile has no
-    /// session).
+    /// Deletes the kept-notes file on disk (when the profile has no session: a login is
+    /// needed).
     pub(super) fn remove_notes_file(&mut self) {
-        if let Some(file) = &self.notes.file
-            && let Err(err) = notes::remove_file(file)
+        if self.notes.stored
+            && let Err(err) = self.storage.remove(&Key::Notes, Removal::Value)
         {
-            tracing::warn!(why = %crate::logsafe::kind(&err), "could not remove the notes");
+            tracing::warn!(why = %crate::logsafe::kind_any(&err), "could not remove the notes");
+        }
+    }
+
+    /// Removes the kept notes with whatever was left half written for them: for a
+    /// logout (see `forget_what_the_account_kept`).
+    pub(super) fn remove_all_notes(&mut self) {
+        if self.notes.stored
+            && let Err(err) = self.storage.remove(&Key::Notes, Removal::All)
+        {
+            tracing::warn!(why = %crate::logsafe::kind_any(&err), "could not remove the notes");
         }
     }
 
@@ -633,7 +708,7 @@ impl App {
 
     /// Stops every program: each is told to end (or its download given up) and its
     /// "…ing" note goes. Finished notes stay. The app ends, or the account goes.
-    pub(super) fn stop_notes(&mut self) {
+    pub(crate) fn stop_notes(&mut self) {
         let running: Vec<(String, NoteKind)> = self
             .notes
             .runs
@@ -656,47 +731,90 @@ impl App {
             return;
         };
         self.dirty = true;
-        let started = result.and_then(|sound| {
+        let ready = result.and_then(|sound| {
             let transcriber = self
                 .notes
                 .transcriber
                 .clone()
                 .map_err(|why| why.message().to_owned())?;
-            // The converted sound lies next to the fetched one, under the same kind
-            // of name, and goes with it.
-            let wav = match (&self.notes.dir, transcriber.converts()) {
-                (Some(dir), true) => Some(
-                    TempAudio::create(dir, Some("audio/wav"), &[])
-                        .map_err(|_| "it could not be put into a file".to_owned())?,
-                ),
-                _ => None,
-            };
-            let steps = transcriber.steps(sound.path(), wav.as_ref().map(TempAudio::path));
-            let (stop, cancel) = oneshot::channel();
-            let request = textcmd::Request {
-                id,
-                steps,
-                files: std::iter::once(sound).chain(wav).collect(),
-                cancel,
-            };
-            Ok((request, stop))
+            Ok((sound, transcriber))
         });
-        match started {
-            Ok((request, stop)) => {
-                self.notes.starts.push(request);
-                self.notes.runs[at].phase = Phase::Running(stop);
+        let (sound, transcriber) = match ready {
+            Ok(ready) => ready,
+            Err(why) => return self.fail_run(at, why),
+        };
+        // The converted sound lies next to the fetched one, under the same kind of
+        // name, and goes with it; its file is the shell's to make.
+        match (&self.notes.dir, transcriber.converts()) {
+            (Some(dir), true) => {
+                self.notes.wavs.push(WavRequest {
+                    id,
+                    dir: dir.clone(),
+                });
+                self.notes.runs[at].phase = Phase::Converting { sound, transcriber };
             }
-            Err(why) => {
-                let run = self.notes.runs.remove(at);
-                self.notes
-                    .notes
-                    .set(&run.event, run.kind, NoteState::Failed(why));
-            }
+            _ => self.start_transcription(at, sound, &transcriber, None),
         }
     }
 
+    /// The files for converted sounds the shell is to make, each answered with
+    /// [`Self::on_wav_file`].
+    #[cfg(any(not(target_family = "wasm"), test))]
+    pub(crate) fn take_wav_requests(&mut self) -> Vec<WavRequest> {
+        std::mem::take(&mut self.notes.wavs)
+    }
+
+    /// The shell made the file for a converted sound, or could not: the program starts,
+    /// or the note says why not.
+    #[cfg(any(not(target_family = "wasm"), test))]
+    pub(crate) fn on_wav_file(&mut self, request: WavRequest, wav: std::io::Result<TempAudio>) {
+        let Some(at) = self.notes.runs.iter().position(|run| run.id == request.id) else {
+            // Given up meanwhile: the file goes with the answer.
+            return;
+        };
+        let phase = std::mem::replace(&mut self.notes.runs[at].phase, Phase::Fetching);
+        let Phase::Converting { sound, transcriber } = phase else {
+            self.notes.runs[at].phase = phase;
+            return;
+        };
+        self.dirty = true;
+        match wav {
+            Ok(wav) => self.start_transcription(at, sound, &transcriber, Some(wav)),
+            Err(_) => self.fail_run(at, "it could not be put into a file".to_owned()),
+        }
+    }
+
+    /// The program of run `at` is to start on the fetched sound (and `wav`, the file
+    /// for the converted sound, when the transcriber converts it).
+    fn start_transcription(
+        &mut self,
+        at: usize,
+        sound: TempAudio,
+        transcriber: &Transcriber,
+        wav: Option<TempAudio>,
+    ) {
+        let steps = transcriber.steps(sound.path(), wav.as_ref().map(TempAudio::path));
+        let (stop, cancel) = oneshot::channel();
+        self.notes.starts.push(textcmd::Request {
+            id: self.notes.runs[at].id,
+            steps,
+            files: std::iter::once(sound).chain(wav).collect(),
+            cancel,
+        });
+        self.notes.runs[at].phase = Phase::Running(stop);
+    }
+
+    /// Run `at` ends before its program started: the note says why.
+    fn fail_run(&mut self, at: usize, why: String) {
+        let run = self.notes.runs.remove(at);
+        self.notes
+            .notes
+            .set(&run.event, run.kind, NoteState::Failed(why));
+    }
+
     /// A program's last word: its text becomes the note.
-    pub(super) fn on_note_done(&mut self, done: textcmd::Done) {
+    #[cfg(any(not(target_family = "wasm"), test))]
+    pub(crate) fn on_note_done(&mut self, done: textcmd::Done) {
         let Some(at) = self.notes.runs.iter().position(|run| run.id == done.id) else {
             // Stopped meanwhile.
             return;
@@ -726,8 +844,8 @@ impl App {
 
     /// The file of kept notes follows a change, where they are kept.
     fn note_kept(&mut self) {
-        if let Err(err) = self.notes.save() {
-            tracing::warn!(why = %crate::logsafe::kind(&err), "could not keep the notes");
+        if let Err(err) = self.notes.save(self.storage.as_ref()) {
+            tracing::warn!(why = %crate::logsafe::kind_any(&err), "could not keep the notes");
             self.show_toast("The notes could not be written to their file");
         }
     }
@@ -793,8 +911,9 @@ impl App {
     }
 
     fn look_up_transcriber(&mut self) {
-        self.notes.transcriber =
-            notes::transcriber_here(&self.notes.transcribe_command, &self.notes.transcribe_model);
+        self.notes.transcriber = self
+            .probes
+            .transcriber(&self.notes.transcribe_command, &self.notes.transcribe_model);
         let said = match &self.notes.transcriber {
             Ok(Transcriber::Whisper {
                 ffmpeg: Some(_), ..
@@ -812,7 +931,7 @@ impl App {
 
     pub(super) fn set_translate_command(&mut self, text: &str) {
         let setting = text.trim().to_owned();
-        self.notes.translator = notes::translator_here(&setting);
+        self.notes.translator = self.probes.translator(&setting);
         self.notes.translate_command = setting.clone();
         self.save_setting("translate_command", setting);
         let said = match &self.notes.translator {
@@ -840,13 +959,13 @@ impl App {
     pub(super) fn toggle_keep_notes(&mut self) {
         self.notes.keep = !self.notes.keep;
         self.save_setting("keep_notes", self.notes.keep);
-        let done = match (&self.notes.file, self.notes.keep) {
-            (Some(_), true) => self.notes.save(),
-            (Some(file), false) => notes::remove_file(file),
-            (None, _) => Ok(()),
+        let done = match (self.notes.stored, self.notes.keep) {
+            (true, true) => self.notes.save(self.storage.as_ref()),
+            (true, false) => self.storage.remove(&Key::Notes, Removal::Value),
+            (false, _) => Ok(()),
         };
         if let Err(err) = done {
-            tracing::warn!(why = %crate::logsafe::kind(&err), "could not write or remove the notes");
+            tracing::warn!(why = %crate::logsafe::kind_any(&err), "could not write or remove the notes");
             self.show_toast("The file of notes could not be written or removed");
         }
     }
@@ -871,9 +990,6 @@ impl App {
 mod tests {
     use std::sync::Arc;
 
-    use crossterm::event::{
-        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-    };
     use matrix_sdk::ruma::events::room::MediaSource;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -881,14 +997,17 @@ mod tests {
 
     use super::*;
     use crate::action::{Action, Pane};
+    use crate::input::{
+        InputEvent, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use crate::matrix::{MatrixEvent, MatrixHandle, SyncStatus};
     use crate::model::{Attachment, AudioMeta, ItemRef, MediaKind, Room, RoomKind};
     use crate::textcmd::tests::Dir;
     use crate::textcmd::{Done, Failure, Output};
     use crate::ui::hit::HitId;
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
     fn voice(id: &str) -> Message {
@@ -983,13 +1102,17 @@ mod tests {
     }
 
     /// The worker's answer with the sound's file; the program's request, as the event
-    /// loop would take it.
+    /// loop would take it (once it made the converted sound's file, as the shell does).
     fn fetched(app: &mut App, id: u64, dir: &Dir) -> textcmd::Request {
         let file = TempAudio::create(dir.0.as_path(), Some("audio/ogg"), b"OggS").unwrap();
         app.on_matrix(MatrixEvent::SpeechFetched {
             id,
             result: Ok(file),
         });
+        for request in app.take_wav_requests() {
+            let wav = TempAudio::create(&request.dir, Some("audio/wav"), &[]);
+            app.on_wav_file(request, wav);
+        }
         let mut starts = app.take_note_starts();
         assert_eq!(starts.len(), 1);
         starts.remove(0)
@@ -1017,6 +1140,57 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| crate::ui::draw(frame, app)).unwrap();
         format!("{}", terminal.backend())
+    }
+
+    #[test]
+    fn the_file_for_the_converted_sound_is_asked_of_the_shell() {
+        let dir = Dir::new("notes-wav");
+        let (mut app, _commands) = app_with(vec![voice("v1")], &dir, true);
+        let sounds = |dir: &Dir| std::fs::read_dir(dir.0.as_path()).unwrap().count();
+        select(&mut app, 0);
+        app.perform(Action::Transcribe);
+        let file = TempAudio::create(dir.0.as_path(), Some("audio/ogg"), b"OggS").unwrap();
+        app.on_matrix(MatrixEvent::SpeechFetched {
+            id: 1,
+            result: Ok(file),
+        });
+        // The app makes no file: the shell does, in the folder of sounds.
+        assert_eq!(sounds(&dir), 1);
+        let mut wavs = app.take_wav_requests();
+        assert_eq!(wavs.len(), 1);
+        assert_eq!((wavs[0].id, wavs[0].dir.as_path()), (1, dir.0.as_path()));
+        assert!(app.take_note_starts().is_empty());
+        // It could not: the note says so, and the fetched sound goes.
+        app.on_wav_file(wavs.remove(0), Err(std::io::Error::other("no room for it")));
+        assert_eq!(
+            note(&app, "$v1", NoteKind::Transcript),
+            Some(NoteState::Failed("it could not be put into a file".into()))
+        );
+        assert!(app.take_note_starts().is_empty());
+        assert_eq!(sounds(&dir), 0);
+
+        // Stopped while the file is made: nothing is asked any more, nothing starts,
+        // and a file made after all goes with the answer.
+        app.perform(Action::Transcribe);
+        let file = TempAudio::create(dir.0.as_path(), Some("audio/ogg"), b"OggS").unwrap();
+        app.on_matrix(MatrixEvent::SpeechFetched {
+            id: 2,
+            result: Ok(file),
+        });
+        app.on_event(key(KeyCode::Esc));
+        assert_eq!(note(&app, "$v1", NoteKind::Transcript), None);
+        assert!(app.take_wav_requests().is_empty());
+        assert_eq!(sounds(&dir), 0);
+        let late = TempAudio::create(dir.0.as_path(), Some("audio/wav"), &[]).unwrap();
+        app.on_wav_file(
+            WavRequest {
+                id: 2,
+                dir: dir.0.clone(),
+            },
+            Ok(late),
+        );
+        assert!(app.take_note_starts().is_empty());
+        assert_eq!(sounds(&dir), 0);
     }
 
     #[test]
@@ -1536,7 +1710,7 @@ mod tests {
                 })
         };
         let click = |app: &mut App, (column, row): (u16, u16)| {
-            app.on_event(Event::Mouse(MouseEvent {
+            app.on_event(InputEvent::Mouse(MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column,
                 row,
@@ -1948,7 +2122,7 @@ mod tests {
                 .collect()
         };
         let mouse = |app: &mut App, kind: MouseEventKind, (column, row): (u16, u16)| {
-            app.on_event(Event::Mouse(MouseEvent {
+            app.on_event(InputEvent::Mouse(MouseEvent {
                 kind,
                 column,
                 row,
@@ -2031,7 +2205,10 @@ mod tests {
             translate_language: "-x".into(),
             ..Default::default()
         };
-        assert_eq!(NotesState::new(&config).translate_language, "en");
+        assert_eq!(
+            NotesState::new(&config, &crate::probes::TestProbes::default()).translate_language,
+            "en"
+        );
     }
 
     #[tokio::test]

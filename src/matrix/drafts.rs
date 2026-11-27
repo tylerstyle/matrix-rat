@@ -7,6 +7,8 @@ use matrix_sdk::ruma::{EventId, OwnedEventId};
 use matrix_sdk::{Client, ComposerDraft, ComposerDraftType, Room};
 use matrix_sdk_base::StateStoreDataKey;
 
+use super::SdkResult;
+
 fn thread_root(thread: Option<&str>) -> Result<Option<OwnedEventId>> {
     thread
         .map(|root| EventId::parse(root).map_err(|_| anyhow!("invalid event id")))
@@ -18,7 +20,7 @@ fn thread_root(thread: Option<&str>) -> Result<Option<OwnedEventId>> {
 pub async fn save(room: &Room, thread: Option<&str>, text: String) -> Result<()> {
     let root = thread_root(thread)?;
     if text.is_empty() {
-        room.clear_composer_draft(root.as_deref()).await?;
+        room.clear_composer_draft(root.as_deref()).await.sdk()?;
     } else {
         // Always a new message: an edit is never stored, and of a reply only the text
         // is (the UI does not restore what it answered).
@@ -28,7 +30,9 @@ pub async fn save(room: &Room, thread: Option<&str>, text: String) -> Result<()>
             draft_type: ComposerDraftType::NewMessage,
             attachments: Vec::new(),
         };
-        room.save_composer_draft(draft, root.as_deref()).await?;
+        room.save_composer_draft(draft, root.as_deref())
+            .await
+            .sdk()?;
     }
     Ok(())
 }
@@ -36,7 +40,7 @@ pub async fn save(room: &Room, thread: Option<&str>, text: String) -> Result<()>
 /// The stored draft; empty if there is none.
 pub async fn load(room: &Room, thread: Option<&str>) -> Result<String> {
     let root = thread_root(thread)?;
-    let draft = room.load_composer_draft(root.as_deref()).await?;
+    let draft = room.load_composer_draft(root.as_deref()).await.sdk()?;
     Ok(draft
         // We never store an edit; one would not be text for a new message.
         .filter(|draft| !matches!(draft.draft_type, ComposerDraftType::Edit { .. }))

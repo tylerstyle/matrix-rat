@@ -2,11 +2,11 @@
 
 use std::ops::Deref;
 
-use crossterm::event::{KeyCode, KeyModifiers};
 use unicode_segmentation::UnicodeSegmentation;
 
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::input::{KeyCode, KeyModifiers};
 use crate::text::{sanitize_line, unsafe_char, width};
 
 /// Result of applying a key, paste, or pointer action to a [`LineEdit`].
@@ -522,7 +522,7 @@ impl LineEdit {
         let alt = mods.contains(KeyModifiers::ALT);
         #[expect(
             clippy::wildcard_enum_match_arm,
-            reason = "foreign crossterm::event::KeyCode"
+            reason = "input events stand in for the terminal's (crate::input)"
         )]
         match code {
             KeyCode::Char('b') if alt && !ctrl => self.word_left(),
@@ -666,7 +666,7 @@ mod tests {
 
     #[test]
     fn a_secret_is_pasted_as_it_is_and_typed_without_copies() {
-        use crossterm::event::{KeyCode, KeyModifiers};
+        use crate::input::{KeyCode, KeyModifiers};
         let mut field = super::LineEdit::secret();
         // Spaces at the ends are part of a passphrase; only the first line counts,
         // and control characters are left out.

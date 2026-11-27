@@ -27,7 +27,9 @@ use tokio::sync::mpsc::UnboundedSender;
 use super::MatrixEvent;
 use super::left::LeftRooms;
 use super::manage::{ManageEvent, failed};
+use crate::rt;
 use crate::text::{sanitize, sanitize_line, truncate};
+use crate::time::Instant;
 
 /// The most rooms of one space that are listed or worked with: a space can name any
 /// number of them.
@@ -340,7 +342,7 @@ pub(super) async fn hierarchy_names(client: &Client, space: &Room) -> Named {
 
 /// `hierarchy_names` of the space `space_id`, given `within` for all of it.
 async fn names_within(client: &Client, space_id: &RoomId, within: Duration) -> Named {
-    let deadline = tokio::time::Instant::now() + within;
+    let deadline = Instant::now() + within;
     let mut named = Named::new();
     let mut from = None;
     for _ in 0..HIERARCHY_PAGES {
@@ -348,7 +350,7 @@ async fn names_within(client: &Client, space_id: &RoomId, within: Duration) -> N
         request.max_depth = Some(UInt::from(1u32));
         request.limit = Some(UInt::from(HIERARCHY_PAGE));
         request.from = from.take();
-        let response = match tokio::time::timeout_at(deadline, client.send(request)).await {
+        let response = match rt::timeout_at(deadline, client.send(request)).await {
             Ok(Ok(response)) => response,
             Ok(Err(err)) => {
                 tracing::warn!(why = %crate::logsafe::kind(&err), "could not list the rooms of a space");
@@ -893,7 +895,7 @@ mod tests {
         )
         .await;
         let client = fake::client(&server).await;
-        let started = std::time::Instant::now();
+        let started = crate::time::Instant::now();
         let named = names_within(
             &client,
             &RoomId::parse(SPACE).unwrap(),

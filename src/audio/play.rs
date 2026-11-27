@@ -7,10 +7,9 @@
 //! this task is dropped (the runtime shutting down); the kernel kills it when the app
 //! dies any other way. It is always waited for, so it does not stay a zombie.
 
-use std::fmt;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -22,7 +21,7 @@ use tokio::time::{Instant, MissedTickBehavior};
 
 use super::child::Group;
 use super::ipc::{self, Lines, Said};
-use super::{Player, TempAudio};
+use super::{Control, End, Player, PlayerEvent, PlayerUpdate, Reported, Request};
 
 /// How long mpv gets to open its control socket, and how often it is tried.
 const CONNECT_TIME: Duration = Duration::from_secs(5);
@@ -31,95 +30,6 @@ const CONNECT_STEP: Duration = Duration::from_millis(50);
 const REPORT_STEP: Duration = Duration::from_millis(250);
 /// A command mpv does not take within this ends the talk with it.
 const WRITE_TIME: Duration = Duration::from_secs(1);
-
-/// What the app asks of a running player.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Control {
-    /// Pause, or go on (mpv).
-    TogglePause,
-    /// Jump by this many seconds, back where negative (mpv).
-    Seek(i32),
-    Stop,
-}
-
-/// How a player ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum End {
-    /// By itself, after playing.
-    Finished,
-    /// With an error, or it could not be started at all.
-    Failed,
-    /// It was told to stop.
-    Stopped,
-}
-
-/// What mpv said last.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Reported {
-    pub position: Option<Duration>,
-    pub paused: bool,
-    /// The real length, which the sender may not have stated.
-    pub length: Option<Duration>,
-}
-
-impl Reported {
-    fn take(&mut self, said: Said) {
-        match said {
-            Said::Position(at) => self.position = Some(at),
-            Said::Length(length) => self.length = Some(length),
-            Said::Paused(paused) => self.paused = paused,
-            Said::Ended => {
-                if self.length.is_some() {
-                    self.position = self.length;
-                }
-            }
-        }
-    }
-}
-
-/// What the app hears of a player.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlayerEvent {
-    /// mpv answers on its control socket: the position is its own, pause and seek work.
-    Controllable,
-    State(Reported),
-    /// The last word: the player is gone and waited for, its file removed.
-    Ended(End),
-}
-
-/// A [`PlayerEvent`] for the sound with this number. Nothing in it names a room, a
-/// message or a file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PlayerUpdate {
-    pub id: u64,
-    pub event: PlayerEvent,
-}
-
-/// A sound to play.
-pub struct Request {
-    /// The app's number for it, carried by every answer.
-    pub id: u64,
-    pub player: Player,
-    /// Removed when the last owner drops it (on player exit for downloaded messages;
-    /// kept alive by a waiting voice note while it remains in the composer).
-    pub file: std::sync::Arc<TempAudio>,
-    /// Where mpv opens its control socket; `None` for other players, or when no path
-    /// would do.
-    pub socket: Option<PathBuf>,
-    /// Closed by the app (dropped): stop.
-    pub control: UnboundedReceiver<Control>,
-}
-
-/// Hand-written: the paths name the user's runtime folder.
-impl fmt::Debug for Request {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Request")
-            .field("id", &self.id)
-            .field("player", &self.player)
-            .field("socket", &self.socket.is_some())
-            .finish_non_exhaustive()
-    }
-}
 
 /// Plays the sound of `request` and reports on it to `events` until the player has
 /// ended. Run it as a task of its own.
@@ -292,6 +202,22 @@ impl Mpv {
     }
 }
 
+impl Reported {
+    /// Takes in what mpv said.
+    fn take(&mut self, said: Said) {
+        match said {
+            Said::Position(at) => self.position = Some(at),
+            Said::Length(length) => self.length = Some(length),
+            Said::Paused(paused) => self.paused = paused,
+            Said::Ended => {
+                if self.length.is_some() {
+                    self.position = self.length;
+                }
+            }
+        }
+    }
+}
+
 /// Reads from mpv's socket where there is one; else waits for ever.
 async fn read_some(mpv: &mut Option<Mpv>) -> io::Result<usize> {
     match mpv {
@@ -303,8 +229,9 @@ async fn read_some(mpv: &mut Option<Mpv>) -> io::Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audio::Kind;
     use crate::audio::tests::Dir;
+    use crate::audio::{Kind, TempAudio};
+    use std::path::PathBuf;
     use tokio::io::AsyncBufReadExt;
     use tokio::sync::mpsc::unbounded_channel;
 

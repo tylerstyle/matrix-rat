@@ -351,7 +351,7 @@ async fn measure_interface_cost_of_a_change_and_a_frame() {
     let mut miss = Vec::with_capacity(RUNS);
     for _ in 0..RUNS {
         app.on_matrix(change(&app, messages.clone()));
-        let start = std::time::Instant::now();
+        let start = crate::time::Instant::now();
         draw(&mut app, &mut terminal);
         miss.push(start.elapsed());
     }
@@ -397,7 +397,7 @@ async fn measure_interface_cost_of_a_change_and_a_frame() {
             });
         }
         app.on_matrix(change(&app, changed));
-        let start = std::time::Instant::now();
+        let start = crate::time::Instant::now();
         draw(&mut app, &mut terminal);
         one.push(start.elapsed());
     }
@@ -423,7 +423,7 @@ async fn measure_interface_cost_of_a_change_and_a_frame() {
             ..Message::default()
         });
         app.on_matrix(change(&app, grown.clone()));
-        let start = std::time::Instant::now();
+        let start = crate::time::Instant::now();
         draw(&mut app, &mut terminal);
         new.push(start.elapsed());
     }
@@ -439,7 +439,7 @@ async fn measure_interface_cost_of_a_change_and_a_frame() {
         terminal
             .backend_mut()
             .resize(if run % 2 == 0 { 199 } else { 200 }, 60);
-        let start = std::time::Instant::now();
+        let start = crate::time::Instant::now();
         draw(&mut app, &mut terminal);
         resized.push(start.elapsed());
     }
@@ -457,7 +457,7 @@ async fn measure_interface_cost_of_a_change_and_a_frame() {
 #[tokio::test]
 #[ignore = "a measurement: run alone and in release, see crate::measure"]
 async fn measure_news_waiting_while_the_editor_runs() {
-    use super::external_editor::{HeldEvents, hold_events_while};
+    use crate::shell::terminal::external_editor::{HeldEvents, hold_events_while};
     const CHANGES: usize = 20;
     if !crate::measure::wanted() {
         return;

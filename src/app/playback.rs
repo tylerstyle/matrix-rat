@@ -13,7 +13,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
@@ -21,14 +21,15 @@ use super::App;
 use super::attach::Scope;
 use crate::action::Action;
 use crate::audio::recorder::{NoRecorder, Recorder};
-use crate::audio::{
-    self, Control, End, NoPlayer, Player, PlayerEvent, PlayerUpdate, Reported, TempAudio,
-};
+use crate::audio::{self, Control, NoPlayer, Player, Reported, TempAudio};
+#[cfg(any(not(target_family = "wasm"), test))]
+use crate::audio::{End, PlayerEvent, PlayerUpdate};
 use crate::images::human_size;
 use crate::keymap::Context;
 use crate::matrix::MatrixCmd;
 use crate::model::{AudioMeta, Message, Room};
 use crate::palette::AudioCaps;
+use crate::time::Instant;
 
 /// The sound there is, and what plays it.
 pub struct AudioState {
@@ -45,9 +46,6 @@ pub struct AudioState {
     pub(super) take: Option<super::voice::Take>,
     /// A recording to start; the event loop takes it (see [`App::take_record_start`]).
     pub(super) record_start: Option<audio::record::RecordRequest>,
-    /// Where tests look for the recorder: nothing of the machine they run on.
-    #[cfg(test)]
-    pub(super) recorder_env: audio::recorder::Env,
     /// Over SSH a sound would play on the far machine, and its microphone would
     /// record: neither is offered.
     pub(super) ssh: bool,
@@ -72,8 +70,6 @@ impl Default for AudioState {
             recorder: Err(NoRecorder::NoMicrophone),
             take: None,
             record_start: None,
-            #[cfg(test)]
-            recorder_env: audio::recorder::Env::default(),
             ssh: false,
             dir: None,
             next_id: 0,
@@ -199,14 +195,15 @@ pub enum AudioView {
 
 impl AudioState {
     /// For the app on this system: the settings, the player and the recorder they
-    /// name, and whether this is a session over SSH.
-    pub fn new(setting: &str, recorder_setting: &str) -> Self {
+    /// name, and whether this is a session over SSH, as `probes` find them.
+    pub fn new(probes: &dyn crate::probes::Probes, setting: &str, recorder_setting: &str) -> Self {
+        let ssh = probes.ssh();
         Self {
             setting: setting.to_owned(),
-            player: audio::choose_here(setting),
+            player: probes.player(setting),
             recorder_setting: recorder_setting.to_owned(),
-            recorder: audio::recorder::choose_here(recorder_setting),
-            ssh: crate::portal::in_ssh_session(),
+            recorder: probes.recorder(recorder_setting, ssh),
+            ssh,
             ..Self::default()
         }
     }
@@ -304,14 +301,16 @@ impl Sound {
 }
 
 impl App {
-    /// Where the copies of sounds go; what an earlier run left there is swept away.
-    pub(super) fn set_audio_dir(&mut self, dir: PathBuf) {
-        audio::remove_leftovers(&dir);
+    /// Where the copies of sounds go (the event loop has swept away what an earlier
+    /// run left there).
+    #[cfg(any(not(target_family = "wasm"), test))]
+    pub(crate) fn set_audio_dir(&mut self, dir: PathBuf) {
         self.audio.dir = Some(dir);
     }
 
     /// A player for the event loop to start.
-    pub(super) fn take_audio_start(&mut self) -> Option<audio::Request> {
+    #[cfg(any(not(target_family = "wasm"), test))]
+    pub(crate) fn take_audio_start(&mut self) -> Option<audio::Request> {
         self.audio.start.take()
     }
 
@@ -321,7 +320,7 @@ impl App {
         crate::doctor::Audio::from_choice(&self.audio.player)
     }
 
-    pub fn audio_caps(&self) -> AudioCaps {
+    pub(crate) fn audio_caps(&self) -> AudioCaps {
         let room_id = self.room_id();
         let selected = self
             .timeline
@@ -344,7 +343,7 @@ impl App {
     }
 
     /// The message of `room` that the sound belongs to, and what it shows there.
-    pub fn audio_in(&self, room: &Room) -> Option<(usize, AudioView)> {
+    pub(crate) fn audio_in(&self, room: &Room) -> Option<(usize, AudioView)> {
         let sound = self
             .audio
             .current
@@ -527,11 +526,6 @@ impl App {
                 return;
             }
         };
-        let socket = if player.controllable() {
-            self.audio.dir.as_deref().and_then(audio::socket_path)
-        } else {
-            None
-        };
         // One sound at a time.
         self.stop_audio();
         self.audio.next_id += 1;
@@ -558,7 +552,8 @@ impl App {
             id,
             player,
             file,
-            socket,
+            // Named by the shell, which starts the player.
+            socket: None,
             control: receiver,
         });
         self.dirty = true;
@@ -584,7 +579,7 @@ impl App {
     }
 
     /// Stops what plays, or gives up its download; nothing if nothing plays.
-    pub(super) fn stop_audio(&mut self) {
+    pub(crate) fn stop_audio(&mut self) {
         // A player not started yet: its file goes with it.
         self.audio.start = None;
         let Some(sound) = self.audio.current.take() else {
@@ -652,11 +647,6 @@ impl App {
             self.audio.current = None;
             return;
         };
-        let socket = if player.controllable() {
-            self.audio.dir.as_deref().and_then(audio::socket_path)
-        } else {
-            None
-        };
         let (control, receiver) = unbounded_channel();
         if let Some(sound) = &mut self.audio.current {
             sound.phase = Phase::Playing(Playing {
@@ -670,12 +660,14 @@ impl App {
             id,
             player,
             file: Arc::new(file),
-            socket,
+            // Named by the shell, which starts the player.
+            socket: None,
             control: receiver,
         });
     }
 
-    pub(super) fn on_audio(&mut self, update: PlayerUpdate) {
+    #[cfg(any(not(target_family = "wasm"), test))]
+    pub(crate) fn on_audio(&mut self, update: PlayerUpdate) {
         let Some(Sound {
             phase: Phase::Playing(playing),
             ..
@@ -749,7 +741,7 @@ impl App {
         } else {
             text.trim().to_owned()
         };
-        self.audio.player = audio::choose_here(&setting);
+        self.audio.player = self.probes.player(&setting);
         self.audio.setting = setting.clone();
         self.save_setting("audio_player", setting);
         // What plays goes on with the player it has.
@@ -772,9 +764,6 @@ impl App {
 mod tests {
     use std::sync::Arc;
 
-    use crossterm::event::{
-        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-    };
     use matrix_sdk::ruma::events::room::MediaSource;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -783,6 +772,9 @@ mod tests {
     use super::*;
     use crate::action::Pane;
     use crate::audio::Kind;
+    use crate::input::{
+        InputEvent, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use crate::matrix::{MatrixEvent, MatrixHandle, SyncStatus};
     use crate::model::{Attachment, ItemRef, MediaKind, RoomKind};
 
@@ -794,8 +786,8 @@ mod tests {
             // Short: a socket's path in it must fit a socket's address.
             let path = std::env::temp_dir().join(format!(
                 "mr-{name}-{}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
+                crate::time::SystemTime::now()
+                    .duration_since(crate::time::UNIX_EPOCH)
                     .unwrap()
                     .as_nanos()
                     % 1_000_000_000
@@ -811,8 +803,8 @@ mod tests {
         }
     }
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
     /// A voice message `id`, twelve seconds long, with a waveform if `waveform`.
@@ -937,18 +929,8 @@ mod tests {
         let mut request = fetched(&mut app, 1, &dir);
         assert_eq!(request.id, 1);
         assert_eq!(request.player.kind(), Kind::Mpv);
-        // mpv gets a control socket in the private folder, where a path that long can
-        // be a socket's address (the test's folder may be too deep for one).
-        assert_eq!(
-            request.socket.is_some(),
-            audio::socket_path(&dir.0).is_some()
-        );
-        assert!(
-            request
-                .socket
-                .as_ref()
-                .is_none_or(|socket| socket.starts_with(&dir.0))
-        );
+        // mpv's control socket is named by the shell, which starts it.
+        assert!(request.socket.is_none());
         assert!(!app.audio_loading());
         assert!(matches!(
             app.audio_in(&room),
@@ -1172,8 +1154,8 @@ mod tests {
         let mut request = fetched(&mut app, id, &dir);
         // The viewer handles its keys itself.
         app.on_viewer_key(
-            crossterm::event::KeyCode::Char('z'),
-            crossterm::event::KeyModifiers::CONTROL,
+            crate::input::KeyCode::Char('z'),
+            crate::input::KeyModifiers::CONTROL,
         );
         assert!(app.suspend_requested);
         assert_eq!(request.control.try_recv(), Ok(Control::Stop));
@@ -1359,7 +1341,7 @@ mod tests {
         let column = (0..buffer.area.width)
             .find(|x| buffer[(*x, row)].symbol() == "▶")
             .unwrap();
-        let click = Event::Mouse(MouseEvent {
+        let click = InputEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column,
             row,

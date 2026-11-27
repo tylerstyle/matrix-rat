@@ -2,17 +2,18 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use matrix_sdk::Client;
 use matrix_sdk::ruma::events::ignored_user_list::{IgnoredUser, IgnoredUserListEventContent};
 use matrix_sdk::ruma::{EventId, MxcUri, OwnedUserId, RoomId, UserId};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
 
 use super::{MatrixEvent, UserMatch};
+use crate::rt::{self, JoinHandle};
 use crate::text::{is_blank, sanitize_line};
+use crate::time::Instant;
 
 pub(super) type IgnoredSet = Arc<HashSet<OwnedUserId>>;
 
@@ -76,7 +77,7 @@ impl IgnoreTracker {
         let (tx, rx) = watch::channel(Arc::new(initial_set));
         let (ops, mut op_rx) = unbounded_channel::<IgnoreOp>();
 
-        let task = tokio::spawn(async move {
+        let task = rt::spawn(async move {
             let mut stream = client.subscribe_to_ignore_user_list_changes();
             let mut local_content: Option<(Instant, IgnoredUserListEventContent)> = None;
 
@@ -280,7 +281,7 @@ impl UserSearcher {
         let client = self.client.clone();
         let events = self.events.clone();
         let ignored = self.ignored.clone();
-        self.task = Some(tokio::spawn(async move {
+        self.task = Some(rt::spawn(async move {
             let results = match client.search_users(&trimmed, USER_SEARCH_LIMIT).await {
                 Ok(response) => response
                     .results
@@ -361,8 +362,8 @@ mod tests {
         tokio::sync::mpsc::UnboundedReceiver<MatrixEvent>,
         String,
     ) {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let nanos = crate::time::SystemTime::now()
+            .duration_since(crate::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!("{prefix}-{}-{nanos}", std::process::id()));
@@ -515,8 +516,8 @@ mod tests {
         let outcome = tokio::spawn(async move {
         // Create a public room (so continuwuity indexes members in `/user_directory/search`)
         // and invite bob.
-        let tag = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let tag = crate::time::SystemTime::now()
+            .duration_since(crate::time::UNIX_EPOCH)
             .unwrap()
             .as_millis();
         h1.send(MatrixCmd::Manage(ManageCmd::Create {

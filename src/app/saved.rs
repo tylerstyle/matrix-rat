@@ -6,13 +6,12 @@
 //! notification only when notifications show text at all.
 
 use std::collections::HashSet;
-use std::time::{Duration, Instant};
-
-use crossterm::event::{KeyCode, KeyModifiers};
+use std::time::Duration;
 
 use super::App;
 use super::global_search::find_target_message;
 use crate::action::Action;
+use crate::input::{KeyCode, KeyModifiers};
 use crate::lineedit::EditKeys;
 use crate::matrix::{MatrixCmd, Notice, SAVED_MAX_FETCH, SavedCmd, SavedEvent};
 use crate::modal::Modal;
@@ -22,6 +21,7 @@ use crate::saved::{
     SavedText, Stage, WhenError, parse_when, when_label,
 };
 use crate::text::{sanitize_line, truncate};
+use crate::time::Instant;
 
 /// How long a due reminder waits for its message's text before its notification goes
 /// out without it (offline, say).
@@ -82,11 +82,11 @@ impl App {
     /// Called when a session is up, not before: whose list the file holds is not
     /// known until then, and nothing of it is shown or comes due. The demo keeps
     /// its list in memory.
-    pub fn load_saved(&mut self, file: std::path::PathBuf, owner: &str) {
+    pub(crate) fn load_saved(&mut self, owner: &str) {
         let now = self.bookmarks.clock.now_secs();
         // A small file of the profile, read on the interface thread once per login:
         // a few kilobytes, at most `MAX_FILE_BYTES`.
-        let (store, problem) = SavedStore::load(file, owner, now);
+        let (store, problem) = SavedStore::load(self.storage.as_ref(), owner, now);
         self.bookmarks.store = store;
         let missed = self.bookmarks.store.due(now).count();
         if let Some(problem) = problem {
@@ -106,21 +106,21 @@ impl App {
     /// an action of the user's (never on a timer or per message), and the user is
     /// told at once if the change did not reach the disk.
     fn persist_saved(&mut self) {
-        if let Err(err) = self.bookmarks.store.write() {
-            tracing::warn!(why = %crate::logsafe::kind(&err), "could not write the saved messages");
+        if let Err(err) = self.bookmarks.store.write(self.storage.as_ref()) {
+            tracing::warn!(why = %crate::logsafe::kind_any(&err), "could not write the saved messages");
             self.show_toast("Could not write the saved messages file");
         }
     }
 
     /// How many reminders are due and not gone to yet, for the status line.
-    pub fn reminders_due(&self) -> usize {
+    pub(crate) fn reminders_due(&self) -> usize {
         self.bookmarks
             .store
             .due(self.bookmarks.clock.now_secs())
             .count()
     }
 
-    pub fn saved_room_label(&self, room_id: &str) -> RoomLabel {
+    pub(crate) fn saved_room_label(&self, room_id: &str) -> RoomLabel {
         match self.rooms.iter().find(|room| room.id == room_id) {
             Some(room) => RoomLabel::Name(room.name.clone()),
             None if self.matrix.is_some() && !self.rooms_received => RoomLabel::Unknown,
@@ -462,7 +462,7 @@ impl App {
             let plain = !mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
             #[expect(
                 clippy::wildcard_enum_match_arm,
-                reason = "foreign crossterm::event::KeyCode"
+                reason = "input events stand in for the terminal's (crate::input)"
             )]
             match code {
                 KeyCode::Esc => self.saved_escape(),
@@ -845,9 +845,6 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{
-        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-    };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use tokio::sync::mpsc::UnboundedReceiver;
@@ -855,6 +852,9 @@ mod tests {
     use super::*;
     use crate::action::Pane;
     use crate::config::Config;
+    use crate::input::{
+        InputEvent, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use crate::matrix::{MatrixEvent, MatrixHandle};
     use crate::model::{ItemRef, Room, RoomKind};
     use crate::notify::NotifyMode;
@@ -864,12 +864,12 @@ mod tests {
 
     const ROOM: &str = "!garden:example.org";
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
-    fn click(col: u16, row: u16) -> Event {
-        Event::Mouse(MouseEvent {
+    fn click(col: u16, row: u16) -> InputEvent {
+        InputEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: col,
             row,
@@ -1408,7 +1408,7 @@ mod tests {
     fn a_time_can_be_pasted_and_a_click_chooses() {
         let (mut app, mut terminal, _commands) = connected();
         app.perform(Action::RemindMe);
-        app.on_event(Event::Paste("2h\nmore".into()));
+        app.on_event(InputEvent::Paste("2h\nmore".into()));
         assert_eq!(form(&app).input.as_str(), "2h");
         app.on_event(key(KeyCode::Enter));
         assert_eq!(
@@ -1770,14 +1770,16 @@ mod tests {
         let file = dir.join("saved.json");
         {
             let (mut app, _terminal, _commands) = connected();
-            app.load_saved(file.clone(), ME);
+            app.set_saved_file(&file);
+            app.load_saved(ME);
             app.perform(Action::RemindMe);
             app.on_event(key(KeyCode::Enter));
             assert_eq!(saved_ids(&app), ["$e1"]);
         }
         let (mut app, mut terminal, mut commands) = connected();
         later(&mut app, 86_400);
-        app.load_saved(file, ME);
+        app.set_saved_file(&file);
+        app.load_saved(ME);
         assert!(toast(&app).contains("came due while"), "{}", toast(&app));
         app.sync_saved_flags(ROOM);
         assert!(app.rooms[0].messages[1].saved);
@@ -1796,7 +1798,8 @@ mod tests {
         let file = dir.join("saved.json");
         std::fs::write(&file, "{{{").unwrap();
         let (mut app, _terminal, _commands) = connected();
-        app.load_saved(file.clone(), ME);
+        app.set_saved_file(&file);
+        app.load_saved(ME);
         assert!(toast(&app).contains("damaged"), "{}", toast(&app));
         app.perform(Action::SaveForLater);
         assert_eq!(saved_ids(&app), ["$e1"]);
@@ -1810,7 +1813,8 @@ mod tests {
         let file = dir.join("saved.json");
         {
             let (mut app, _terminal, _commands) = connected();
-            app.load_saved(file.clone(), ME);
+            app.set_saved_file(&file);
+            app.load_saved(ME);
             app.perform(Action::RemindMe);
             app.on_event(key(KeyCode::Enter));
             assert_eq!(saved_ids(&app), ["$e1"]);
@@ -1821,7 +1825,7 @@ mod tests {
         let mut app = App::new(&Config::default(), std::path::PathBuf::new(), Some(handle));
         app.bookmarks.clock = Clock::Fixed(friday() + chrono::Duration::days(1));
         app.notify_mode = NotifyMode::Desktop;
-        app.bookmarks.file = Some(file.clone());
+        app.set_saved_file(&file);
         app.saved_tick(TEXT_WAIT);
         assert!(saved_ids(&app).is_empty());
         assert_eq!(app.reminders_due(), 0);
@@ -1835,7 +1839,7 @@ mod tests {
             "$e1",
             Some(friday().timestamp() + 90_000),
         );
-        app.bookmarks.store.write().unwrap();
+        app.bookmarks.store.write(app.storage.as_ref()).unwrap();
         app.reset_session();
         assert!(saved_ids(&app).is_empty());
         app.bookmarks.clock = Clock::Fixed(friday() + chrono::Duration::days(2));
@@ -1844,7 +1848,7 @@ mod tests {
         assert!(app.bookmarks.notices.is_empty());
         assert!(app.bookmarks.waiting.is_empty());
         // Nothing can be written from there either.
-        app.bookmarks.store.write().unwrap();
+        app.bookmarks.store.write(app.storage.as_ref()).unwrap();
         assert!(file.exists());
 
         // The same account logs in again (its session had only ended on the
@@ -1861,14 +1865,15 @@ mod tests {
         let file = dir.join("saved.json");
         {
             let (mut app, _terminal, _commands) = connected();
-            app.load_saved(file.clone(), ME);
+            app.set_saved_file(&file);
+            app.load_saved(ME);
             app.perform(Action::RemindMe);
             app.on_event(key(KeyCode::Enter));
         }
         let (handle, _commands) = MatrixHandle::for_test();
         let mut app = App::new(&Config::default(), std::path::PathBuf::new(), Some(handle));
         app.bookmarks.clock = Clock::Fixed(friday() + chrono::Duration::days(1));
-        app.bookmarks.file = Some(file.clone());
+        app.set_saved_file(&file);
         app.on_matrix(MatrixEvent::LoggedIn {
             user_id: "@other:example.org".into(),
         });
@@ -1889,7 +1894,7 @@ mod tests {
                 done: false,
             })
             .unwrap();
-        app.bookmarks.store.write().unwrap();
+        app.bookmarks.store.write(app.storage.as_ref()).unwrap();
         app.reset_session();
         app.on_matrix(MatrixEvent::LoggedIn { user_id: ME.into() });
         assert!(saved_ids(&app).is_empty());
@@ -1904,7 +1909,8 @@ mod tests {
         let text = r#"{"version": 99, "owner": "@me:example.org", "items": []}"#;
         std::fs::write(&file, text).unwrap();
         let (mut app, _terminal, _commands) = connected();
-        app.load_saved(file.clone(), ME);
+        app.set_saved_file(&file);
+        app.load_saved(ME);
         assert!(toast(&app).contains("newer"), "{}", toast(&app));
         app.perform(Action::SaveForLater);
         assert!(

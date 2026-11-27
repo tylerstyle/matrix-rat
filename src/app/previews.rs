@@ -9,7 +9,7 @@ use crate::previews::Raw;
 
 impl App {
     /// There is a worker to ask (the demo has none).
-    pub fn can_fetch_previews(&self) -> bool {
+    pub(crate) fn can_fetch_previews(&self) -> bool {
         self.matrix.is_some()
     }
 
@@ -33,7 +33,6 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use tokio::sync::mpsc::UnboundedReceiver;
@@ -41,6 +40,7 @@ mod tests {
     use super::*;
     use crate::action::{Action, Pane};
     use crate::config::LinkPreviews;
+    use crate::input::{InputEvent, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent};
     use crate::matrix::{MatrixEvent, MatrixHandle};
     use crate::modal::Setting;
     use crate::model::{ItemRef, Message, MsgKind, Room, RoomKind, SendState};
@@ -483,8 +483,8 @@ mod tests {
         let column = line.trim_start_matches('"').find("Preview").unwrap();
         let before = line.trim_start_matches('"')[..column].chars().count();
         app.timeline.selected = Some(1);
-        app.on_event(Event::Mouse(MouseEvent {
-            kind: crossterm::event::MouseEventKind::Down(MouseButton::Left),
+        app.on_event(InputEvent::Mouse(MouseEvent {
+            kind: crate::input::MouseEventKind::Down(MouseButton::Left),
             column: before as u16 + 1,
             row: row as u16,
             modifiers: KeyModifiers::NONE,
@@ -492,11 +492,11 @@ mod tests {
         assert_eq!(app.timeline.selected, Some(0));
         assert!(app.modal.is_none());
         let opened = |app: &mut App| {
-            app.on_event(Event::Key(KeyEvent::new(
+            app.on_event(InputEvent::Key(KeyEvent::new(
                 KeyCode::Char('o'),
                 KeyModifiers::NONE,
             )));
-            super::super::TEST_OPENED_URLS.with(|urls| std::mem::take(&mut *urls.borrow_mut()))
+            app.take_opened()
         };
         assert_eq!(opened(&mut app), [A]);
     }
@@ -508,7 +508,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("config.toml");
         let (mut app, _terminal, _commands) = app_with(Vec::new(), false, LinkPreviews::Off);
-        app.config_file = Some(file.clone());
+        app.set_config_file(&file);
         assert_eq!(app.setting_value(Setting::LinkPreviews), "off");
         for (value, saved) in [
             ("unencrypted rooms", "unencrypted"),

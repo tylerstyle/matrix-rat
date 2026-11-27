@@ -220,12 +220,12 @@ fn draw_labelled(frame: &mut Frame, app: &mut App, area: Rect, label: &str) {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
     use super::*;
     use crate::action::Pane;
+    use crate::input::{InputEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use crate::model::{Room, RoomKind};
 
     fn room(name: &str, unread: u32) -> Room {
@@ -279,8 +279,8 @@ mod tests {
         columns[line[..at].chars().count()]
     }
 
-    fn press(button: MouseButton, column: u16, row: u16) -> Event {
-        Event::Mouse(MouseEvent {
+    fn press(button: MouseButton, column: u16, row: u16) -> InputEvent {
+        InputEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(button),
             column,
             row,
@@ -288,7 +288,7 @@ mod tests {
         })
     }
 
-    fn click(column: u16) -> Event {
+    fn click(column: u16) -> InputEvent {
         press(MouseButton::Left, column, 0)
     }
 
@@ -706,7 +706,7 @@ mod tests {
         let shown = terminal(&mut app, 50, 20);
         let (label, design) = (column(&shown, "Rooms"), column(&shown, "D "));
         let moved = |column: u16| {
-            Event::Mouse(MouseEvent {
+            InputEvent::Mouse(MouseEvent {
                 kind: MouseEventKind::Moved,
                 column,
                 row: 0,

@@ -11,7 +11,7 @@ use crate::action::Pane;
 
 impl App {
     /// The rooms with new notifications, the newest first, without the open one.
-    pub fn active_rooms(&self) -> Vec<usize> {
+    pub(crate) fn active_rooms(&self) -> Vec<usize> {
         let open = self.open_index();
         self.rooms
             .iter()
@@ -69,11 +69,11 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
     use super::*;
     use crate::action::Action;
     use crate::config::Config;
+    use crate::input::{InputEvent, KeyCode, KeyEvent, KeyModifiers};
     use crate::matrix::{MatrixEvent, RoomCategory, RoomSummary};
     use crate::model::{Room, RoomKind};
 
@@ -184,7 +184,7 @@ mod tests {
     #[test]
     fn the_key_opens_the_newest_active_room_and_then_the_next_one() {
         let mut app = app();
-        app.on_event(Event::Key(KeyEvent::new(
+        app.on_event(InputEvent::Key(KeyEvent::new(
             KeyCode::Char('n'),
             KeyModifiers::ALT,
         )));
@@ -367,7 +367,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("matrix-rat-rooms-bar-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let file = dir.join("config.toml");
-        app.config_file = Some(file.clone());
+        app.set_config_file(&file);
         assert_eq!(app.setting_value(Setting::RoomsBar), "on");
         app.perform(Action::Setting(Setting::RoomsBar));
         assert!(!app.rooms_bar);

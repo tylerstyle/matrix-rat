@@ -15,7 +15,7 @@ use tokio::task::JoinHandle;
 use zbus::proxy::{Builder, CacheProperties, Proxy, SignalStream};
 use zbus::{Connection, Error, Message, Variant, fdo};
 
-use crate::termquery;
+use crate::shell::terminal::termquery;
 use crate::theme::ColorScheme;
 
 const PORTAL_DEST: &str = "org.freedesktop.portal.Desktop";

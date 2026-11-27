@@ -1,4 +1,4 @@
-//! Application state, input handling and the event loop.
+//! Application state and input handling. The event loop is the shell's (`shell::terminal`).
 
 mod attach;
 mod code;
@@ -45,28 +45,23 @@ pub use playback::{AudioState, AudioView};
 pub use voice::{RecordingView, TakePhase};
 
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{
-    Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
-    MouseEventKind,
-};
-use futures::StreamExt;
 use ratatui::layout::Rect;
-use tokio::signal::unix::{SignalKind, signal};
-use tokio::time::MissedTickBehavior;
 
 use crate::action::{Action, Dir, Pane};
 use crate::composer::Composer;
 use crate::config::Config;
 use crate::format::Outgoing;
+use crate::input::{
+    InputEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
+};
 use crate::keymap::{self, Context, Keymap};
 use crate::lineedit::{EditKeys, EditOutcome, LineEdit};
 use crate::matrix::{
-    self, MatrixCmd, MatrixEvent, MatrixHandle, RecoveryStatus, RoomCategory, RoomSummary,
-    SyncStatus,
+    MatrixCmd, MatrixEvent, MatrixHandle, RecoveryStatus, RoomCategory, RoomSummary, SyncStatus,
 };
 use crate::modal::{
     EmojiPicker, LoginForm, Modal, Pick, RecoveryForm, ReportForm, Setting, SettingsMenu,
@@ -74,11 +69,12 @@ use crate::modal::{
 use crate::model::{
     ItemRef, Message, MsgKind, OWN_NAME, Reaction, Room, RoomKind, SendState, demo_rooms,
 };
-use crate::paths::Paths;
-use crate::terminal::{self, TerminalGuard};
-use crate::theme::{ColorScheme, DEFAULT_THEME, Theme, truecolor_supported};
+use crate::probes::Probes;
+use crate::storage::{Key, Storage};
+use crate::theme::{ColorScheme, DEFAULT_THEME, Theme};
+use crate::time::Instant;
 use crate::ui::hit::{Button, HitId, HitMap, InputTarget};
-use crate::ui::{self, SIDEBAR_MIN, max_sidebar};
+use crate::ui::{SIDEBAR_MIN, max_sidebar};
 
 const TOAST_TIME: Duration = Duration::from_secs(3);
 /// How long a count-based notification waits for a detailed one to take its place,
@@ -100,6 +96,31 @@ pub enum ComposeMode {
     Reply(usize),
     /// Editing the message at this index.
     Edit(usize),
+}
+
+/// What `App` asks of the desktop. The shell does it (see `shell::terminal::run`):
+/// `App` starts no program and touches no window itself.
+#[derive(Clone, PartialEq, Eq)]
+pub enum OsRequest {
+    /// A link, or a saved file, for the desktop's program for it (`xdg-open`).
+    Open(String),
+    /// Our window to the front: a desktop notification was clicked. The
+    /// `notification_click_command` setting (see `focus`).
+    RaiseWindow(String),
+    /// The icon files written for desktop notifications go, and so does whatever is
+    /// still on its way to be written: the session ended.
+    ClearNoticeIcons,
+}
+
+/// Hand-written: a link, a file's path and a command line are the user's.
+impl std::fmt::Debug for OsRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Open(_) => "Open",
+            Self::RaiseWindow(_) => "RaiseWindow",
+            Self::ClearNoticeIcons => "ClearNoticeIcons",
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,30 +247,29 @@ pub struct ReadyNotices {
     pub items: Vec<(crate::matrix::Notice, crate::notify::NotifyIcon)>,
     pub mode: crate::notify::NotifyMode,
     pub preview: bool,
-    pub icon_cache: Option<(Arc<crate::notify::IconCache>, u64)>,
     /// Reminders that came due: shown under a title and text of their own.
     pub reminders: Vec<(crate::notify::DueReminder, crate::notify::NotifyIcon)>,
 }
 
 pub struct App {
-    pub rooms: Vec<Room>,
-    pub active: usize,
-    pub focus: Pane,
-    pub sidebar: SidebarState,
-    pub timeline: TimelineState,
-    pub composer: Composer,
-    pub compose_mode: ComposeMode,
-    pub composer_view: ComposerView,
-    pub help_open: bool,
+    pub(crate) rooms: Vec<Room>,
+    pub(crate) active: usize,
+    pub(crate) focus: Pane,
+    pub(crate) sidebar: SidebarState,
+    pub(crate) timeline: TimelineState,
+    pub(crate) composer: Composer,
+    pub(crate) compose_mode: ComposeMode,
+    pub(crate) composer_view: ComposerView,
+    pub(crate) help_open: bool,
     /// Lines the help is scrolled down by, where it does not fit the window.
-    pub help_scroll: usize,
+    pub(crate) help_scroll: usize,
     /// A popup that takes all input while it is open.
-    pub modal: Option<Modal>,
+    pub(crate) modal: Option<Modal>,
     /// `None` in demo mode.
     matrix: Option<MatrixHandle>,
-    pub sync: Option<SyncStatus>,
-    pub user_id: Option<String>,
-    pub own_profile: Option<crate::matrix::OwnProfile>,
+    pub(crate) sync: Option<SyncStatus>,
+    pub(crate) user_id: Option<String>,
+    pub(crate) own_profile: Option<crate::matrix::OwnProfile>,
     user_info_requests: u64,
     recovery_prompted: bool,
     /// Counts timeline requests; see `request_timeline`.
@@ -264,10 +284,10 @@ pub struct App {
     chat_closed: bool,
     /// The `esc_closes_chat` setting: `Esc` in the composer, with nothing left to
     /// cancel, closes the chat.
-    pub esc_closes_chat: bool,
+    pub(crate) esc_closes_chat: bool,
     /// The `rooms_bar` setting: with the room list out of sight, a line above the
     /// chat that leads back to it and shows the rooms with new notifications.
-    pub rooms_bar: bool,
+    pub(crate) rooms_bar: bool,
     /// The room the "newest room with notifications" key opened last, while it is
     /// still the open one: the key goes on from there (see `open_active_room`).
     active_from: Option<String>,
@@ -277,41 +297,44 @@ pub struct App {
     edit_stash: Option<String>,
     /// When we last told the room we are typing, if we did.
     typing_sent: Option<Instant>,
-    pub typing_notices: bool,
-    pub read_receipts: bool,
+    pub(crate) typing_notices: bool,
+    pub(crate) read_receipts: bool,
     /// No notifications for now, whatever the mode says.
-    pub do_not_disturb: bool,
+    pub(crate) do_not_disturb: bool,
     /// The `window_title` setting: the unread count in the terminal's title (see
     /// `title`); the event loop applies changes to the terminal.
-    pub window_title: bool,
+    pub(crate) window_title: bool,
     /// The title as last written; `None` before the first and after the terminal was
     /// handed back.
     title_written: Option<String>,
     /// What the app learned about where it runs, for the doctor's report.
-    found: doctor::Found,
+    pub(crate) found: doctor::Found,
     /// Show who has read up to where (the `read_markers` setting).
-    pub read_markers: bool,
+    pub(crate) read_markers: bool,
     /// Whether clicks go to the app; the event loop applies changes to the terminal.
-    pub mouse: bool,
+    pub(crate) mouse: bool,
     /// Text on its way to the system clipboard; the event loop sends it.
-    pub pending_copy: Option<String>,
+    pub(crate) pending_copy: Option<String>,
     /// How notifications are shown, and the mode to return to when switched back on.
-    pub notify_mode: crate::notify::NotifyMode,
+    pub(crate) notify_mode: crate::notify::NotifyMode,
     notify_mode_on: crate::notify::NotifyMode,
+    /// What `auto` notifications are here, as the probes said at start: the desktop's
+    /// or the terminal's.
+    notify_auto: crate::notify::NotifyMode,
     notification_preview: bool,
     /// Notifications made from a risen unread count, waiting to see whether a
     /// detailed one arrives for the same room; and when each room last got one.
     count_notices: Vec<(Instant, crate::matrix::Notice)>,
     detailed_notices: std::collections::HashMap<String, Instant>,
     /// Two lines per room in the room list, the second with the latest message.
-    pub room_previews: bool,
+    pub(crate) room_previews: bool,
     /// For which rooms the homeserver is asked to preview links (off by default).
-    pub link_previews: crate::config::LinkPreviews,
+    pub(crate) link_previews: crate::config::LinkPreviews,
     /// What the homeserver said about the links on screen.
-    pub previews: crate::previews::PreviewStore,
+    pub(crate) previews: crate::previews::PreviewStore,
     /// The user's spaces, and the one the room list is narrowed to (by id).
-    pub spaces: Vec<crate::matrix::SpaceSummary>,
-    pub space: Option<String>,
+    pub(crate) spaces: Vec<crate::matrix::SpaceSummary>,
+    pub(crate) space: Option<String>,
     /// Its position in `spaces`.
     space_at: Option<usize>,
     /// Rooms of the selected space, sub-spaces included.
@@ -320,15 +343,13 @@ pub struct App {
     shown_notices: Vec<(Instant, String)>,
     /// Ask the event loop to draw the whole screen afresh instead of only what
     /// changed, after the content of a pane was swapped wholesale.
-    pub repaint: bool,
+    pub(crate) repaint: bool,
     /// Between a logout (or expiry) and the next login.
     logged_out: bool,
     /// When this session's login was confirmed.
     session_started: Option<Instant>,
     /// Notifications on their way out; the event loop shows them.
-    pub pending_notices: Vec<crate::matrix::Notice>,
-    /// Ephemeral PNG cache for desktop notification avatars, wiped on logout/exit.
-    notify_icons: Option<Arc<crate::notify::IconCache>>,
+    pub(crate) pending_notices: Vec<crate::matrix::Notice>,
     /// The `download_dir` setting; empty means the desktop's download folder.
     download_dir: String,
     /// The `notification_click_command` setting (see `focus`). `None` where no
@@ -342,7 +363,7 @@ pub struct App {
     confirm_large: Option<String>,
     /// Current colour scheme (`Dark` or `Light`), resolved at startup (portal, terminal
     /// query, `COLORFGBG`) and updated live via the desktop portal.
-    pub color_scheme: ColorScheme,
+    pub(crate) color_scheme: ColorScheme,
     /// Base `theme` setting from config (used when unpaired, or as fallback for an
     /// unset slot).
     base_theme: String,
@@ -352,58 +373,59 @@ pub struct App {
     /// The theme the user asked for, which may not exist yet (a generator may still
     /// have to write it).
     wanted_theme: String,
-    /// Where the configuration lives, to notice a changed `theme` setting.
-    config_file: Option<PathBuf>,
+    /// The configuration is the storage's, to write changed settings to and to
+    /// notice a changed `theme` setting in. Not in the demo, which changes nothing
+    /// for good.
+    pub(crate) config_stored: bool,
     /// The `theme`, `theme_dark`, and `theme_light` settings as last read from the
     /// configuration.
     config_theme: String,
     config_theme_dark: Option<String>,
     config_theme_light: Option<String>,
     /// Bumped whenever a theme is loaded.
-    pub theme_rev: u64,
+    pub(crate) theme_rev: u64,
     /// Bumped whenever the open room's messages change, to invalidate `row_cache`.
-    pub timeline_rev: u64,
-    pub row_cache: Option<crate::ui::RowCache>,
+    pub(crate) timeline_rev: u64,
+    pub(crate) row_cache: Option<crate::ui::RowCache>,
     /// Encryption status and device verification.
-    pub verify: crate::verify::VerifyState,
-    pub theme: Theme,
+    pub(crate) verify: crate::verify::VerifyState,
+    pub(crate) theme: Theme,
     theme_names: Vec<String>,
-    themes_dir: PathBuf,
     truecolor: bool,
     /// The user asked for no colours (`NO_COLOR`): every theme is shown without them.
     no_color: bool,
-    pub hits: HitMap,
+    pub(crate) hits: HitMap,
     dragging_splitter: bool,
-    pub toast: Option<(String, Instant)>,
-    pub toast_room: Option<(String, Instant)>,
-    pub screen: Rect,
-    pub should_quit: bool,
-    pub suspend_requested: bool,
+    pub(crate) toast: Option<(String, Instant)>,
+    pub(crate) toast_room: Option<(String, Instant)>,
+    pub(crate) screen: Rect,
+    pub(crate) should_quit: bool,
+    pub(crate) suspend_requested: bool,
     /// Set by `Action::ComposeInEditor`: the run loop hands the terminal to the editor.
-    pub editor_request: Option<crate::editor::Request>,
-    pub dirty: bool,
+    pub(crate) editor_request: Option<crate::editor::Request>,
+    pub(crate) dirty: bool,
     /// Pictures: the cache and the viewer.
-    pub images: crate::images::ImageStore,
+    pub(crate) images: crate::images::ImageStore,
     /// The thread shown in place of the room's messages, and thread drafts.
-    pub threads: thread::Threads,
+    pub(crate) threads: thread::Threads,
     /// Files waiting in the composer to be sent.
-    pub attach: attach::AttachState,
+    pub(crate) attach: attach::AttachState,
     /// What of the unsent text is in the store, to have it back after a restart.
     drafts: drafts::Drafts,
     /// The "new" line of the open room, and rooms marked as unread by hand.
     unread: unread::Unread,
     /// Composer completions and tracked mentions/room links.
-    pub complete: complete::CompleteState,
+    pub(crate) complete: complete::CompleteState,
     /// Joining, creating and leaving rooms.
     manage: rooms::ManageState,
     /// Active key bindings and preset.
-    pub keymap: Keymap,
+    pub(crate) keymap: Keymap,
     /// Monotonic counter for active/debounced global search requests.
     search_gen: u64,
     /// Cross-room / event jump waiting for worker `/context` load.
     pending_jump: Option<global_search::PendingJump>,
     /// Matrix link or address passed on the command line, opened once after login/rooms arrive.
-    startup_target: Option<String>,
+    pub(crate) startup_target: Option<String>,
     /// Since when the target's room has been missing from a list that counts as synced.
     startup_missing_since: Option<Instant>,
     /// How long such a room is waited for: right after a login the first lists are not
@@ -412,29 +434,37 @@ pub struct App {
     /// True once at least one `MatrixEvent::Rooms` list was received in this session.
     rooms_received: bool,
     /// Matrix user IDs currently ignored by this account (`m.ignored_user_list`).
-    pub ignored_users: std::collections::BTreeSet<String>,
+    pub(crate) ignored_users: std::collections::BTreeSet<String>,
     /// Monotonic counter for active/debounced user directory searches.
     pub(super) user_search_gen: u64,
     /// Deadline timer start for debounced user directory lookups in `NewPopup`.
-    pub(super) user_search_debounce: Option<std::time::Instant>,
+    pub(super) user_search_debounce: Option<crate::time::Instant>,
     /// Monotonic counter for active/debounced public room directory searches.
     pub(super) dir_search_gen: u64,
     /// Deadline timer start for debounced public room directory searches in `NewPopup`.
-    pub(super) dir_search_debounce: Option<std::time::Instant>,
+    pub(super) dir_search_debounce: Option<crate::time::Instant>,
     /// The account's sessions and the key backup, for their popups.
-    pub devices: crate::devices::DevicesState,
+    pub(crate) devices: crate::devices::DevicesState,
     /// The notification keywords popup's watch and requests (and the demo's list).
-    pub keywords: crate::keywords::KeywordsState,
+    pub(crate) keywords: crate::keywords::KeywordsState,
     /// The messages saved for later and their reminders.
-    pub bookmarks: crate::saved::SavedState,
+    pub(crate) bookmarks: crate::saved::SavedState,
     /// Custom emoji and stickers from image packs.
-    pub emotes: emotes::EmoteState,
+    pub(crate) emotes: emotes::EmoteState,
     /// Voice and audio played in here: the player, and the sound there is.
     pub(crate) audio: playback::AudioState,
     /// Transcripts and translations under messages, and the programs that make them.
     notes: notes::NotesState,
     /// Archiving a room and catching up on it: the requests, and the summary command.
     collect: collect::CollectState,
+    /// What the machine has (colours, programs, SSH), asked of the shell's probes at
+    /// start and when a setting changes what is to be found.
+    probes: Box<dyn Probes>,
+    /// What the desktop is asked to do; the event loop takes it.
+    os_requests: Vec<OsRequest>,
+    /// Where the configuration, the user's themes, the kept notes and the saved
+    /// messages are kept: the shell's, read and written by key.
+    storage: Box<dyn Storage>,
 }
 
 /// Hand-written: the app holds everything private there is (messages, drafts, ids,
@@ -467,6 +497,7 @@ impl std::fmt::Debug for App {
             .field("title_written", &self.title_written)
             .field("found", &self.found)
             .field("notify_mode", &self.notify_mode)
+            .field("notify_auto", &self.notify_auto)
             .field("pending_notices", &self.pending_notices.len())
             .field("link_previews", &self.link_previews)
             .field("previews", &self.previews)
@@ -500,6 +531,7 @@ impl std::fmt::Debug for App {
             .field("audio", &self.audio)
             .field("notes", &self.notes)
             .field("collect", &self.collect)
+            .field("os_requests", &self.os_requests)
             .finish_non_exhaustive()
     }
 }
@@ -514,9 +546,9 @@ pub(super) fn bump_search_gen(counter: &mut u64, debounce: &mut Option<Instant>)
     (*counter, debounce.take().is_some())
 }
 
-/// Converts a search debounce start timestamp into a `tokio::time::Instant` deadline.
-pub(super) fn search_debounce_deadline(debounce: Option<Instant>) -> Option<tokio::time::Instant> {
-    debounce.map(|at| (at + SEARCH_DEBOUNCE).into())
+/// Converts a search debounce start timestamp into its deadline.
+pub(super) fn search_debounce_deadline(debounce: Option<Instant>) -> Option<Instant> {
+    debounce.map(|at| at + SEARCH_DEBOUNCE)
 }
 
 /// Clears and returns `true` when a search debounce deadline has elapsed.
@@ -529,19 +561,15 @@ pub(super) fn take_due_search_debounce(debounce: &mut Option<Instant>) -> bool {
     }
 }
 
-async fn wait_deadline(deadline: Option<tokio::time::Instant>) {
-    match deadline {
-        Some(at) => tokio::time::sleep_until(at).await,
-        None => std::future::pending().await,
-    }
-}
-
 impl App {
     /// With `matrix` the app shows the account's rooms; without, built-in demo data.
     #[cfg(test)]
-    pub fn new(config: &Config, themes_dir: PathBuf, matrix: Option<MatrixHandle>) -> Self {
-        let mut app = Self::new_in_scheme(config, themes_dir, matrix, ColorScheme::Dark);
-        // Tests may well run inside a desktop that would obey: no window is raised.
+    pub(crate) fn new(config: &Config, themes_dir: PathBuf, matrix: Option<MatrixHandle>) -> Self {
+        let probes = Box::new(crate::probes::TestProbes::default());
+        let storage = Box::new(crate::storage::FsStorage::default().with_themes(themes_dir));
+        let mut app = Self::new_in_scheme(config, storage, probes, matrix, ColorScheme::Dark);
+        // A click on a notice asks for no window to be raised: the tests that look at
+        // the desktop requests see only what they cause.
         app.notification_click_command = None;
         // Nor do they depend on the players and recorders the machine has, or on
         // running over SSH.
@@ -549,26 +577,27 @@ impl App {
         app
     }
 
-    pub(crate) fn new_in_scheme(
+    pub fn new_in_scheme(
         config: &Config,
-        themes_dir: PathBuf,
+        storage: Box<dyn Storage>,
+        probes: Box<dyn Probes>,
         matrix: Option<MatrixHandle>,
         color_scheme: ColorScheme,
     ) -> Self {
-        let truecolor = truecolor_supported();
-        let mut app = Self::with_theme(Theme::builtin(DEFAULT_THEME).expect("default theme"));
+        let truecolor = probes.truecolor();
+        let default_theme = Theme::builtin(DEFAULT_THEME).expect("default theme");
+        let mut app = Self::with_theme(default_theme, probes, storage);
         if matrix.is_some() {
             app.rooms.clear();
             app.sync = Some(SyncStatus::Connecting);
         }
         app.matrix = matrix;
         app.truecolor = truecolor;
-        app.no_color = crate::theme::no_color_wanted();
+        app.no_color = app.probes.no_color();
         if app.no_color {
             app.theme.strip_colors();
         }
-        app.theme_names = Theme::available(&themes_dir);
-        app.themes_dir = themes_dir;
+        app.theme_names = Theme::available(app.storage.as_ref());
         app.sidebar.width = config.sidebar_width;
         app.sidebar.hidden = config.sidebar_hidden;
         app.typing_notices = config.typing_notices;
@@ -583,13 +612,19 @@ impl App {
         app.found.secret_store = config.secret_store;
         app.found.ignored_settings = config.ignored.clone();
         app.download_dir = config.download_dir.clone();
-        app.audio = playback::AudioState::new(&config.audio_player, &config.audio_recorder);
-        app.notes = notes::NotesState::new(config);
-        app.collect.set_summary_setting(&config.summary_command);
+        app.audio = playback::AudioState::new(
+            app.probes.as_ref(),
+            &config.audio_player,
+            &config.audio_recorder,
+        );
+        app.notes = notes::NotesState::new(config, app.probes.as_ref());
+        app.collect
+            .set_summary_setting(&config.summary_command, app.probes.as_ref());
         app.notification_click_command = Some(config.notification_click_command.clone());
         app.room_previews = config.room_previews;
         app.link_previews = config.link_previews;
         app.notify_mode = config.notifications;
+        app.notify_auto = app.probes.notify_auto();
         if config.notifications != crate::notify::NotifyMode::Off {
             app.notify_mode_on = config.notifications;
         }
@@ -627,14 +662,18 @@ impl App {
 
     /// Demo data with fixed settings; also what the tests render.
     #[cfg(test)]
-    pub fn demo() -> Self {
-        let mut app = Self::with_theme(Theme::builtin(DEFAULT_THEME).expect("default theme"));
+    pub(crate) fn demo() -> Self {
+        let mut app = Self::with_theme(
+            Theme::builtin(DEFAULT_THEME).expect("default theme"),
+            Box::new(crate::probes::TestProbes::default()),
+            Box::new(crate::storage::FsStorage::default()),
+        );
         // Not the machine's own folder, so screens look the same everywhere.
         app.download_dir = "~/Downloads".to_owned();
         app
     }
 
-    fn with_theme(theme: Theme) -> Self {
+    fn with_theme(theme: Theme, probes: Box<dyn Probes>, storage: Box<dyn Storage>) -> Self {
         Self {
             rooms: demo_rooms(),
             active: 0,
@@ -680,6 +719,7 @@ impl App {
             pending_copy: None,
             notify_mode: crate::notify::NotifyMode::Off,
             notify_mode_on: crate::notify::NotifyMode::Auto,
+            notify_auto: crate::notify::NotifyMode::Terminal,
             notification_preview: true,
             count_notices: Vec::new(),
             detailed_notices: Default::default(),
@@ -695,7 +735,6 @@ impl App {
             logged_out: false,
             session_started: None,
             pending_notices: Vec::new(),
-            notify_icons: None,
             download_dir: String::new(),
             notification_click_command: None,
             saving: Default::default(),
@@ -706,7 +745,7 @@ impl App {
             theme_dark: None,
             theme_light: None,
             wanted_theme: DEFAULT_THEME.to_owned(),
-            config_file: None,
+            config_stored: false,
             config_theme: String::new(),
             config_theme_dark: None,
             config_theme_light: None,
@@ -716,7 +755,6 @@ impl App {
             verify: Default::default(),
             theme,
             theme_names: Theme::builtin_names(),
-            themes_dir: PathBuf::new(),
             truecolor: true,
             no_color: false,
             hits: HitMap::default(),
@@ -758,13 +796,16 @@ impl App {
             audio: Default::default(),
             notes: Default::default(),
             collect: Default::default(),
+            probes,
+            os_requests: Vec::new(),
+            storage,
         }
     }
 
     // ----- derived views -------------------------------------------------------------
 
     /// Rooms that pass the filter, in the order the sidebar shows them.
-    pub fn visible_rooms(&self) -> Vec<usize> {
+    pub(crate) fn visible_rooms(&self) -> Vec<usize> {
         let needle = (!self.sidebar.filter.is_empty()).then(|| self.sidebar.filter.to_lowercase());
         let open = self.open_index();
         let mut out = Vec::with_capacity(if needle.is_none() {
@@ -810,7 +851,7 @@ impl App {
         out
     }
 
-    pub fn sidebar_rows(&self) -> Vec<SideRow> {
+    pub(crate) fn sidebar_rows(&self) -> Vec<SideRow> {
         let mut rows = Vec::new();
         let mut section = None;
         for index in self.visible_rooms() {
@@ -828,7 +869,7 @@ impl App {
     }
 
     /// The room under the sidebar's keyboard cursor.
-    pub fn cursor_room(&self) -> Option<usize> {
+    pub(crate) fn cursor_room(&self) -> Option<usize> {
         let visible = self.visible_rooms();
         visible
             .get(self.sidebar.cursor.min(visible.len().saturating_sub(1)))
@@ -838,19 +879,19 @@ impl App {
     /// Where the open room is in `rooms`. `None` when there are no rooms (before the
     /// first sync) and while no chat is open. Everything that means "the open room"
     /// asks here (or `room`), never `active` itself.
-    pub fn open_index(&self) -> Option<usize> {
+    pub(crate) fn open_index(&self) -> Option<usize> {
         (!self.chat_closed && self.active < self.rooms.len()).then_some(self.active)
     }
 
     /// The open room. `None` when there are no rooms (before the first sync) and
     /// while no chat is open.
-    pub fn room(&self) -> Option<&Room> {
+    pub(crate) fn room(&self) -> Option<&Room> {
         self.open_index().and_then(|index| self.rooms.get(index))
     }
 
     /// The user closed the chat and has not opened one since: the chat area shows no
     /// room, and the room list has the focus.
-    pub fn chat_closed(&self) -> bool {
+    pub(crate) fn chat_closed(&self) -> bool {
         self.chat_closed
     }
 
@@ -866,7 +907,121 @@ impl App {
 
     // ----- state changes -------------------------------------------------------------
 
-    pub fn show_toast(&mut self, text: impl Into<String>) {
+    /// Asks for `target` (a link, or a saved file's path) to be opened by the
+    /// desktop's program for it. Best effort: the login form, for one, also shows
+    /// the address to open by hand.
+    pub(super) fn open_externally(&mut self, target: String) {
+        self.os_requests.push(OsRequest::Open(target));
+    }
+
+    /// What the desktop is to do, for the event loop.
+    pub fn take_os_requests(&mut self) -> Vec<OsRequest> {
+        std::mem::take(&mut self.os_requests)
+    }
+
+    // ----- what the shell decides at start, and what it carries out each turn -------
+
+    /// Changed settings are written to the storage, and a changed `theme` setting
+    /// there is noticed. Not in the demo, which changes nothing for good.
+    pub fn set_config_stored(&mut self, stored: bool) {
+        self.config_stored = stored;
+    }
+
+    /// The saved messages are kept in the storage, read once a session says whose
+    /// they are. Not in the demo.
+    pub fn set_saved_stored(&mut self, stored: bool) {
+        self.bookmarks.stored = stored;
+    }
+
+    /// A Matrix link or address to open once the rooms are there (the terminal's
+    /// comes from the command line).
+    pub fn set_startup_target(&mut self, target: Option<String>) {
+        self.startup_target = target;
+    }
+
+    /// Whether `Shift-Enter` is told from `Enter` here (in the terminal, its keyboard
+    /// protocol), for the doctor's report.
+    pub fn set_keyboard_enhanced(&mut self, enhanced: bool) {
+        self.found.keyboard_enhanced = Some(enhanced);
+    }
+
+    /// The app is to end: the user quit, or the shell ended it.
+    pub fn should_quit(&self) -> bool {
+        self.should_quit
+    }
+
+    /// Ends the app at the shell's next turn (a signal, a closed window).
+    pub fn quit(&mut self) {
+        self.should_quit = true;
+    }
+
+    /// Whether something changed since the last frame, cleared by asking: the shell
+    /// draws when it did.
+    pub fn take_dirty(&mut self) -> bool {
+        std::mem::take(&mut self.dirty)
+    }
+
+    /// The screen is to be drawn again: the shell had handed it to something else.
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    /// Whether the whole screen is to be drawn afresh, not only what changed, cleared
+    /// by asking.
+    pub fn take_repaint(&mut self) -> bool {
+        std::mem::take(&mut self.repaint)
+    }
+
+    /// Text for the system clipboard, for the shell to send.
+    pub fn take_pending_copy(&mut self) -> Option<String> {
+        self.pending_copy.take()
+    }
+
+    /// The `mouse` setting: whether clicks go to the app.
+    pub fn mouse_on(&self) -> bool {
+        self.mouse
+    }
+
+    /// The `window_title` setting: whether the window's title shows the unread count
+    /// ([`Self::take_window_title`]).
+    pub fn window_title_on(&self) -> bool {
+        self.window_title
+    }
+
+    /// For tests: the configuration is the file at `file`, written to as the
+    /// running app writes its own.
+    #[cfg(test)]
+    pub(crate) fn set_config_file(&mut self, file: &std::path::Path) {
+        let files = self.storage.files().expect("the app's storage is files");
+        *files = std::mem::take(files).with_config(file);
+        self.config_stored = true;
+    }
+
+    /// For tests: the saved messages are kept in the file `file`.
+    #[cfg(test)]
+    pub(crate) fn set_saved_file(&mut self, file: &std::path::Path) {
+        let files = self.storage.files().expect("the app's storage is files");
+        *files = std::mem::take(files).with_saved(file);
+        self.bookmarks.stored = true;
+    }
+
+    /// For tests: what was asked to be opened since the last look.
+    #[cfg(test)]
+    pub(crate) fn take_opened(&mut self) -> Vec<String> {
+        let (opened, rest) = std::mem::take(&mut self.os_requests)
+            .into_iter()
+            .partition::<Vec<_>, _>(|request| matches!(request, OsRequest::Open(_)));
+        self.os_requests = rest;
+        opened
+            .into_iter()
+            .filter_map(|request| match request {
+                OsRequest::Open(target) => Some(target),
+                OsRequest::RaiseWindow(_) | OsRequest::ClearNoticeIcons => None,
+            })
+            .collect()
+    }
+
+    pub(crate) fn show_toast(&mut self, text: impl Into<String>) {
         // Toasts often quote what a server or another person said.
         let text = crate::text::sanitize_line(&text.into());
         self.toast = Some((text, Instant::now()));
@@ -879,8 +1034,10 @@ impl App {
     /// pop up messages, and a theme that a generator has yet to write is just awaited.
     pub fn reload_theme(&mut self) {
         self.dirty = true;
-        self.theme_names = Theme::available(&self.themes_dir);
-        let loaded = self.config_file.as_deref().map(Config::load);
+        self.theme_names = Theme::available(self.storage.as_ref());
+        let loaded = self
+            .config_stored
+            .then(|| Config::load_from(self.storage.as_ref()));
         // What the doctor says about the file follows it; the settings themselves
         // (but the theme) are read at start only.
         match &loaded {
@@ -917,8 +1074,8 @@ impl App {
             menu.show_theme_pair = true;
         }
         let name = self.wanted_theme.clone();
-        let exists = Theme::builtin(&name).is_some()
-            || self.themes_dir.join(format!("{name}.toml")).exists();
+        let exists =
+            Theme::builtin(&name).is_some() || self.storage.exists(&Key::Theme(name.clone()));
         if exists {
             self.set_theme(&name);
         }
@@ -954,7 +1111,7 @@ impl App {
 
     fn set_theme(&mut self, name: &str) {
         self.wanted_theme = name.to_owned();
-        match Theme::load(name, &self.themes_dir) {
+        match Theme::load(name, self.storage.as_ref()) {
             Ok(mut theme) => {
                 for warning in &theme.warnings {
                     tracing::warn!(theme = name, "{warning}");
@@ -984,7 +1141,7 @@ impl App {
     /// Moves to the next or previous theme and remembers the choice.
     fn step_theme(&mut self, delta: isize) {
         // Look again: a generator may have written a new theme since.
-        self.theme_names = Theme::available(&self.themes_dir);
+        self.theme_names = Theme::available(self.storage.as_ref());
         let count = self.theme_names.len() as isize;
         let at = self
             .theme_names
@@ -997,7 +1154,7 @@ impl App {
 
     /// Cycles `theme_dark` or `theme_light` through `(unset)` and available themes.
     fn step_slot_theme(&mut self, slot: ColorScheme, delta: isize) {
-        self.theme_names = Theme::available(&self.themes_dir);
+        self.theme_names = Theme::available(self.storage.as_ref());
         let current = match slot {
             ColorScheme::Dark => self.theme_dark.as_deref(),
             ColorScheme::Light => self.theme_light.as_deref(),
@@ -1087,10 +1244,10 @@ impl App {
 
     /// Writes one setting to the configuration file (there is none in demo mode).
     fn save_setting(&mut self, key: &str, value: impl Into<toml_edit::Value>) {
-        let Some(file) = &self.config_file else {
+        if !self.config_stored {
             return;
-        };
-        if let Err(err) = crate::config::save_setting(file, key, value) {
+        }
+        if let Err(err) = crate::config::save_setting(self.storage.as_ref(), key, value) {
             tracing::warn!(why = %crate::logsafe::kind_any(&err), key, "could not save setting");
             self.show_toast(format!("Could not save the setting: {err:#}"));
         }
@@ -1098,17 +1255,17 @@ impl App {
 
     /// Removes one setting from the configuration file (there is none in demo mode).
     fn remove_setting(&mut self, key: &str) {
-        let Some(file) = &self.config_file else {
+        if !self.config_stored {
             return;
-        };
-        if let Err(err) = crate::config::remove_setting(file, key) {
+        }
+        if let Err(err) = crate::config::remove_setting(self.storage.as_ref(), key) {
             tracing::warn!(why = %crate::logsafe::kind_any(&err), key, "could not remove setting");
             self.show_toast(format!("Could not save the setting: {err:#}"));
         }
     }
 
     /// What the settings menu shows next to a row.
-    pub fn setting_value(&self, setting: Setting) -> String {
+    pub(crate) fn setting_value(&self, setting: Setting) -> String {
         let switch = |on: bool| if on { "on" } else { "off" }.to_owned();
         match setting {
             Setting::Theme => self.wanted_theme.clone(),
@@ -1340,13 +1497,32 @@ impl App {
                     self.send_matrix(MatrixCmd::Logout);
                     // Nothing may be sent for the old session from here on.
                     self.reset_session();
-                    self.remove_notes_file();
+                    // At once: a quit before the worker is done must not leave them.
+                    self.forget_what_the_account_kept();
                     self.show_toast("Logging out…");
                 } else {
                     menu.confirm_logout = true;
                 }
             }
         }
+    }
+
+    /// The user logs out: what the account kept in the storage goes, with everything
+    /// set aside or half written for it. The saved messages name its rooms and
+    /// messages; the kept notes are message text in plain form. Done the moment the
+    /// user confirms (the app may be closed before the worker has removed the
+    /// session) and again once the worker says it has (`MatrixEvent::LoggedOut`), for
+    /// anything written in between. Best effort; a failure is logged by its kind.
+    /// (A session that merely ended keeps the saved messages: see `NeedLogin`.)
+    fn forget_what_the_account_kept(&mut self) {
+        if self.bookmarks.stored
+            && let Err(err) = self
+                .storage
+                .remove(&Key::Saved, crate::storage::Removal::All)
+        {
+            tracing::warn!(why = %crate::logsafe::kind_any(&err), "could not remove the saved messages");
+        }
+        self.remove_all_notes();
     }
 
     /// A message that deserves a notification arrived. It is shown unless the user is
@@ -1413,7 +1589,8 @@ impl App {
         // The click was on the desktop, maybe with another window in front: ask for
         // ours to be shown.
         if let Some(command) = &self.notification_click_command {
-            crate::focus::raise_window(command);
+            self.os_requests
+                .push(OsRequest::RaiseWindow(command.clone()));
         }
         // A jump to a message that is still on its way would take the view
         // somewhere else afterwards.
@@ -1478,14 +1655,9 @@ impl App {
         }
     }
 
-    /// Attaches the ephemeral desktop notification icon cache managed by the event loop.
-    pub fn set_notify_icons(&mut self, cache: Arc<crate::notify::IconCache>) {
-        self.notify_icons = Some(cache);
-    }
-
     /// Hands the waiting notifications to the event loop (test helper).
     #[cfg(test)]
-    pub fn take_notices(
+    pub(crate) fn take_notices(
         &mut self,
     ) -> (Vec<crate::matrix::Notice>, crate::notify::NotifyMode, bool) {
         (
@@ -1496,9 +1668,13 @@ impl App {
     }
 
     fn resolve_notice_icon(&mut self, notice: &crate::matrix::Notice) -> crate::notify::NotifyIcon {
-        if !self.notification_preview
-            || self.notify_mode.resolved() != crate::notify::NotifyMode::Desktop
-        {
+        let mode = match self.notify_mode {
+            crate::notify::NotifyMode::Auto => self.notify_auto,
+            mode @ (crate::notify::NotifyMode::Desktop
+            | crate::notify::NotifyMode::Terminal
+            | crate::notify::NotifyMode::Off) => mode,
+        };
+        if !self.notification_preview || mode != crate::notify::NotifyMode::Desktop {
             return crate::notify::NotifyIcon::Generic;
         }
         let room = self.rooms.iter().find(|r| r.id == notice.room_id);
@@ -1521,8 +1697,8 @@ impl App {
         crate::notify::tile_icon(&self.theme, tile_name)
     }
 
-    /// Notifications ready for delivery together with their resolved desktop icons and
-    /// icon cache epoch.
+    /// Notifications ready for delivery together with their resolved desktop icons (the
+    /// shell writes the icon files).
     pub fn take_notices_with_icons(&mut self) -> ReadyNotices {
         let waiting = std::mem::take(&mut self.pending_notices);
         let mut items = Vec::with_capacity(waiting.len());
@@ -1542,15 +1718,10 @@ impl App {
             reminders.push((reminder, icon));
         }
         self.send_avatar_requests();
-        let icon_cache = self
-            .notify_icons
-            .as_ref()
-            .map(|c| (Arc::clone(c), c.epoch()));
         ReadyNotices {
             items,
             mode: self.notify_mode,
             preview: self.notification_preview,
-            icon_cache,
             reminders,
         }
     }
@@ -1587,9 +1758,8 @@ impl App {
         self.sidebar.people_only = false;
         self.session_started = None;
         self.pending_notices.clear();
-        if let Some(cache) = &self.notify_icons {
-            cache.clear();
-        }
+        // So do the icon files of its desktop notifications, the shell's.
+        self.os_requests.push(OsRequest::ClearNoticeIcons);
         self.count_notices.clear();
         self.detailed_notices.clear();
         self.shown_notices.clear();
@@ -1824,7 +1994,7 @@ impl App {
 
     /// The name of the selected space, for the room list's header. A space inside
     /// another is shown with its parent, so it is clear where it sits.
-    pub fn space_name(&self) -> Option<String> {
+    pub(crate) fn space_name(&self) -> Option<String> {
         self.space_display_name(self.space_at?)
     }
 
@@ -1861,25 +2031,25 @@ impl App {
     }
 
     /// Aggregated unread state across all non-muted rooms.
-    pub fn all_spaces_unread(&self) -> crate::model::SpaceUnread {
+    pub(crate) fn all_spaces_unread(&self) -> crate::model::SpaceUnread {
         self.aggregate_space_unread(|_| true)
     }
 
     /// Unread state for the space at `at` (sub-spaces count into their level-0 parent
     /// without internal double-counting; muted rooms excluded).
-    pub fn space_unread(&self, at: usize) -> crate::model::SpaceUnread {
+    pub(crate) fn space_unread(&self, at: usize) -> crate::model::SpaceUnread {
         let ids = self.space_room_ids(at);
         self.aggregate_space_unread(|room| ids.contains(room.id.as_str()))
     }
 
     /// Aggregated unread state for the currently selected space, if any.
-    pub fn selected_space_unread(&self) -> Option<crate::model::SpaceUnread> {
+    pub(crate) fn selected_space_unread(&self) -> Option<crate::model::SpaceUnread> {
         self.space_at.map(|at| self.space_unread(at))
     }
 
     /// Unread state for rooms in other spaces outside the currently selected space
     /// (muted rooms excluded). Empty when "All rooms" is active.
-    pub fn other_spaces_unread(&self) -> crate::model::SpaceUnread {
+    pub(crate) fn other_spaces_unread(&self) -> crate::model::SpaceUnread {
         if self.space_at.is_none() {
             return crate::model::SpaceUnread::default();
         }
@@ -1896,7 +2066,7 @@ impl App {
 
     /// Narrows the room list to the space at this position in `spaces` (`None`: all
     /// rooms). By position, not id: a space inside two others is listed twice.
-    pub fn select_space(&mut self, at: Option<usize>) {
+    pub(crate) fn select_space(&mut self, at: Option<usize>) {
         self.set_space(at);
         self.sidebar.cursor = 0;
         self.sidebar.scroll = 0;
@@ -2235,7 +2405,7 @@ impl App {
         };
         if !self.try_open_matrix_link(&url) {
             if self.matrix.is_some() {
-                open_in_browser(&url);
+                self.open_externally(url.clone());
             }
             self.show_toast(format!("Opening {url}"));
         }
@@ -2348,7 +2518,7 @@ impl App {
     }
 
     /// Opens `startup_target` once login/rooms/sync conditions allow it.
-    pub(super) fn maybe_open_startup_target(&mut self) {
+    pub fn maybe_open_startup_target(&mut self) {
         let Some(raw) = self.startup_target.as_deref() else {
             return;
         };
@@ -2396,7 +2566,7 @@ impl App {
     }
 
     /// Whether the selected message is one of ours that could not be sent.
-    pub fn selected_failed(&self) -> bool {
+    pub(crate) fn selected_failed(&self) -> bool {
         self.timeline
             .selected
             .and_then(|i| self.messages().get(i))
@@ -2704,7 +2874,7 @@ impl App {
     /// The user's own latest message that can be edited, if the composer is free for
     /// it: empty, and neither answering nor editing. This is what `Action::EditLast`
     /// edits; it has no key unless the user gave it one.
-    pub fn last_editable(&self) -> Option<usize> {
+    pub(crate) fn last_editable(&self) -> Option<usize> {
         if !self.composer.is_empty() || self.compose_mode != ComposeMode::Normal {
             return None;
         }
@@ -2894,7 +3064,7 @@ impl App {
         self.compose_mode = ComposeMode::Normal;
     }
 
-    pub fn perform(&mut self, action: Action) {
+    pub(crate) fn perform(&mut self, action: Action) {
         self.dirty = true;
         if !matches!(
             action,
@@ -3546,7 +3716,7 @@ impl App {
                 }
                 #[expect(
                     clippy::wildcard_enum_match_arm,
-                    reason = "foreign crossterm::event::KeyCode"
+                    reason = "input events stand in for the terminal's (crate::input)"
                 )]
                 match code {
                     KeyCode::Tab | KeyCode::Down => form.next(),
@@ -3571,7 +3741,7 @@ impl App {
             {
                 #[expect(
                     clippy::wildcard_enum_match_arm,
-                    reason = "foreign crossterm::event::KeyCode"
+                    reason = "input events stand in for the terminal's (crate::input)"
                 )]
                 match code {
                     KeyCode::Esc => self.close_modal(),
@@ -3586,7 +3756,7 @@ impl App {
                 let page = picker.rows.max(1) as isize;
                 #[expect(
                     clippy::wildcard_enum_match_arm,
-                    reason = "foreign crossterm::event::KeyCode"
+                    reason = "input events stand in for the terminal's (crate::input)"
                 )]
                 match code {
                     KeyCode::Esc => self.modal = None,
@@ -3617,7 +3787,7 @@ impl App {
             {
                 #[expect(
                     clippy::wildcard_enum_match_arm,
-                    reason = "foreign crossterm::event::KeyCode"
+                    reason = "input events stand in for the terminal's (crate::input)"
                 )]
                 match code {
                     KeyCode::Esc => menu.editing = None,
@@ -3672,7 +3842,7 @@ impl App {
                 let setting = menu.current();
                 #[expect(
                     clippy::wildcard_enum_match_arm,
-                    reason = "foreign crossterm::event::KeyCode"
+                    reason = "input events stand in for the terminal's (crate::input)"
                 )]
                 match code {
                     KeyCode::Esc | KeyCode::F(2) => self.modal = None,
@@ -3727,6 +3897,7 @@ impl App {
                 self.reset_session();
                 self.open_modal(Modal::Login(LoginForm::reauth(target, reason)));
             }
+            MatrixEvent::LoggedOut => self.forget_what_the_account_kept(),
             MatrixEvent::LoginFailed(error) => {
                 if let Some(Modal::Login(form)) = &mut self.modal {
                     form.busy = None;
@@ -3735,7 +3906,7 @@ impl App {
                 }
             }
             MatrixEvent::BrowserLoginUrl(url) => {
-                open_in_browser(&url);
+                self.open_externally(url.clone());
                 if let Some(Modal::Login(form)) = &mut self.modal {
                     form.browser_url = Some(url);
                 }
@@ -3744,8 +3915,8 @@ impl App {
                 if matches!(self.modal, Some(Modal::Login(_))) {
                     self.modal = None;
                 }
-                if let Some(file) = self.bookmarks.file.clone() {
-                    self.load_saved(file, &user_id);
+                if self.bookmarks.stored {
+                    self.load_saved(&user_id);
                 }
                 self.load_notes(&user_id);
                 self.user_id = Some(user_id);
@@ -4016,6 +4187,7 @@ impl App {
             MatrixEvent::Keywords(event) => self.on_keywords_event(event),
             MatrixEvent::Saved(event) => self.on_saved_event(event),
             // Answers for `matrix-rat serve`; the app never asks for them.
+            #[cfg(not(target_family = "wasm"))]
             MatrixEvent::Agent(_) => {}
             MatrixEvent::Collect(event) => self.on_collect(event),
             MatrixEvent::DecryptionRetried {
@@ -4286,19 +4458,19 @@ impl App {
 
     // ----- input ---------------------------------------------------------------------
 
-    pub fn on_event(&mut self, event: Event) {
+    pub fn on_event(&mut self, event: InputEvent) {
         match event {
-            Event::Key(key) if key.kind != KeyEventKind::Release => {
+            InputEvent::Key(key) if key.kind != KeyEventKind::Release => {
                 self.on_key(key);
                 self.update_typing();
                 self.note_draft();
             }
-            Event::Mouse(mouse) => {
+            InputEvent::Mouse(mouse) => {
                 self.on_mouse(mouse);
                 self.update_typing();
                 self.note_draft();
             }
-            Event::Paste(mut text) => {
+            InputEvent::Paste(mut text) => {
                 // A secret is taken as it is and our copy of it wiped; everything
                 // else goes the usual way.
                 if self.paste_secret(&text) {
@@ -4309,23 +4481,24 @@ impl App {
                 self.update_typing();
                 self.note_draft();
             }
-            Event::Resize(..) => {
+            InputEvent::Resize(..) => {
                 // A resized terminal may have dropped the pictures it was sent.
                 self.images.forget_encoded();
                 self.dirty = true;
             }
-            Event::FocusGained => {
+            InputEvent::FocusGained => {
                 self.window_focused = true;
                 self.found.focus_reports = true;
                 self.dirty = true;
             }
-            Event::FocusLost => {
+            InputEvent::FocusLost => {
                 // Nobody watches the microphone from another window.
                 self.stop_recording();
                 self.window_focused = false;
                 self.found.focus_reports = true;
             }
-            _ => {}
+            // A key coming up: only presses (and their repeats) count.
+            InputEvent::Key(_) => {}
         }
     }
 
@@ -4457,7 +4630,7 @@ impl App {
     }
 
     /// Types into whatever has the focus: the room filter or the composer.
-    pub fn type_char(&mut self, c: char) {
+    pub(crate) fn type_char(&mut self, c: char) {
         match self.focus {
             Pane::Sidebar => {
                 self.cancel_pending_jump();
@@ -4489,7 +4662,7 @@ impl App {
         let mut handled = true;
         #[expect(
             clippy::wildcard_enum_match_arm,
-            reason = "foreign crossterm::event::KeyCode"
+            reason = "input events stand in for the terminal's (crate::input)"
         )]
         match code {
             KeyCode::Char(c) if !ctrl && !alt => self.type_char(c),
@@ -4629,7 +4802,7 @@ impl App {
         }
         #[expect(
             clippy::wildcard_enum_match_arm,
-            reason = "foreign crossterm::event::MouseEventKind"
+            reason = "input events stand in for the terminal's (crate::input)"
         )]
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -5229,7 +5402,7 @@ impl App {
         }
     }
 
-    fn on_tick(&mut self) {
+    pub fn on_tick(&mut self) {
         self.verify_tick();
         self.maybe_open_startup_target();
         self.devices_watch();
@@ -5337,357 +5510,237 @@ pub(super) fn validate_avatar_path(raw: &str, limit: Option<u64>) -> Result<Path
     Ok(path.clone())
 }
 
-/// Best effort; the login form also shows the address to open by hand.
-#[cfg(not(test))]
-fn open_in_browser(url: &str) {
-    use std::process::{Command, Stdio};
-    let _ = Command::new("xdg-open")
-        .arg(url)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-}
-
-#[cfg(test)]
-thread_local! {
-    static TEST_OPENED_URLS: std::cell::RefCell<Vec<String>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
-#[cfg(test)]
-fn open_in_browser(url: &str) {
-    TEST_OPENED_URLS.with(|urls| urls.borrow_mut().push(url.to_owned()));
-}
-
-/// Waits up to `grace` for `tasks` to end on their own. Returns `false` if any task
-/// outlived the grace and had to be aborted (after aborting, drains briefly so drop
-/// handlers — such as killing child process groups — run before returning).
-async fn drain_or_abort(tasks: &mut tokio::task::JoinSet<()>, grace: Duration) -> bool {
-    if tasks.is_empty() {
-        return true;
-    }
-    let done = async { while tasks.join_next().await.is_some() {} };
-    if tokio::time::timeout(grace, done).await.is_ok() {
-        return true;
-    }
-    tasks.abort_all();
-    let aborted = async { while tasks.join_next().await.is_some() {} };
-    let _ = tokio::time::timeout(Duration::from_millis(500), aborted).await;
-    false
-}
-
-pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<String>) -> Result<()> {
-    let (portal_scheme, mut scheme_watch) = crate::portal::SchemeWatch::start().await;
-    let guard = TerminalGuard::enter(config.mouse, config.window_title)?;
-    // Terminal queries (image protocol, background colour) go here: on the alternate
-    // screen, where a terminal that prints a question instead of answering does no
-    // harm, but before mouse and focus reports are on and before the event stream.
-    guard.alternate_screen()?;
-    let (graphics, term_reply) =
-        crate::images::Graphics::detect_with_term(config.images, portal_scheme.is_none());
-    let initial_scheme = crate::portal::resolve_initial_scheme(portal_scheme, term_reply);
-    let mut terminal = guard.activate()?;
-    let mut events = EventStream::new();
-    let mut tick = tokio::time::interval(Duration::from_millis(250));
-    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    // Without these, a kill or a closed terminal window would skip all cleanup.
-    let mut sigterm = signal(SignalKind::terminate())?;
-    let mut sighup = signal(SignalKind::hangup())?;
-    // Before the worker starts, as the signals above: an error from here on is returned
-    // only after the worker was shut down (see `outcome` below).
-    let mut theme_watch = crate::watch::ThemeWatch::start(paths)?;
-    let (matrix, mut matrix_events) = if demo {
-        (None, None)
-    } else {
-        let (handle, events) = matrix::spawn_with(paths.clone(), config.secret_store);
-        (Some(handle), Some(events))
-    };
-    let mut app = App::new_in_scheme(config, paths.themes_dir(), matrix.clone(), initial_scheme);
-    // As the terminal answered before the event stream existed: never asked again.
-    app.found.keyboard_enhanced = Some(guard.keyboard_enhanced());
-    // The demo is for looking around: what is changed there is not written into the
-    // real configuration.
-    if !demo {
-        app.config_file = Some(paths.config_file());
-        // Read when a session is up: whose list it is must be known first.
-        app.bookmarks.file = Some(paths.saved_file());
-    }
-    app.startup_target = target;
-    // Copies of sounds and mpv's sockets; what an earlier run left there goes now.
-    app.set_audio_dir(paths.audio_dir());
-    // The demo keeps no notes in a file, as it writes no settings.
-    if !demo {
-        app.set_note_paths(paths.audio_dir(), paths.notes_file());
-    }
-    if demo {
-        app.add_demo_space();
-        app.maybe_open_startup_target();
-    }
-    let notify_icons = Arc::new(crate::notify::IconCache::new(paths.notify_icons_dir()));
-    struct NotifyCacheGuard(Arc<crate::notify::IconCache>);
-    impl Drop for NotifyCacheGuard {
-        fn drop(&mut self) {
-            self.0.clear();
-        }
-    }
-    let _notify_cache_guard = NotifyCacheGuard(Arc::clone(&notify_icons));
-    app.set_notify_icons(notify_icons);
-    let mut encoded_images = app.start_images(graphics);
-    // Clicks on desktop notifications come back here, as the room to open.
-    let (notice_clicks, mut clicked) =
-        tokio::sync::mpsc::unbounded_channel::<crate::notify::Click>();
-    // Pictures read from the clipboard come back here.
-    let (pasted, mut pasted_back) = tokio::sync::mpsc::unbounded_channel();
-    // What the audio players say comes back here; their tasks end with them.
-    let (player_news, mut player_back) = tokio::sync::mpsc::unbounded_channel();
-    let mut players = tokio::task::JoinSet::new();
-    // And what a recording says; kept separate so releasing the terminal for `$EDITOR`
-    // can drain recordings without disturbing playback.
-    let (record_news, mut record_back) = tokio::sync::mpsc::unbounded_channel();
-    let mut recorders = tokio::task::JoinSet::new();
-    // So do the programs that transcribe and translate, and what they wrote.
-    let (note_news, mut note_back) = tokio::sync::mpsc::unbounded_channel();
-    let mut note_programs = tokio::task::JoinSet::new();
-    // The same for the summary command of "catch up".
-    let (summary_news, mut summary_back) = tokio::sync::mpsc::unbounded_channel();
-    let mut summaries = tokio::task::JoinSet::new();
-    // What the worker said while the external editor had the terminal.
-    let mut held_events = external_editor::HeldEvents::default();
-
-    // An error ends the loop, not the function: what runs after it (players stopped,
-    // the worker shut down cleanly) runs for an error too, and the error is returned
-    // then. Returned at once, it dropped the runtime under the worker, whose store
-    // write in flight was cancelled; matrix-sdk-sqlite panics over that.
-    let outcome = async {
-        while !app.should_quit {
-            if app.suspend_requested {
-                app.suspend_requested = false;
-                // What played or recorded was told to stop: wait for them to end, and abort
-                // any that outlive the grace so no child process group stays alive across
-                // SIGTSTP (they are not stopped with the terminal).
-                let _ = drain_or_abort(&mut players, Duration::from_secs(1)).await;
-                if !drain_or_abort(&mut recorders, Duration::from_secs(2)).await {
-                    app.cancel_recording();
-                }
-                // The terminal frees its copies of the pictures now, in case we are
-                // never resumed; they are sent again when drawn.
-                app.flush_images(true);
-                terminal::suspend(&mut terminal)?;
-                // The shell's title was put back meanwhile.
-                app.window_title_lost();
-                app.dirty = true;
-            }
-            if let Some(request) = app.take_editor_request() {
-                // A running recording was told to stop when the editor was requested; wait
-                // for it to finish (or kill it) before giving the terminal to the editor.
-                if !drain_or_abort(&mut recorders, Duration::from_secs(2)).await {
-                    app.cancel_recording();
-                }
-                // As for Ctrl-Z: the terminal frees its copies of the pictures now.
-                app.flush_images(true);
-                // Its reader thread would take the keys meant for the editor: the stream
-                // is dropped, and a new one is read from once we are back.
-                drop(std::mem::replace(&mut events, EventStream::new()));
-                tokio::time::sleep(Duration::from_millis(50)).await;
-                terminal::absorb_reader_wake();
-                terminal::release();
-                let dir = paths.runtime_dir.clone();
-                // A blocking child: the worker, a task of its own, goes on syncing; what it
-                // says meanwhile is held, each snapshot once, and handled when we are back.
-                let editor = tokio::task::spawn_blocking(move || {
-                    crate::editor::edit(&request, &dir, crate::editor::run_command)
-                });
-                let outcome = external_editor::hold_events_while(
-                    editor,
-                    matrix_events.as_mut(),
-                    &mut held_events,
-                )
-                .await
-                .unwrap_or(crate::editor::Outcome::Failed(
-                    crate::editor::Failure::Launch,
-                ));
-                terminal::absorb_reader_wake();
-                let resumed = terminal::resume(&mut terminal);
-                // The screen was cleared: pictures are sent again when drawn. The title
-                // from before was put back for the editor: ours is written again too.
-                app.images.forget_encoded();
-                app.window_title_lost();
-                app.finish_editor(outcome);
-                resumed?;
-            }
-            if let Some(request) = app.take_paste_request() {
-                // Off the UI thread: the tool may take its time (up to its limit), and the
-                // picture is decoded to check it. Messages and keys are handled meanwhile.
-                let dir = paths.runtime_dir.clone();
-                let back = pasted.clone();
-                tokio::spawn(async move {
-                    let id = request.id;
-                    let result = tokio::task::spawn_blocking(move || {
-                        crate::clipboard::paste(&request, &dir, crate::clipboard::run_tool)
-                    })
-                    .await
-                    .unwrap_or(Err(crate::clipboard::Failure::Failed));
-                    // Nobody to take it only once the app has ended: then the picture's
-                    // file is removed as the answer is dropped.
-                    let _ = back.send(crate::clipboard::Done { id, result });
-                });
-            }
-            if let Some(request) = app.take_audio_start() {
-                // A task on the async threads, which live as long as the app: the player is
-                // started from there (see `audio::play`).
-                players.spawn(crate::audio::run(request, player_news.clone()));
-            }
-            if let Some(request) = app.take_record_start() {
-                // As the players: the programs are tied to the thread that starts them.
-                recorders.spawn(crate::audio::record::run(request, record_news.clone()));
-            }
-            while players.try_join_next().is_some() {}
-            while recorders.try_join_next().is_some() {}
-            for request in app.take_note_starts() {
-                note_programs.spawn(crate::textcmd::run(request, note_news.clone()));
-            }
-            while note_programs.try_join_next().is_some() {}
-            if let Some(request) = app.take_summary_start() {
-                summaries.spawn(crate::catchup::run(request, summary_news.clone()));
-            }
-            while summaries.try_join_next().is_some() {}
-            terminal::set_mouse(app.mouse)?;
-            terminal::set_window_title(app.window_title)?;
-            if std::mem::take(&mut app.repaint) {
-                // As after a resize: pictures are sent again with the fresh screen.
-                app.images.forget_encoded();
-                terminal::clear(&mut terminal)?;
-                app.dirty = true;
-            }
-            if let Some(text) = app.pending_copy.take() {
-                terminal::copy_to_clipboard(&text)?;
-            }
-            let ready = app.take_notices_with_icons();
-            for (notice, icon) in &ready.items {
-                crate::notify::show(
-                    ready.mode,
-                    notice,
-                    ready.preview,
-                    icon,
-                    ready.icon_cache.clone(),
-                    Some(&notice_clicks),
-                );
-            }
-            for (notice, icon) in &ready.reminders {
-                crate::notify::show_reminder(
-                    ready.mode,
-                    notice,
-                    ready.preview,
-                    icon,
-                    ready.icon_cache.clone(),
-                    Some(&notice_clicks),
-                );
-            }
-            if app.dirty {
-                app.dirty = false;
-                terminal.draw(|frame| ui::draw(frame, &mut app))?;
-                app.after_draw();
-                app.flush_images(false);
-                // Only when the count changed, and never with the setting off.
-                if let Some(title) = app.take_window_title() {
-                    terminal::write_window_title(&title)?;
-                }
-            }
-            tokio::select! {
-                event = events.next() => match event {
-                    Some(Ok(event)) => app.on_event(event),
-                    Some(Err(err)) => return Err(err.into()),
-                    None => break,
-                },
-                Some(event) = external_editor::next_matrix_event(
-                    &mut held_events,
-                    matrix_events.as_mut(),
-                ) => app.on_matrix(event),
-                Some(click) = clicked.recv() => app.on_matrix(MatrixEvent::NoticeClicked {
-                    room_id: click.room_id,
-                    event: click.event,
-                }),
-                Some(done) = pasted_back.recv() => app.finish_paste(done),
-                Some(update) = player_back.recv() => app.on_audio(update),
-                Some(done) = note_back.recv() => app.on_note_done(done),
-                Some(done) = summary_back.recv() => app.on_summary(done),
-                Some(update) = record_back.recv() => app.on_recording(update),
-                _ = theme_watch.changed() => app.reload_theme(),
-                scheme = scheme_watch.changed() => app.on_color_scheme(scheme),
-                Some(done) = encoded_images.recv() => app.on_image_encoded(done),
-                _ = wait_deadline(app.search_debounce_deadline()) => app.tick_global_search(),
-                _ = wait_deadline(app.user_search_debounce_deadline()) => app.tick_user_search(),
-                _ = wait_deadline(app.dir_search_debounce_deadline()) => app.tick_dir_search(),
-                _ = tick.tick() => app.on_tick(),
-                _ = tokio::signal::ctrl_c() => app.should_quit = true,
-                _ = sigterm.recv() => app.should_quit = true,
-                _ = sighup.recv() => app.should_quit = true,
-            }
-        }
-        Ok::<(), anyhow::Error>(())
-    }
-    .await;
-    app.flush_images(true);
-    // What plays stops with the app, and its file goes; a player that does not end in
-    // time is killed as its task is dropped.
-    app.stop_audio();
-    // So do the programs that transcribe and translate, and a recording.
-    app.stop_notes();
-    app.cancel_recording();
-    let stopped = async {
-        while players.join_next().await.is_some() {}
-        while recorders.join_next().await.is_some() {}
-        while note_programs.join_next().await.is_some() {}
-    };
-    let _ = tokio::time::timeout(Duration::from_secs(2), stopped).await;
-    drop(players);
-    drop(recorders);
-    drop(note_programs);
-    // A summary command that still runs is killed as its task is dropped.
-    drop(summaries);
-    // Let the worker finish handing any queued files to the send queue and stop
-    // syncing cleanly, while `app` stays alive so temporary voice and picture files
-    // stay on disk until the worker has read them.
-    if let (Some(matrix), Some(mut events)) = (matrix, matrix_events) {
-        let wait = if app.attach.sends_out() {
-            Duration::from_secs(7)
-        } else {
-            Duration::from_secs(3)
-        };
-        // The worker takes commands in order: the draft is written before it stops.
-        app.shut_down_worker();
-        // Close every command sender so the worker also sees the channel end.
-        drop(matrix);
-        let drained = async { while events.recv().await.is_some() {} };
-        let _ = tokio::time::timeout(wait, drained).await;
-    }
-    drop(app);
-    crate::audio::remove_leftovers(&paths.audio_dir());
-    outcome
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
-    fn key_mod(code: KeyCode, mods: KeyModifiers) -> Event {
-        Event::Key(KeyEvent::new(code, mods))
+    fn test_probes() -> Box<dyn Probes> {
+        Box::new(crate::probes::TestProbes::default())
+    }
+
+    /// Files, with the user's themes in `dir`.
+    fn themes_in(dir: PathBuf) -> Box<dyn Storage> {
+        Box::new(crate::storage::FsStorage::default().with_themes(dir))
+    }
+
+    /// Only a logout the user asked for takes the saved messages along (when it is
+    /// confirmed, and again once the worker says it is done); the kept notes go
+    /// whenever a login is needed, and a soft logout keeps both for the same
+    /// account's return.
+    #[test]
+    fn a_logout_takes_what_the_account_kept_and_an_ended_session_keeps_the_saved_list() {
+        use crate::storage::MemStorage;
+        let storage = MemStorage::default();
+        let (handle, mut commands) = MatrixHandle::for_test();
+        let mut app = App::new_in_scheme(
+            &Config::default(),
+            Box::new(storage.clone()),
+            test_probes(),
+            Some(handle),
+            ColorScheme::Dark,
+        );
+        app.bookmarks.stored = true;
+        app.keep_notes_stored(PathBuf::new());
+        app.notes.keep = true;
+        app.on_matrix(MatrixEvent::LoggedIn {
+            user_id: "@me:example.org".into(),
+        });
+        // The account's list, something set aside of it, and kept notes.
+        storage.put(
+            &Key::Saved,
+            br#"{"version":1,"owner":"@me:example.org","items":[]}"#,
+        );
+        storage
+            .set_aside(&Key::Saved, "damaged", crate::storage::Aside::Copy)
+            .unwrap();
+        storage.put(&Key::Notes, b"{}");
+        storage.put(&Key::Config, b"");
+
+        // A soft logout keeps both.
+        app.on_matrix(MatrixEvent::NeedReauth {
+            target: crate::matrix::ReauthTarget {
+                homeserver: "https://example.org".into(),
+                user_id: "@me:example.org".into(),
+                device_id: "DEV1".into(),
+                kind: crate::matrix::ReauthKind::Password,
+                client_id: None,
+            },
+            reason: "session expired".into(),
+        });
+        assert_eq!(
+            storage.names(),
+            ["config", "notes", "saved", "saved.damaged"]
+        );
+        // A session the server ended (or a restore that failed): the notes go, the
+        // saved messages stay for the same account's next login.
+        app.on_matrix(MatrixEvent::NeedLogin { reason: None });
+        assert_eq!(storage.names(), ["config", "saved", "saved.damaged"]);
+
+        // Logging out, asked twice: both go the moment the user confirms (the app may
+        // be closed before the worker is done), and what was written meanwhile goes
+        // once the worker has removed the session.
+        app.modal = None;
+        storage.put(&Key::Notes, b"{}");
+        app.on_matrix(MatrixEvent::LoggedIn {
+            user_id: "@me:example.org".into(),
+        });
+        let _ = commands_sent(&mut commands);
+        app.on_event(key(KeyCode::F(2)));
+        app.change_setting(Setting::Logout, 0);
+        app.change_setting(Setting::Logout, 0);
+        assert_eq!(commands_sent(&mut commands), ["Logout"]);
+        assert_eq!(storage.names(), ["config"]);
+        storage.put(&Key::Saved, b"{}");
+        storage.put(&Key::Notes, b"{}");
+        app.on_matrix(MatrixEvent::LoggedOut);
+        assert_eq!(storage.names(), ["config"]);
+        app.on_matrix(MatrixEvent::NeedLogin { reason: None });
+        assert_eq!(storage.names(), ["config"]);
+        assert_eq!(MatrixEvent::LoggedOut.describe(), "LoggedOut");
+    }
+
+    /// What the app keeps (settings, themes, notes, saved messages) it reads and
+    /// writes through its storage alone: one without files does as well.
+    #[test]
+    fn what_the_app_keeps_goes_through_its_storage() {
+        use crate::storage::MemStorage;
+        let storage = MemStorage::default();
+        storage.put(&Key::Theme("mine".into()), b"[palette]\n");
+        storage.put(&Key::Notes, b"kept from before");
+        storage.put(
+            &Key::Saved,
+            br#"{"version":1,"owner":"@someone:example.org","items":[]}"#,
+        );
+        let mut app = App::new_in_scheme(
+            &Config::default(),
+            Box::new(storage.clone()),
+            test_probes(),
+            None,
+            ColorScheme::Dark,
+        );
+        assert!(app.theme_names.contains(&"mine".to_owned()));
+        app.set_theme("mine");
+        assert_eq!(app.theme.name, "mine");
+
+        // As in the demo: settings change, nothing is written.
+        app.change_setting(Setting::Mouse, 0);
+        assert!(!storage.exists(&Key::Config));
+        app.config_stored = true;
+        app.change_setting(Setting::Mouse, 0);
+        let config = String::from_utf8(storage.read(&Key::Config).unwrap().unwrap()).unwrap();
+        assert!(config.contains("mouse = "), "{config}");
+        app.apply_theme("mine".to_owned());
+        assert_eq!(Config::load_from(&storage).unwrap().theme, "mine");
+
+        // `keep_notes` is off: what was kept goes.
+        app.keep_notes_stored(PathBuf::new());
+        assert!(!storage.exists(&Key::Notes));
+        // Another account's list is set aside, not shown.
+        app.bookmarks.stored = true;
+        app.load_saved("@me:example.org");
+        assert!(app.toast.as_ref().unwrap().0.contains("another account"));
+        assert_eq!(
+            storage.names(),
+            ["config", "saved.other-account", "theme/mine"]
+        );
+    }
+
+    /// The machine is asked what it has at start, and again for the one thing a
+    /// setting changes (or an action needs), never looked at by the app itself; where
+    /// nothing is there, the settings say so.
+    #[test]
+    fn the_machine_is_asked_through_the_probes_at_start_and_when_a_setting_changes() {
+        let probes = crate::probes::Asked::default();
+        let asked = std::rc::Rc::clone(&probes.asked);
+        let take = || std::mem::take(&mut *asked.borrow_mut());
+        let config = Config::default();
+        let mut app = App::new_in_scheme(
+            &config,
+            Box::new(crate::storage::MemStorage::default()),
+            Box::new(probes),
+            None,
+            ColorScheme::Dark,
+        );
+        let mut at_start = take();
+        at_start.sort_unstable();
+        assert_eq!(
+            at_start,
+            [
+                "no_color",
+                "notify_auto",
+                "player",
+                "recorder",
+                "ssh",
+                "summary",
+                "transcriber",
+                "translator",
+                "truecolor"
+            ]
+        );
+        assert_eq!(app.setting_value(Setting::AudioPlayer), "auto: none found");
+        assert_eq!(
+            app.setting_value(Setting::AudioRecorder),
+            "auto: no microphone found"
+        );
+        assert_eq!(app.setting_value(Setting::TranslateCommand), "(not set)");
+        assert_eq!(app.setting_value(Setting::SummaryCommand), "not set");
+        assert!(
+            app.setting_value(Setting::TranscribeCommand)
+                .starts_with("auto: ")
+        );
+
+        app.set_audio_player("mpv");
+        assert_eq!(take(), ["player"]);
+        assert_eq!(app.setting_value(Setting::AudioPlayer), "mpv (not found)");
+        app.set_audio_recorder("auto");
+        assert_eq!(take(), ["recorder"]);
+        app.set_transcribe_command("whisper");
+        assert_eq!(take(), ["transcriber"]);
+        app.set_transcribe_model("model.bin");
+        assert_eq!(take(), ["transcriber"]);
+        app.set_translate_command("translate {lang}");
+        assert_eq!(take(), ["translator"]);
+        assert_eq!(
+            app.setting_value(Setting::TranslateCommand),
+            "translate {lang} (not found)"
+        );
+        app.set_summary_command("summarise");
+        assert_eq!(take(), ["summary"]);
+        app.set_translate_language("de");
+        app.change_setting(Setting::Mouse, 0);
+        assert!(take().is_empty(), "other settings ask nothing");
+
+        app.request_editor();
+        assert_eq!(take(), ["editor"]);
+        app.request_paste_picture();
+        assert_eq!(take(), ["clipboard_tools"]);
+        app.modal = None;
+        app.open_doctor();
+        assert_eq!(take(), ["environment"]);
+        // Catching up looks for the program again: it may have come since.
+        app.modal = None;
+        app.perform(Action::CatchUp);
+        assert_eq!(take(), ["summary"]);
+    }
+
+    fn key_mod(code: KeyCode, mods: KeyModifiers) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, mods))
     }
 
     /// Alt-↑: from the composer to the newest message, whatever the composer holds.
-    fn alt_up() -> Event {
+    fn alt_up() -> InputEvent {
         key_mod(KeyCode::Up, KeyModifiers::ALT)
     }
 
-    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> Event {
-        Event::Mouse(MouseEvent {
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> InputEvent {
+        InputEvent::Mouse(MouseEvent {
             kind,
             column,
             row,
@@ -5695,7 +5748,7 @@ mod tests {
         })
     }
 
-    fn click(column: u16, row: u16) -> Event {
+    fn click(column: u16, row: u16) -> InputEvent {
         mouse(MouseEventKind::Down(MouseButton::Left), column, row)
     }
 
@@ -5790,6 +5843,23 @@ mod tests {
         app.on_event(key(KeyCode::Down));
         assert_eq!(app.focus, Pane::Composer);
         assert_eq!(app.timeline.selected, None);
+    }
+
+    #[test]
+    fn key_releases_are_ignored_and_repeats_count() {
+        let (mut app, _) = drawn();
+        assert_eq!(app.focus, Pane::Composer);
+        let with_kind = |c, kind| {
+            InputEvent::Key(KeyEvent {
+                kind,
+                ..KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+            })
+        };
+        app.on_event(with_kind('a', KeyEventKind::Press));
+        app.on_event(with_kind('a', KeyEventKind::Release));
+        app.on_event(with_kind('b', KeyEventKind::Repeat));
+        app.on_event(with_kind('b', KeyEventKind::Release));
+        assert_eq!(app.composer.text(), "ab");
     }
 
     #[test]
@@ -6564,7 +6634,7 @@ mod tests {
         // Nothing lands in a draft nobody sees.
         type_text(&mut app, "bo");
         assert_eq!(app.sidebar.filter.as_str(), "bo");
-        app.on_event(Event::Paste("b".into()));
+        app.on_event(InputEvent::Paste("b".into()));
         assert_eq!(app.sidebar.filter.as_str(), "bob");
         assert!(app.composer.is_empty());
         assert!(app.attachments().is_empty());
@@ -6795,7 +6865,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("matrix-rat-esc-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let file = dir.join("config.toml");
-        app.config_file = Some(file.clone());
+        app.set_config_file(&file);
         // The settings row (and the palette's entry) writes it to the configuration.
         app.perform(Action::Setting(Setting::EscClosesChat));
         assert!(!app.esc_closes_chat);
@@ -6977,7 +7047,7 @@ mod tests {
         assert_eq!(app.focus, Pane::Sidebar);
     }
 
-    fn alt(c: char) -> Event {
+    fn alt(c: char) -> InputEvent {
         key_mod(KeyCode::Char(c), KeyModifiers::ALT)
     }
 
@@ -7726,11 +7796,11 @@ mod tests {
         assert_eq!(marked_read(&mut commands), 1);
 
         // Not while the terminal window is in the background.
-        app.on_event(Event::FocusLost);
+        app.on_event(InputEvent::FocusLost);
         app.on_matrix(timeline(&app, many(52)));
         frame(&mut app, &mut terminal);
         assert_eq!(marked_read(&mut commands), 0);
-        app.on_event(Event::FocusGained);
+        app.on_event(InputEvent::FocusGained);
         frame(&mut app, &mut terminal);
         assert_eq!(marked_read(&mut commands), 1);
 
@@ -8332,7 +8402,7 @@ mod tests {
         // Lives next to the themes directory, not inside it.
         let config_file = dir.with_extension("config.toml");
         std::fs::write(&config_file, "theme = \"terminal\"\n").unwrap();
-        app.config_file = Some(config_file.clone());
+        app.set_config_file(&config_file);
         app.reload_theme();
         assert_eq!(app.theme.name, "terminal");
         // F3 moves on from the theme in use, and finds newly written themes.
@@ -8363,8 +8433,8 @@ mod tests {
 
     #[test]
     fn paired_themes_follow_scheme_changes_and_f3_updates_active_slot() {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let nanos = crate::time::SystemTime::now()
+            .duration_since(crate::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let dir = std::env::temp_dir().join(format!(
@@ -8374,7 +8444,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let themes_dir = dir.join("themes");
         std::fs::create_dir_all(&themes_dir).unwrap();
-        let names = Theme::available(&themes_dir);
+        let names =
+            Theme::available(&crate::storage::FsStorage::default().with_themes(&themes_dir));
         let dark_name = names
             .iter()
             .find(|n| *n != "terminal")
@@ -8394,8 +8465,14 @@ mod tests {
         .unwrap();
         let cfg = Config::load(&file).unwrap();
 
-        let mut app = App::new_in_scheme(&cfg, themes_dir, None, ColorScheme::Dark);
-        app.config_file = Some(file.clone());
+        let mut app = App::new_in_scheme(
+            &cfg,
+            themes_in(themes_dir),
+            test_probes(),
+            None,
+            ColorScheme::Dark,
+        );
+        app.set_config_file(&file);
         assert_eq!(app.color_scheme, ColorScheme::Dark);
         assert_eq!(app.theme.name, dark_name);
         assert_eq!(app.wanted_theme, dark_name);
@@ -8427,8 +8504,8 @@ mod tests {
 
     #[test]
     fn unpaired_theme_ignores_live_scheme_changes() {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let nanos = crate::time::SystemTime::now()
+            .duration_since(crate::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let dir = std::env::temp_dir().join(format!(
@@ -8442,8 +8519,14 @@ mod tests {
 
         std::fs::write(&file, "theme = \"terminal\"\n").unwrap();
         let cfg = Config::load(&file).unwrap();
-        let mut term_app = App::new_in_scheme(&cfg, themes_dir.clone(), None, ColorScheme::Dark);
-        term_app.config_file = Some(file.clone());
+        let mut term_app = App::new_in_scheme(
+            &cfg,
+            themes_in(themes_dir.clone()),
+            test_probes(),
+            None,
+            ColorScheme::Dark,
+        );
+        term_app.set_config_file(&file);
         assert_eq!(term_app.theme.name, "terminal");
         term_app.on_color_scheme(ColorScheme::Light);
         assert_eq!(term_app.color_scheme, ColorScheme::Light);
@@ -8455,8 +8538,14 @@ mod tests {
         let gen_file = dir.join("gen.toml");
         std::fs::write(&gen_file, "theme = \"generated\"\n").unwrap();
         let gen_cfg = Config::load(&gen_file).unwrap();
-        let mut gen_app = App::new_in_scheme(&gen_cfg, themes_dir, None, ColorScheme::Dark);
-        gen_app.config_file = Some(gen_file.clone());
+        let mut gen_app = App::new_in_scheme(
+            &gen_cfg,
+            themes_in(themes_dir),
+            test_probes(),
+            None,
+            ColorScheme::Dark,
+        );
+        gen_app.set_config_file(&gen_file);
         assert_eq!(gen_app.wanted_theme, "generated");
         gen_app.on_color_scheme(ColorScheme::Light);
         assert_eq!(gen_app.wanted_theme, "generated");
@@ -8532,7 +8621,7 @@ mod tests {
         let file = dir.join("config.toml");
         std::fs::write(&file, "# mine\nsidebar_width = 30\n").unwrap();
         let (mut app, mut terminal) = drawn();
-        app.config_file = Some(file.clone());
+        app.set_config_file(&file);
 
         app.on_event(key(KeyCode::F(2)));
         assert!(matches!(app.modal, Some(Modal::Settings(_))));
@@ -8774,7 +8863,7 @@ mod tests {
         assert!(app.pending_notices.is_empty());
         // Another room, or the same room with the window in the background.
         app.on_matrix(notice("!b"));
-        app.on_event(Event::FocusLost);
+        app.on_event(InputEvent::FocusLost);
         app.on_matrix(notice("!a"));
         let (notices, mode, preview) = app.take_notices();
         assert_eq!(
@@ -8843,7 +8932,7 @@ mod tests {
         assert_eq!(shown, NOTICE_MOST);
         // Not while scrolled back or behind the help: then it is not on screen.
         app.shown_notices.clear();
-        app.on_event(Event::FocusGained);
+        app.on_event(InputEvent::FocusGained);
         app.help_open = true;
         app.on_matrix(notice("!a"));
         assert_eq!(app.take_notices().0.len(), 1);
@@ -9012,7 +9101,7 @@ mod tests {
         assert_eq!(app.theme.name, first);
 
         app.on_event(alt_up());
-        app.on_event(Event::Paste("a\r\nb".into()));
+        app.on_event(InputEvent::Paste("a\r\nb".into()));
         assert_eq!(app.focus, Pane::Composer);
         assert_eq!(app.composer.text(), "a\nb");
     }
@@ -9030,7 +9119,8 @@ mod tests {
     #[test]
     fn desktop_notification_icons_tile_fetch_upgrade_invite_and_logout_wipe() {
         use crate::images::Decoded;
-        use crate::notify::{IconCache, NotifyIcon, NotifyMode};
+        use crate::notify::{NotifyIcon, NotifyMode};
+        use crate::shell::terminal::icon_cache::IconCache;
 
         let (mut app, _terminal, mut commands) = connected();
         let _ = drain(&mut commands);
@@ -9039,8 +9129,8 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&temp_dir);
-        let cache = Arc::new(IconCache::new(temp_dir.clone()));
-        app.set_notify_icons(Arc::clone(&cache));
+        // The shell's: it writes the files of the icons the app resolved.
+        let cache = IconCache::new(temp_dir.clone());
         app.notify_mode = NotifyMode::Desktop;
 
         let mut beta = summary("!b", "#beta", RoomCategory::Room, 0);
@@ -9078,15 +9168,14 @@ mod tests {
             Ok(MatrixCmd::FetchAvatar { url }) if url == "mxc://example.org/beta"
         ));
         assert!(drain(&mut commands).is_empty());
-        let (icon_cache, epoch) = ready.icon_cache.unwrap();
-        let tile_path = icon_cache.ensure_file(&ready.items[0].1, epoch).unwrap();
+        let tile_path = cache.ensure_file(&ready.items[0].1, cache.epoch()).unwrap();
         assert!(tile_path.exists());
 
         // 2. Deliver avatar -> next notice uses the real Picture and writes PNG to cache.
         app.on_matrix(MatrixEvent::Avatar {
             url: "mxc://example.org/beta".into(),
             result: Ok(Decoded {
-                pixels: Arc::new(image::DynamicImage::new_rgba8(96, 96)),
+                pixels: std::sync::Arc::new(image::DynamicImage::new_rgba8(96, 96)),
                 original: (96, 96),
             }),
         });
@@ -9109,25 +9198,21 @@ mod tests {
         assert!(matches!(ready.items[0].1, NotifyIcon::Tile { ch: 'I', .. }));
         assert!(drain(&mut commands).is_empty());
 
-        // 4. Logout clears the cache directory and invalidates the old epoch.
-        let pre_logout_epoch = cache.epoch();
+        // 4. Logout: the shell is asked to clear the icon files (which also invalidates
+        // the old epoch, see the shell's test).
+        let _ = app.take_os_requests();
         app.reset_session();
-        assert!(!temp_dir.exists());
-        assert_eq!(cache.ensure_file(&ready.items[0].1, pre_logout_epoch), None);
+        assert_eq!(app.take_os_requests(), [OsRequest::ClearNoticeIcons]);
+        cache.clear();
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
-    fn hidden_preview_and_terminal_mode_skip_icon_fetch_and_cache() {
-        use crate::notify::{IconCache, NotifyIcon, NotifyMode};
+    fn hidden_preview_and_terminal_mode_skip_icon_fetch() {
+        use crate::notify::{NotifyIcon, NotifyMode};
 
         let (mut app, _terminal, mut commands) = connected();
         let _ = drain(&mut commands);
-        let temp_dir =
-            std::env::temp_dir().join(format!("matrix-rat-app-notify-skip-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        let cache = Arc::new(IconCache::new(temp_dir.clone()));
-        app.set_notify_icons(Arc::clone(&cache));
 
         let mut beta = summary("!b", "Beta", RoomCategory::Room, 0);
         beta.avatar = Some("mxc://example.org/never-fetch".into());
@@ -9148,7 +9233,7 @@ mod tests {
             })
         };
 
-        // Preview off in Desktop mode: Generic icon, no FetchAvatar, no cache files.
+        // Preview off in Desktop mode: Generic icon, no FetchAvatar.
         app.notify_mode = NotifyMode::Desktop;
         app.notification_preview = false;
         app.on_matrix(make_notice());
@@ -9156,9 +9241,8 @@ mod tests {
         assert_eq!(ready.items.len(), 1);
         assert!(matches!(ready.items[0].1, NotifyIcon::Generic));
         assert!(drain(&mut commands).is_empty());
-        assert!(!temp_dir.exists());
 
-        // Terminal mode even with preview on: Generic icon, no FetchAvatar, no cache files.
+        // Terminal mode even with preview on: Generic icon, no FetchAvatar.
         app.shown_notices.clear();
         app.notification_preview = true;
         app.notify_mode = NotifyMode::Terminal;
@@ -9167,7 +9251,26 @@ mod tests {
         assert_eq!(ready.items.len(), 1);
         assert!(matches!(ready.items[0].1, NotifyIcon::Generic));
         assert!(drain(&mut commands).is_empty());
-        assert!(!temp_dir.exists());
+
+        // `auto` is what the probes said it is here: the terminal's, as above...
+        app.shown_notices.clear();
+        app.notify_mode = NotifyMode::Auto;
+        app.notify_auto = NotifyMode::Terminal;
+        app.on_matrix(make_notice());
+        let ready = app.take_notices_with_icons();
+        assert!(matches!(ready.items[0].1, NotifyIcon::Generic));
+        assert!(drain(&mut commands).is_empty());
+        // ...or the desktop's, whose notices show the room's picture: only now is it
+        // asked for.
+        app.shown_notices.clear();
+        app.notify_auto = NotifyMode::Desktop;
+        app.on_matrix(make_notice());
+        let ready = app.take_notices_with_icons();
+        assert!(matches!(ready.items[0].1, NotifyIcon::Tile { ch: 'B', .. }));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(MatrixCmd::FetchAvatar { url }) if url == "mxc://example.org/never-fetch"
+        ));
     }
 
     #[test]
@@ -9451,6 +9554,24 @@ mod tests {
         }
     }
 
+    /// The window is raised by the event loop, asked by the app: in tests, which
+    /// may run inside a desktop that would obey, nothing is asked at all.
+    #[test]
+    fn a_clicked_notification_asks_for_the_window_to_come_to_the_front() {
+        let (mut app, _commands) = with_worker();
+        app.on_matrix(clicked("!b"));
+        assert_eq!(app.take_os_requests(), []);
+        app.notification_click_command = Some("raise-me".to_owned());
+        app.on_matrix(clicked("!a"));
+        let asked = app.take_os_requests();
+        assert_eq!(asked, [OsRequest::RaiseWindow("raise-me".to_owned())]);
+        // Nothing of the command in debug output.
+        assert_eq!(format!("{asked:?}"), "[RaiseWindow]");
+        // A room that is gone raises nothing.
+        app.on_matrix(clicked("!gone"));
+        assert_eq!(app.take_os_requests(), []);
+    }
+
     #[test]
     fn a_clicked_notification_opens_its_room_like_the_room_list_does() {
         let (mut app, mut commands) = with_worker();
@@ -9656,10 +9777,6 @@ mod tests {
         app.modal = None;
         app.on_matrix(clicked("!b"));
         assert_eq!(commands_sent(&mut commands), Vec::<String>::new());
-    }
-
-    fn take_opened_urls() -> Vec<String> {
-        TEST_OPENED_URLS.with(|urls| std::mem::take(&mut *urls.borrow_mut()))
     }
 
     fn screen_text(terminal: &Terminal<TestBackend>) -> String {
@@ -10199,7 +10316,6 @@ mod tests {
 
     #[test]
     fn opening_links_handles_event_room_user_broken_and_http() {
-        let _ = take_opened_urls();
         let (mut app, _terminal, mut commands) = connected();
         app.rooms[0].alias = Some("#alpha:example.org".into());
         app.rooms[0].messages = vec![remote("1", "ann", "already here")];
@@ -10213,7 +10329,7 @@ mod tests {
             drain(&mut commands),
             [format!("OpenEvent(!b:example.org, generation {jump1_gen})")]
         );
-        assert!(take_opened_urls().is_empty());
+        assert!(app.take_opened().is_empty());
 
         // 2. Joined event by room alias ($ev1 loaded in room 0 -> selects locally and cancels prior jump).
         assert!(app.try_open_matrix_link("matrix:r/alpha:example.org/e/ev1"));
@@ -10230,7 +10346,7 @@ mod tests {
             Some("Join this room before jumping to a message in it")
         );
         assert!(drain(&mut commands).is_empty());
-        assert!(take_opened_urls().is_empty());
+        assert!(app.take_opened().is_empty());
 
         // 4. Joined room link -> switches room.
         assert!(app.try_open_matrix_link("https://matrix.to/#/%21b:example.org"));
@@ -10272,7 +10388,7 @@ mod tests {
         // 7. Broken Matrix link -> toast, never launches browser.
         assert!(app.try_open_matrix_link("https://matrix.to/#/not-valid"));
         assert!(app.toast.is_some());
-        assert!(take_opened_urls().is_empty());
+        assert!(app.take_opened().is_empty());
 
         // 8. Normal HTTP link inside a selected message -> opens external browser.
         let web = remote("2", "ann", "see https://example.com/docs");
@@ -10280,7 +10396,7 @@ mod tests {
         app.timeline.selected = Some(app.rooms[app.active].messages.len() - 1);
         app.set_focus(Pane::Timeline);
         app.perform(Action::Open);
-        assert_eq!(take_opened_urls(), ["https://example.com/docs"]);
+        assert_eq!(app.take_opened(), ["https://example.com/docs"]);
     }
 
     #[test]
@@ -10832,7 +10948,7 @@ mod tests {
             done: false,
         };
         app.bookmarks.store.add(kept.clone()).unwrap();
-        app.bookmarks.file = Some("/home/alice/saved.json".into());
+        app.bookmarks.stored = true;
         app.bookmarks.waiting.push(crate::saved::Waiting {
             request: 1,
             items: vec![kept],
@@ -11063,42 +11179,6 @@ mod tests {
                 assert!(!text.contains(private), "{private} in {text}");
             }
         }
-    }
-
-    #[tokio::test]
-    async fn drain_or_abort_waits_for_quick_tasks_and_aborts_hung_ones() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        struct OnDrop(Arc<AtomicBool>);
-        impl Drop for OnDrop {
-            fn drop(&mut self) {
-                self.0.store(true, Ordering::SeqCst);
-            }
-        }
-
-        let mut quick = tokio::task::JoinSet::new();
-        let finished = Arc::new(AtomicBool::new(false));
-        let mark = Arc::clone(&finished);
-        quick.spawn(async move {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            mark.store(true, Ordering::SeqCst);
-        });
-        assert!(drain_or_abort(&mut quick, Duration::from_secs(1)).await);
-        assert!(finished.load(Ordering::SeqCst));
-
-        let mut hung = tokio::task::JoinSet::new();
-        let dropped = Arc::new(AtomicBool::new(false));
-        let guard = OnDrop(Arc::clone(&dropped));
-        hung.spawn(async move {
-            let _guard = guard;
-            std::future::pending::<()>().await;
-        });
-        // Let the spawned task start so the drop guard lives inside its future.
-        tokio::task::yield_now().await;
-        assert!(!drain_or_abort(&mut hung, Duration::from_millis(30)).await);
-        assert!(dropped.load(Ordering::SeqCst));
-        assert!(hung.is_empty());
     }
 
     #[test]

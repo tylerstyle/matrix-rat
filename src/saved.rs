@@ -8,19 +8,19 @@
 //! Nothing here reads the clock: "now" is passed in (see [`Clock`]).
 
 use std::collections::HashSet;
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Duration, FixedOffset, Local, NaiveDate, NaiveDateTime, TimeZone};
 use serde::{Deserialize, Serialize};
 
 use crate::lineedit::LineEdit;
+use crate::storage::{Aside, Key, Storage};
 
 /// The most messages that can be saved. The list is the user's own, but its file is
 /// read at every start and its rows are asked from the worker.
 pub const MAX_SAVED: usize = 500;
 /// A file larger than this is not ours.
-const MAX_FILE_BYTES: u64 = 1024 * 1024;
+#[cfg(any(not(target_family = "wasm"), test))]
+pub(crate) const MAX_FILE_BYTES: u64 = 1024 * 1024;
 /// Matrix ids are at most 255 bytes.
 const MAX_ID_BYTES: usize = 255;
 const VERSION: u64 = 1;
@@ -155,10 +155,12 @@ impl LoadProblem {
 const DAMAGED_NAME: &str = "saved.json.damaged";
 /// The list of another account, put aside.
 const OTHER_NAME: &str = "saved.json.other-account";
+/// What the list is set aside as (see [`Storage::set_aside`]): on this system the
+/// file next to it named `saved.json.<label>`, as the names above have it.
+const DAMAGED_LABEL: &str = "damaged";
+const OTHER_LABEL: &str = "other-account";
 /// The file as it was before a write that drops entries which could not be read.
-const BEFORE_NAME: &str = "saved.json.before-repair";
-/// Files put aside under one name; beyond that the file stays where it is.
-const ASIDE_MOST: usize = 20;
+const BEFORE_LABEL: &str = "before-repair";
 
 /// Why a message was not saved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,8 +189,9 @@ impl Refused {
 #[derive(Default)]
 pub struct SavedStore {
     items: Vec<SavedItem>,
-    /// Where the list is kept; `None` for the demo and in tests, which keep it in memory.
-    file: Option<PathBuf>,
+    /// The list was read from the storage, and is written back there; not for the
+    /// demo and in tests, which keep it in memory.
+    stored: bool,
     /// The account the list belongs to, written into the file.
     owner: String,
     /// The file is there and not ours to replace: nothing is taken, nothing written.
@@ -211,7 +214,7 @@ impl std::fmt::Debug for SavedStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SavedStore")
             .field("items", &self.items.len())
-            .field("file", &self.file.is_some())
+            .field("stored", &self.stored)
             .field("locked", &self.locked)
             .field("announced", &self.announced.len())
             .finish_non_exhaustive()
@@ -225,27 +228,30 @@ impl SavedStore {
     /// no sense are left out. Reminders that are due at `now` count as told: they
     /// came due while the app was not running, and are shown as due without a
     /// notification each.
-    pub fn load(file: PathBuf, owner: &str, now: i64) -> (Self, Option<LoadProblem>) {
-        let damaged = |file: &Path| LoadProblem::Damaged {
-            kept: put_aside(file, DAMAGED_NAME),
+    pub fn load(storage: &dyn Storage, owner: &str, now: i64) -> (Self, Option<LoadProblem>) {
+        // Moved out of the way, so that the next write does not destroy what a
+        // person might still repair. True if it was moved.
+        let put_aside = |label| storage.set_aside(&Key::Saved, label, Aside::Move).is_ok();
+        let damaged = || LoadProblem::Damaged {
+            kept: put_aside(DAMAGED_LABEL),
         };
-        let (items, problem) = match read_file(&file) {
+        let (items, problem) = match crate::storage::read_text(storage, &Key::Saved) {
             Ok(None) => (Vec::new(), None),
             Ok(Some(text)) => match parse(&text, owner) {
                 Parsed::Items(items, 0) => (items, None),
                 Parsed::Items(items, skipped) => (items, Some(LoadProblem::Skipped(skipped))),
-                Parsed::NotOurs => (Vec::new(), Some(damaged(&file))),
+                Parsed::NotOurs => (Vec::new(), Some(damaged())),
                 Parsed::OtherAccount => {
-                    let kept = put_aside(&file, OTHER_NAME);
+                    let kept = put_aside(OTHER_LABEL);
                     (Vec::new(), Some(LoadProblem::OtherAccount { kept }))
                 }
                 Parsed::Newer => (Vec::new(), Some(LoadProblem::Newer)),
             },
-            Err(_) => (Vec::new(), Some(damaged(&file))),
+            Err(_) => (Vec::new(), Some(damaged())),
         };
         let mut store = Self {
             items,
-            file: Some(file),
+            stored: true,
             owner: owner.to_owned(),
             // What could not be moved out of the way is not written over.
             locked: matches!(
@@ -414,22 +420,17 @@ impl SavedStore {
             .min();
     }
 
-    /// Writes the list to its file, which is replaced in one step and readable by
-    /// the user only. Without a file (the demo) there is nothing to do, and a file
-    /// that is not ours to change is left alone.
-    pub fn write(&mut self) -> std::io::Result<()> {
-        let Some(file) = &self.file else {
-            return Ok(());
-        };
-        if self.locked {
+    /// Writes the list to `storage`, where it is replaced in one step and readable by
+    /// the user only. A list not read from there (the demo's) is not written, and a
+    /// file that is not ours to change is left alone.
+    pub fn write(&mut self, storage: &dyn Storage) -> anyhow::Result<()> {
+        if !self.stored || self.locked {
             return Ok(());
         }
         if self.copy_first {
             // Once: what a person might still repair by hand is kept. Without the
             // copy the entries are not dropped either.
-            let copy = free_name(file, BEFORE_NAME)
-                .ok_or_else(|| std::io::Error::other("no name left for the copy"))?;
-            copy_private(file, &copy)?;
+            storage.set_aside(&Key::Saved, BEFORE_LABEL, Aside::Copy)?;
             self.copy_first = false;
         }
         let out = FileOut {
@@ -438,24 +439,8 @@ impl SavedStore {
             items: &self.items,
         };
         let text = serde_json::to_string_pretty(&out).map_err(std::io::Error::other)?;
-        write_private(file, text.as_bytes())
+        storage.write(&Key::Saved, text.as_bytes())
     }
-}
-
-/// The file's text; `None` if there is no file.
-fn read_file(file: &Path) -> std::io::Result<Option<String>> {
-    let opened = match std::fs::File::open(file) {
-        Ok(opened) => opened,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(err),
-    };
-    let mut text = String::new();
-    // One byte more than allowed tells a file that is too large from one that fits.
-    opened.take(MAX_FILE_BYTES + 1).read_to_string(&mut text)?;
-    if text.len() as u64 > MAX_FILE_BYTES {
-        return Err(std::io::Error::other("too large"));
-    }
-    Ok(Some(text))
 }
 
 /// What the file's text is.
@@ -509,95 +494,6 @@ fn parse(text: &str, owner: &str) -> Parsed {
         }
     }
     Parsed::Items(items, skipped)
-}
-
-/// Moves a file that cannot be used out of the way under `name`, so that the next
-/// write does not destroy what a person might still repair. True if it was moved.
-fn put_aside(file: &Path, name: &str) -> bool {
-    free_name(file, name).is_some_and(|aside| std::fs::rename(file, aside).is_ok())
-}
-
-/// `name` next to `file`, or `name.1`, `name.2`…: the first that is not taken, so
-/// that what was put aside earlier is not written over.
-fn free_name(file: &Path, name: &str) -> Option<PathBuf> {
-    (0..ASIDE_MOST)
-        .map(|n| match n {
-            0 => file.with_file_name(name),
-            n => file.with_file_name(format!("{name}.{n}")),
-        })
-        .find(|candidate| {
-            matches!(
-                std::fs::symlink_metadata(candidate),
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound
-            )
-        })
-}
-
-/// Removes the list and everything put aside next to it: for a logout, after which
-/// nothing of the account's may stay. `file` is where the list is kept.
-pub fn remove_files(file: &Path) {
-    let (Some(dir), Some(name)) = (file.parent(), file.file_name().and_then(|n| n.to_str())) else {
-        return;
-    };
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let ours = entry
-            .file_name()
-            .to_str()
-            .is_some_and(|found| found == name || found.starts_with(&format!("{name}.")));
-        if ours {
-            let _ = std::fs::remove_file(entry.path());
-        }
-    }
-}
-
-/// Copies `source` into a new file at `target`, readable by the user only, and
-/// waits for it to reach the disk.
-fn copy_private(source: &Path, target: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    let bytes = std::fs::read(source)?;
-    let written = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(target)?;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        file.write_all(&bytes)?;
-        file.sync_all()
-    })();
-    if written.is_err() {
-        let _ = std::fs::remove_file(target);
-    }
-    written
-}
-
-/// Writes `bytes` to a new file next to `path`, for the user only, and puts it in
-/// `path`'s place in one step.
-fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    let temporary = path.with_extension("json.new");
-    // What an interrupted write left is not built upon: its mode is not known.
-    let _ = std::fs::remove_file(&temporary);
-    let written = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temporary)?;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        file.write_all(bytes)?;
-        // On the disk before it takes the old file's place: a crash leaves one of
-        // the two whole.
-        file.sync_all()?;
-        std::fs::rename(&temporary, path)
-    })();
-    if written.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-    written
 }
 
 // ----- time ------------------------------------------------------------------------------
@@ -1134,7 +1030,7 @@ pub struct Waiting {
     pub request: u64,
     /// Those the worker has not answered for yet.
     pub items: Vec<SavedItem>,
-    pub since: std::time::Instant,
+    pub since: crate::time::Instant,
 }
 
 /// What the app keeps about saved messages.
@@ -1142,9 +1038,9 @@ pub struct Waiting {
 pub struct SavedState {
     pub store: SavedStore,
     pub clock: Clock,
-    /// Where the profile keeps the list. Read when a session is up and its account
-    /// known; `None` for the demo and in tests, which keep the list in memory.
-    pub file: Option<PathBuf>,
+    /// The list is kept in the storage. Read when a session is up and its account
+    /// known; not for the demo and in tests, which keep the list in memory.
+    pub stored: bool,
     /// Numbers the questions to the worker.
     pub next_request: u64,
     pub waiting: Vec<Waiting>,
@@ -1152,7 +1048,7 @@ pub struct SavedState {
     pub notices: Vec<crate::notify::DueReminder>,
     /// The message whose removal was asked about (its reminder still waits), and
     /// when: `(room, event)`.
-    pub confirm: Option<((String, String), std::time::Instant)>,
+    pub confirm: Option<((String, String), crate::time::Instant)>,
 }
 
 /// Hand-written: only counts.
@@ -1160,7 +1056,7 @@ impl std::fmt::Debug for SavedState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SavedState")
             .field("store", &self.store)
-            .field("file", &self.file.is_some())
+            .field("stored", &self.stored)
             .field("waiting", &self.waiting.len())
             .field("notices", &self.notices.len())
             .field("confirm", &self.confirm.is_some())
@@ -1170,7 +1066,10 @@ impl std::fmt::Debug for SavedState {
 
 #[cfg(test)]
 pub mod tests {
+    use std::path::{Path, PathBuf};
+
     use super::*;
+    use crate::storage::{FsStorage, Removal};
 
     /// 2026-11-20 (a Friday) at 14:30, two hours east of Greenwich.
     pub fn friday() -> DateTime<FixedOffset> {
@@ -1372,6 +1271,25 @@ pub mod tests {
             resolve(When::Wall(at(2040, 1, 1, 9, 0)), second, &Jumpy),
             Err(WhenError::TooFar)
         );
+    }
+
+    /// The list in the file `file`, as the app keeps it.
+    fn kept_in(file: &Path) -> FsStorage {
+        FsStorage::default().with_saved(file)
+    }
+
+    const BEFORE_NAME: &str = "saved.json.before-repair";
+
+    /// What the user is told the file set aside is called is what it is called.
+    #[test]
+    fn the_names_told_are_the_names_of_the_files_set_aside() {
+        for (name, label) in [
+            (DAMAGED_NAME, DAMAGED_LABEL),
+            (OTHER_NAME, OTHER_LABEL),
+            (BEFORE_NAME, BEFORE_LABEL),
+        ] {
+            assert_eq!(name, format!("saved.json.{label}"));
+        }
     }
 
     fn scratch(name: &str) -> PathBuf {
@@ -1667,7 +1585,7 @@ pub mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = scratch("roundtrip");
         let file = dir.join("saved.json");
-        let (mut store, problem) = SavedStore::load(file.clone(), ME, 1000);
+        let (mut store, problem) = SavedStore::load(&kept_in(&file), ME, 1000);
         assert_eq!(problem, None);
         assert_eq!(store.len(), 0);
         let mut first = item("$a", 1);
@@ -1675,16 +1593,16 @@ pub mod tests {
         store.add(first.clone()).unwrap();
         store.add(item("$b", 2)).unwrap();
         store.set_reminder("!room:example.org", "$b", Some(5000));
-        store.write().unwrap();
+        store.write(&kept_in(&file)).unwrap();
         let mode = std::fs::metadata(&file).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
         assert!(!dir.join("saved.json.new").exists());
         // A second write replaces the first, with the same mode.
-        store.write().unwrap();
+        store.write(&kept_in(&file)).unwrap();
         let mode = std::fs::metadata(&file).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
 
-        let (back, problem) = SavedStore::load(file, ME, 1000);
+        let (back, problem) = SavedStore::load(&kept_in(&file), ME, 1000);
         assert_eq!(problem, None);
         assert_eq!(back.items(), store.items());
         assert_eq!(back.items()[1], first);
@@ -1695,12 +1613,12 @@ pub mod tests {
     fn the_file_holds_ids_and_times_and_nothing_else() {
         let dir = scratch("content");
         let file = dir.join("saved.json");
-        let (mut store, _) = SavedStore::load(file.clone(), ME, 0);
+        let (mut store, _) = SavedStore::load(&kept_in(&file), ME, 0);
         let mut saved = item("$a", 7);
         saved.remind_at = Some(9);
         saved.done = true;
         store.add(saved).unwrap();
-        store.write().unwrap();
+        store.write(&kept_in(&file)).unwrap();
         let value: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
         assert_eq!(
@@ -1725,10 +1643,10 @@ pub mod tests {
         let dir = scratch("leftover");
         let file = dir.join("saved.json");
         std::fs::write(dir.join("saved.json.new"), "half").unwrap();
-        let (mut store, _) = SavedStore::load(file.clone(), ME, 0);
+        let (mut store, _) = SavedStore::load(&kept_in(&file), ME, 0);
         store.add(item("$a", 1)).unwrap();
-        store.write().unwrap();
-        let (back, problem) = SavedStore::load(file, ME, 0);
+        store.write(&kept_in(&file)).unwrap();
+        let (back, problem) = SavedStore::load(&kept_in(&file), ME, 0);
         assert_eq!((back.len(), problem), (1, None));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1753,7 +1671,7 @@ pub mod tests {
             let dir = scratch(name);
             let file = dir.join("saved.json");
             std::fs::write(&file, &content).unwrap();
-            let (mut store, problem) = SavedStore::load(file.clone(), ME, 0);
+            let (mut store, problem) = SavedStore::load(&kept_in(&file), ME, 0);
             assert_eq!(problem, Some(LoadProblem::Damaged { kept: true }), "{name}");
             assert_eq!(store.len(), 0);
             assert!(!file.exists(), "{name}");
@@ -1763,8 +1681,8 @@ pub mod tests {
             );
             // The list works from here on.
             store.add(item("$a", 1)).unwrap();
-            store.write().unwrap();
-            assert_eq!(SavedStore::load(file, ME, 0).0.len(), 1);
+            store.write(&kept_in(&file)).unwrap();
+            assert_eq!(SavedStore::load(&kept_in(&file), ME, 0).0.len(), 1);
             let _ = std::fs::remove_dir_all(dir);
         }
         assert!(
@@ -1780,12 +1698,12 @@ pub mod tests {
         // A folder where the file should be.
         let file = dir.join("saved.json");
         std::fs::create_dir_all(&file).unwrap();
-        let (mut store, problem) = SavedStore::load(file.clone(), ME, 0);
+        let (mut store, problem) = SavedStore::load(&kept_in(&file), ME, 0);
         assert!(matches!(problem, Some(LoadProblem::Damaged { .. })));
         assert_eq!(store.len(), 0);
         // It was moved out of the way like any other, and the list works.
         store.add(item("$a", 1)).unwrap();
-        store.write().unwrap();
+        store.write(&kept_in(&file)).unwrap();
         assert!(file.is_file());
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1814,7 +1732,7 @@ pub mod tests {
         })
         .to_string();
         std::fs::write(&file, text).unwrap();
-        let (store, problem) = SavedStore::load(file.clone(), ME, 0);
+        let (store, problem) = SavedStore::load(&kept_in(&file), ME, 0);
         assert_eq!(problem, Some(LoadProblem::Skipped(8)));
         let ids: Vec<&str> = store.items().iter().map(|i| i.event_id.as_str()).collect();
         assert_eq!(ids, ["$good", "$also-good"]);
@@ -1838,11 +1756,11 @@ pub mod tests {
         })
         .to_string();
         std::fs::write(&file, &text).unwrap();
-        let (mut store, problem) = SavedStore::load(file.clone(), ME, 0);
+        let (mut store, problem) = SavedStore::load(&kept_in(&file), ME, 0);
         assert_eq!(problem, Some(LoadProblem::Skipped(1)));
         assert!(!dir.join(BEFORE_NAME).exists());
         store.add(item("$a", 1)).unwrap();
-        store.write().unwrap();
+        store.write(&kept_in(&file)).unwrap();
         use std::os::unix::fs::PermissionsExt;
         let copy = dir.join(BEFORE_NAME);
         assert_eq!(std::fs::read_to_string(&copy).unwrap(), text);
@@ -1852,9 +1770,9 @@ pub mod tests {
         );
         // Once: the next write copies nothing.
         store.add(item("$b", 2)).unwrap();
-        store.write().unwrap();
+        store.write(&kept_in(&file)).unwrap();
         assert!(!dir.join(format!("{BEFORE_NAME}.1")).exists());
-        assert_eq!(SavedStore::load(file, ME, 0).0.len(), 3);
+        assert_eq!(SavedStore::load(&kept_in(&file), ME, 0).0.len(), 3);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1873,15 +1791,15 @@ pub mod tests {
             })
             .to_string();
             std::fs::write(&file, &text).unwrap();
-            let (mut store, problem) = SavedStore::load(file.clone(), ME, 1000);
+            let (mut store, problem) = SavedStore::load(&kept_in(&file), ME, 1000);
             assert_eq!(problem, Some(LoadProblem::OtherAccount { kept: true }));
             assert_eq!(store.len(), 0);
             assert_eq!(store.due(1000).count(), 0);
             assert_eq!(std::fs::read_to_string(dir.join(OTHER_NAME)).unwrap(), text);
             // The list is this account's from here on.
             store.add(item("$mine", 1)).unwrap();
-            store.write().unwrap();
-            let (back, problem) = SavedStore::load(file, ME, 0);
+            store.write(&kept_in(&file)).unwrap();
+            let (back, problem) = SavedStore::load(&kept_in(&file), ME, 0);
             assert_eq!((back.len(), problem), (1, None));
             let _ = std::fs::remove_dir_all(dir);
         }
@@ -1899,12 +1817,12 @@ pub mod tests {
         // Whatever else it holds, and whoever it names.
         let text = r#"{"version": 2, "owner": "@me:example.org", "entries": {"new": "form"}}"#;
         std::fs::write(&file, text).unwrap();
-        let (mut store, problem) = SavedStore::load(file.clone(), ME, 0);
+        let (mut store, problem) = SavedStore::load(&kept_in(&file), ME, 0);
         assert_eq!(problem, Some(LoadProblem::Newer));
         assert_eq!(store.len(), 0);
         assert_eq!(store.add(item("$a", 1)), Err(Refused::Locked));
         assert_eq!(store.refuses(), Some(Refused::Locked));
-        store.write().unwrap();
+        store.write(&kept_in(&file)).unwrap();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         assert!(!LoadProblem::Newer.message().is_empty());
@@ -1918,7 +1836,7 @@ pub mod tests {
         let file = dir.join("saved.json");
         for (n, content) in ["first {", "second {", "third {"].iter().enumerate() {
             std::fs::write(&file, content).unwrap();
-            let (_, problem) = SavedStore::load(file.clone(), ME, 0);
+            let (_, problem) = SavedStore::load(&kept_in(&file), ME, 0);
             assert_eq!(problem, Some(LoadProblem::Damaged { kept: true }), "{n}");
         }
         let read = |name: String| std::fs::read_to_string(dir.join(name)).unwrap();
@@ -1926,14 +1844,14 @@ pub mod tests {
         assert_eq!(read(format!("{DAMAGED_NAME}.1")), "second {");
         assert_eq!(read(format!("{DAMAGED_NAME}.2")), "third {");
         // With no name left the file stays, and is not written over.
-        for n in 3..ASIDE_MOST {
+        for n in 3..crate::storage::ASIDE_MOST {
             std::fs::write(dir.join(format!("{DAMAGED_NAME}.{n}")), "x").unwrap();
         }
         std::fs::write(&file, "last {").unwrap();
-        let (mut store, problem) = SavedStore::load(file.clone(), ME, 0);
+        let (mut store, problem) = SavedStore::load(&kept_in(&file), ME, 0);
         assert_eq!(problem, Some(LoadProblem::Damaged { kept: false }));
         assert_eq!(store.add(item("$a", 1)), Err(Refused::Locked));
-        store.write().unwrap();
+        store.write(&kept_in(&file)).unwrap();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "last {");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1954,7 +1872,7 @@ pub mod tests {
         }
         std::fs::write(dir.join("session.json"), "x").unwrap();
         std::fs::write(dir.join("saved.jsonl"), "x").unwrap();
-        remove_files(&file);
+        kept_in(&file).remove(&Key::Saved, Removal::All).unwrap();
         let mut left: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
@@ -1973,7 +1891,7 @@ pub mod tests {
             .collect();
         let text = serde_json::json!({ "version": 1, "owner": ME, "items": items }).to_string();
         std::fs::write(&file, text).unwrap();
-        let (store, problem) = SavedStore::load(file, ME, 0);
+        let (store, problem) = SavedStore::load(&kept_in(&file), ME, 0);
         assert_eq!(store.len(), MAX_SAVED);
         assert_eq!(problem, Some(LoadProblem::Skipped(3)));
         let _ = std::fs::remove_dir_all(dir);
@@ -1983,7 +1901,7 @@ pub mod tests {
     fn reminders_that_came_due_while_the_app_was_away_are_due_and_not_announced_again() {
         let dir = scratch("missed");
         let file = dir.join("saved.json");
-        let (mut store, _) = SavedStore::load(file.clone(), ME, 0);
+        let (mut store, _) = SavedStore::load(&kept_in(&file), ME, 0);
         store.add(item("$missed", 1)).unwrap();
         store.add(item("$later", 2)).unwrap();
         store.add(item("$done", 3)).unwrap();
@@ -1992,9 +1910,9 @@ pub mod tests {
         store.set_reminder("!room:example.org", "$done", Some(100));
         assert_eq!(store.take_newly_due(100).len(), 1);
         assert!(store.visited("!room:example.org", "$done", 100));
-        store.write().unwrap();
+        store.write(&kept_in(&file)).unwrap();
 
-        let (mut back, _) = SavedStore::load(file, ME, 1000);
+        let (mut back, _) = SavedStore::load(&kept_in(&file), ME, 1000);
         let due: Vec<&str> = back.due(1000).map(|i| i.event_id.as_str()).collect();
         assert_eq!(due, ["$missed"]);
         assert!(back.take_newly_due(1000).is_empty());
@@ -2034,11 +1952,11 @@ pub mod tests {
         popup.put_details(details.clone());
         let state = SavedState {
             store,
-            file: Some(PathBuf::from("/home/secret/saved.json")),
+            stored: true,
             waiting: vec![Waiting {
                 request: 1,
                 items: vec![saved.clone()],
-                since: std::time::Instant::now(),
+                since: crate::time::Instant::now(),
             }],
             notices: vec![crate::notify::DueReminder {
                 notice: crate::matrix::Notice {
@@ -2054,7 +1972,7 @@ pub mod tests {
             }],
             confirm: Some((
                 ("!secret-room:example.org".into(), "$secret-event".into()),
-                std::time::Instant::now(),
+                crate::time::Instant::now(),
             )),
             ..SavedState::default()
         };

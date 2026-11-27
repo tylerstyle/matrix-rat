@@ -3,13 +3,12 @@
 
 use std::collections::HashMap;
 
-use crossterm::event::{KeyCode, KeyModifiers};
-
 use super::{App, ComposeMode};
 use crate::action::Pane;
 use crate::clipboard::TempPicture;
 use crate::format::Outgoing;
 use crate::images::human_size;
+use crate::input::{KeyCode, KeyModifiers};
 use crate::matrix::MatrixCmd;
 #[cfg(test)]
 use crate::model::RoomKind;
@@ -167,7 +166,7 @@ impl AttachState {
     }
 
     /// A send was handed to the worker and not answered yet.
-    pub(super) fn sends_out(&self) -> bool {
+    pub(crate) fn sends_out(&self) -> bool {
         !self.handed.is_empty()
     }
 
@@ -177,6 +176,7 @@ impl AttachState {
     }
 
     /// A recording joins the files waiting in `scope`.
+    #[cfg(any(not(target_family = "wasm"), test))]
     pub(super) fn add_voice(&mut self, scope: Scope, voice: super::voice::VoiceNote, size: u64) {
         self.pending.entry(scope).or_default().push(Chosen {
             path: voice.path().to_owned(),
@@ -188,13 +188,19 @@ impl AttachState {
 }
 
 impl App {
+    /// A send was handed to the worker and not answered yet: at the end, the shell
+    /// gives the worker longer to finish.
+    pub fn sends_out(&self) -> bool {
+        self.attach.sends_out()
+    }
+
     /// The files waiting to be sent to the open room.
-    pub fn attachments(&self) -> &[Chosen] {
+    pub(crate) fn attachments(&self) -> &[Chosen] {
         self.attach.files(self.attach_scope().as_ref())
     }
 
     /// The conversation files are attached to right now: the open thread, else the room.
-    pub fn attach_scope(&self) -> Option<Scope> {
+    pub(crate) fn attach_scope(&self) -> Option<Scope> {
         let room = self.room()?;
         Some((room.id.clone(), self.thread_key().map(str::to_owned)))
     }
@@ -333,6 +339,7 @@ impl App {
 
     /// Puts back the draft that `/upload` set aside for `scope` (or clears `/upload `),
     /// whether that conversation is still open or waiting in the background.
+    #[cfg(any(not(target_family = "wasm"), test))]
     pub(super) fn restore_draft_for(&mut self, scope: &Scope) {
         if self.attach_scope().as_ref() == Some(scope) {
             if upload::command_argument(self.composer.text()).is_some() {
@@ -631,19 +638,19 @@ impl App {
 mod tests {
     use std::path::PathBuf;
 
-    use crossterm::event::{Event, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use tokio::sync::mpsc::UnboundedReceiver;
 
     use super::*;
     use crate::action::Action;
+    use crate::input::{InputEvent, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
     use crate::matrix::{MatrixEvent, MatrixHandle};
     use crate::model::Room;
     use crate::upload::tests::Scratch;
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
     fn type_text(app: &mut App, text: &str) {
@@ -728,8 +735,8 @@ mod tests {
         panic!("{needle:?} is not on the screen:\n{screen}");
     }
 
-    fn click(column: u16, row: u16) -> Event {
-        Event::Mouse(MouseEvent {
+    fn click(column: u16, row: u16) -> InputEvent {
+        InputEvent::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column,
             row,
@@ -747,7 +754,7 @@ mod tests {
 
         // Dropped from a file manager while the room list has the focus.
         app.perform(Action::Focus(Pane::Sidebar));
-        app.on_event(Event::Paste(format!(
+        app.on_event(InputEvent::Paste(format!(
             "{}\n'{}'\n",
             notes.display(),
             photo.display()
@@ -795,7 +802,7 @@ mod tests {
             scratch.0.display().to_string(),
         ] {
             app.composer.take();
-            app.on_event(Event::Paste(paste.clone()));
+            app.on_event(InputEvent::Paste(paste.clone()));
             assert_eq!(app.composer.text(), paste);
             assert!(app.attachments().is_empty());
         }
@@ -807,7 +814,7 @@ mod tests {
 
         // A path pasted into a popup's field is text for that field.
         app.perform(Action::OpenSettings);
-        app.on_event(Event::Paste(notes.display().to_string()));
+        app.on_event(InputEvent::Paste(notes.display().to_string()));
         assert!(app.attachments().is_empty());
     }
 
@@ -816,7 +823,7 @@ mod tests {
         let scratch = Scratch::new("app-reply");
         let notes = scratch.file("notes.txt", b"hello");
         let (mut app, mut commands) = connected();
-        app.on_event(Event::Paste(notes.display().to_string()));
+        app.on_event(InputEvent::Paste(notes.display().to_string()));
         app.on_event(key(KeyCode::Enter));
         let first = sent(&mut commands);
         assert_eq!(first.len(), 1);
@@ -826,7 +833,7 @@ mod tests {
         app.timeline.selected = Some(1);
         app.perform(Action::Reply);
         assert_eq!(app.compose_mode, ComposeMode::Reply(1));
-        app.on_event(Event::Paste(notes.display().to_string()));
+        app.on_event(InputEvent::Paste(notes.display().to_string()));
         type_text(&mut app, "here");
         app.on_event(key(KeyCode::Enter));
         let second = sent(&mut commands);
@@ -835,7 +842,7 @@ mod tests {
         assert_eq!(app.compose_mode, ComposeMode::Normal);
 
         // A /me action or an unknown command is no caption; everything stays.
-        app.on_event(Event::Paste(notes.display().to_string()));
+        app.on_event(InputEvent::Paste(notes.display().to_string()));
         for (text, reason) in [
             ("/me waves", "A caption cannot be a /me action"),
             ("/nosuch thing", "Unknown command /nosuch"),
@@ -862,10 +869,10 @@ mod tests {
             .map(|path| path.display().to_string())
             .collect::<Vec<_>>()
             .join(" ");
-        app.on_event(Event::Paste(all.clone()));
+        app.on_event(InputEvent::Paste(all.clone()));
         assert_eq!(paths(&app), files);
         // The same file twice is one chip.
-        app.on_event(Event::Paste(files[0].display().to_string()));
+        app.on_event(InputEvent::Paste(files[0].display().to_string()));
         assert_eq!(app.attachments().len(), 3);
         assert_eq!(toast(&app), "a.txt is already attached");
 
@@ -888,9 +895,9 @@ mod tests {
         assert_eq!(paths(&app), [files[0].clone()]);
 
         // Ctrl-C clears the draft and what is attached to it.
-        app.on_event(Event::Paste(all));
+        app.on_event(InputEvent::Paste(all));
         type_text(&mut app, "caption");
-        app.on_event(Event::Key(KeyEvent::new(
+        app.on_event(InputEvent::Key(KeyEvent::new(
             KeyCode::Char('c'),
             KeyModifiers::CONTROL,
         )));
@@ -910,7 +917,7 @@ mod tests {
         let (mut app, mut commands) = connected();
         app.on_matrix(MatrixEvent::UploadLimit(1000));
 
-        app.on_event(Event::Paste(format!(
+        app.on_event(InputEvent::Paste(format!(
             "{} {}",
             small.display(),
             big.display()
@@ -952,7 +959,7 @@ mod tests {
         type_text(&mut app, "my caption");
 
         // Alt-A puts the draft aside for the command.
-        app.on_event(Event::Key(KeyEvent::new(
+        app.on_event(InputEvent::Key(KeyEvent::new(
             KeyCode::Char('a'),
             KeyModifiers::ALT,
         )));
@@ -1018,7 +1025,7 @@ mod tests {
         let scratch = Scratch::new("app-rooms");
         let notes = scratch.file("notes.txt", b"hello");
         let (mut app, mut commands) = connected();
-        app.on_event(Event::Paste(notes.display().to_string()));
+        app.on_event(InputEvent::Paste(notes.display().to_string()));
         assert_eq!(app.attachments().len(), 1);
 
         app.open_room(1);
@@ -1037,7 +1044,7 @@ mod tests {
         app.timeline.selected = Some(2);
         app.perform(Action::Edit);
         assert!(matches!(app.compose_mode, ComposeMode::Edit(2)));
-        app.on_event(Event::Paste(notes.display().to_string()));
+        app.on_event(InputEvent::Paste(notes.display().to_string()));
         assert!(app.attachments().is_empty());
         assert!(app.composer.text().ends_with("notes.txt"));
         app.perform(Action::Attach);
@@ -1045,7 +1052,7 @@ mod tests {
 
         // Logging out forgets files that were waiting.
         app.perform(Action::CancelCompose);
-        app.on_event(Event::Paste(notes.display().to_string()));
+        app.on_event(InputEvent::Paste(notes.display().to_string()));
         assert_eq!(app.attachments().len(), 1);
         app.on_matrix(MatrixEvent::NeedLogin { reason: None });
         app.modal = None;
@@ -1118,7 +1125,7 @@ mod tests {
         let mut app = App::demo();
         app.perform(Action::ToggleHelp);
         for paste in [notes.display().to_string(), "words".to_owned()] {
-            app.on_event(Event::Paste(paste));
+            app.on_event(InputEvent::Paste(paste));
             assert!(app.attachments().is_empty());
             assert!(app.composer.is_empty());
         }
@@ -1130,14 +1137,14 @@ mod tests {
         assert!(app.images.viewer_open());
         let focus = app.focus;
         for paste in [notes.display().to_string(), "words".to_owned()] {
-            app.on_event(Event::Paste(paste));
+            app.on_event(InputEvent::Paste(paste));
             assert!(app.attachments().is_empty());
             assert!(app.composer.is_empty());
             assert_eq!(app.focus, focus);
         }
         // Closed again, a drop attaches as ever.
         app.images.close_viewer();
-        app.on_event(Event::Paste(notes.display().to_string()));
+        app.on_event(InputEvent::Paste(notes.display().to_string()));
         assert_eq!(app.attachments().len(), 1);
     }
 
@@ -1149,7 +1156,7 @@ mod tests {
         let (mut app, mut commands) = connected();
 
         // Attached in the room, with an `/upload` command begun over a draft.
-        app.on_event(Event::Paste(in_room.display().to_string()));
+        app.on_event(InputEvent::Paste(in_room.display().to_string()));
         type_text(&mut app, "room draft");
         app.perform(Action::Attach);
         assert_eq!(app.composer.text(), "/upload ");
@@ -1164,7 +1171,7 @@ mod tests {
         assert!(sent(&mut commands).is_empty());
 
         // Attached in the thread; its own `/upload` draft is its own.
-        app.on_event(Event::Paste(in_thread.display().to_string()));
+        app.on_event(InputEvent::Paste(in_thread.display().to_string()));
         assert_eq!(paths(&app), std::slice::from_ref(&in_thread));
         type_text(&mut app, "thread draft");
         app.perform(Action::Attach);
@@ -1214,7 +1221,7 @@ mod tests {
             .collect();
         let (mut app, mut commands) = connected();
         for file in &files {
-            app.on_event(Event::Paste(file.display().to_string()));
+            app.on_event(InputEvent::Paste(file.display().to_string()));
         }
 
         // One row for three files: the first by name, the others counted.
@@ -1242,7 +1249,7 @@ mod tests {
         let scratch = Scratch::new("app-edges");
         let notes = scratch.file("notes.txt", b"hello");
         let (mut app, mut commands) = connected();
-        let ctrl_c = || Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        let ctrl_c = || InputEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
 
         // Ctrl-C on an `/upload` command forgets the draft that was put aside for it.
         type_text(&mut app, "old draft");
@@ -1257,7 +1264,7 @@ mod tests {
         type_text(&mut app, "caption");
         app.perform(Action::Attach);
         type_text(&mut app, "/some/where");
-        app.on_event(Event::Paste(notes.display().to_string()));
+        app.on_event(InputEvent::Paste(notes.display().to_string()));
         assert_eq!(app.attachments().len(), 1);
         assert_eq!(app.composer.text(), "caption");
         app.composer.take();
@@ -1312,7 +1319,7 @@ mod tests {
         let (mut app, mut commands) = connected();
         app.rooms[0].kind = RoomKind::Invite;
         // A path is text there, and the command and the key say why not.
-        app.on_event(Event::Paste(notes.display().to_string()));
+        app.on_event(InputEvent::Paste(notes.display().to_string()));
         assert!(app.attachments().is_empty());
         assert_eq!(app.composer.text(), notes.display().to_string());
         app.composer.take();
@@ -1332,7 +1339,7 @@ mod tests {
         let notes = scratch.file("notes.txt", b"hello");
         let other = scratch.file("other.txt", b"hello");
         let (mut app, mut commands) = connected();
-        app.on_event(Event::Paste(format!(
+        app.on_event(InputEvent::Paste(format!(
             "{}\n{}",
             notes.display(),
             other.display()
@@ -1378,12 +1385,12 @@ mod tests {
         let first = scratch.file("first.txt", b"hello");
         let second = scratch.file("second.txt", b"hello");
         let (mut app, mut commands) = connected();
-        app.on_event(Event::Paste(first.display().to_string()));
+        app.on_event(InputEvent::Paste(first.display().to_string()));
         app.on_event(key(KeyCode::Enter));
         let first_send = app.attach.last_send();
         app.open_room(1);
         app.focus = Pane::Composer;
-        app.on_event(Event::Paste(second.display().to_string()));
+        app.on_event(InputEvent::Paste(second.display().to_string()));
         app.on_event(key(KeyCode::Enter));
         let second_send = app.attach.last_send();
         assert_ne!(first_send, second_send);
@@ -1415,7 +1422,7 @@ mod tests {
         let scratch = Scratch::new("app-taken");
         let notes = scratch.file("notes.txt", b"hello");
         let (mut app, mut commands) = connected();
-        app.on_event(Event::Paste(notes.display().to_string()));
+        app.on_event(InputEvent::Paste(notes.display().to_string()));
         type_text(&mut app, "the caption");
         app.on_event(key(KeyCode::Enter));
         assert_eq!(sent(&mut commands).len(), 1);

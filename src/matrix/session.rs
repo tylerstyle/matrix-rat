@@ -22,6 +22,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use url::Url;
 
 use super::MatrixEvent;
+pub use super::auth::{ActiveSession, ReauthKind, ReauthOutcome, ReauthTarget, RestoreOutcome};
 use super::keyring::{
     KeyringBackend, KeyringKey, PassphraseFileStore, SecretServiceKeyring, SecretStoreMode,
     prepare_passphrase_for_save, resolve_passphrase,
@@ -31,70 +32,6 @@ use crate::paths::Paths;
 const DEVICE_NAME: &str = "matrix-rat";
 /// Shown to the user by the homeserver during a browser login.
 const CLIENT_URI: &str = "https://github.com/tylerstyle/matrix-rat";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReauthKind {
-    Password,
-    Browser,
-}
-
-/// Identity and auth kind preserved across a soft logout so logging in again keeps the same
-/// device and local encrypted store.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReauthTarget {
-    pub homeserver: String,
-    pub user_id: String,
-    pub device_id: String,
-    pub kind: ReauthKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_id: Option<String>,
-}
-
-/// Hand-written: the server, the account and the device stay out of logs.
-impl std::fmt::Debug for ReauthTarget {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ReauthTarget")
-            .field("kind", &self.kind)
-            .finish_non_exhaustive()
-    }
-}
-
-impl ReauthTarget {
-    pub fn keyring_key(&self, profile: &str) -> KeyringKey {
-        KeyringKey::new(profile, &self.user_id, &self.device_id)
-    }
-}
-
-/// Live session state kept by the Matrix worker while running.
-pub struct ActiveSession {
-    pub client: Client,
-    pub passphrase: String,
-    pub in_keyring: bool,
-    pub target: ReauthTarget,
-}
-
-pub enum RestoreOutcome {
-    /// No `session.json` exists yet.
-    NoSession,
-    /// Saved session restored cleanly.
-    Restored(ActiveSession),
-    /// Server soft-logged-out (or saved `soft_logout` marker); prompt re-auth against the
-    /// same device and store.
-    NeedReauth {
-        target: ReauthTarget,
-        passphrase: String,
-        in_keyring: bool,
-    },
-    /// Keyring/store cannot be opened safely right now; `session.json` and `<data>/store`
-    /// have been kept untouched.
-    Blocked(String),
-}
-
-pub struct ReauthOutcome {
-    pub session: ActiveSession,
-    pub kept_device: bool,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReauthDecision {
@@ -346,7 +283,9 @@ pub async fn forget_with<K: KeyringBackend>(
     }
 }
 
-/// Removes everything a session left behind, for an explicit logout.
+/// Removes everything a session left behind, for an explicit logout: the session,
+/// its stores and the search index. What the account kept in the app's storage
+/// (saved messages, kept notes) the app removes when told (`MatrixEvent::LoggedOut`).
 pub async fn clear(paths: &Paths, target: Option<&ReauthTarget>) {
     clear_with(paths, target, &SecretServiceKeyring::new()).await;
 }
@@ -360,15 +299,9 @@ pub async fn clear_with<K: KeyringBackend>(
     // On the blocking threads, as in `forget_with`: the stores are many files.
     let paths = paths.clone();
     let _ = tokio::task::spawn_blocking(move || {
-        // What the account saved for later names its rooms and messages: it goes with
-        // the account. (A session the server merely ended keeps it: see `forget`.)
-        crate::saved::remove_files(&paths.saved_file());
         let _ = std::fs::remove_dir_all(paths.store_dir());
         let _ = std::fs::remove_dir_all(paths.data_dir.join("store.previous"));
         let _ = std::fs::remove_dir_all(paths.search_dir());
-        // Transcripts and translations kept by `keep_notes`: message text in plain form.
-        let _ = std::fs::remove_file(paths.notes_file());
-        let _ = std::fs::remove_file(paths.notes_file().with_extension("json.new"));
     })
     .await;
 }
@@ -1076,37 +1009,24 @@ mod tests {
 
         std::fs::create_dir_all(paths.store_dir()).unwrap();
         std::fs::create_dir_all(paths.search_dir()).unwrap();
-        // The list of saved messages stays when the session is only forgotten (it
-        // ended on the server and the same account logs in again), and goes with
-        // an explicit logout, with everything put aside next to it.
+        // The list of saved messages and the kept notes are the app's: neither
+        // forgetting nor clearing the session touches them. (The app removes them
+        // on an explicit logout, told by `MatrixEvent::LoggedOut`.)
         let saved = paths.saved_file();
         let aside = saved.with_file_name("saved.json.damaged");
         let pending = saved.with_file_name("saved.json.new");
-        std::fs::write(&saved, b"{}").unwrap();
-        std::fs::write(&aside, b"{}").unwrap();
-        std::fs::write(&pending, b"{}").unwrap();
+        let notes = paths.notes_file();
+        for file in [&saved, &aside, &pending, &notes] {
+            std::fs::write(file, b"{}").unwrap();
+        }
         let keyring = TestKeyring::default();
         forget_with(&paths, None, &keyring).await;
-        assert!(saved.exists() && aside.exists() && pending.exists());
+        assert!(saved.exists() && aside.exists() && pending.exists() && notes.exists());
         clear_with(&paths, None, &keyring).await;
-        assert!(!saved.exists() && !aside.exists() && !pending.exists());
+        assert!(saved.exists() && aside.exists() && pending.exists() && notes.exists());
         assert!(!paths.store_dir().exists());
         assert!(!paths.data_dir.join("store.previous").exists());
         assert!(!paths.search_dir().exists());
-
-        let _ = std::fs::remove_dir_all(paths.data_dir.parent().unwrap());
-    }
-
-    #[tokio::test]
-    async fn a_logout_removes_the_kept_transcripts_and_translations() {
-        let paths = temp_paths("clear-notes");
-        std::fs::create_dir_all(&paths.data_dir).unwrap();
-        std::fs::write(paths.notes_file(), b"{}").unwrap();
-        let half_written = paths.notes_file().with_extension("json.new");
-        std::fs::write(&half_written, b"{").unwrap();
-        clear_with(&paths, None, &TestKeyring::default()).await;
-        assert!(!paths.notes_file().exists());
-        assert!(!half_written.exists());
 
         let _ = std::fs::remove_dir_all(paths.data_dir.parent().unwrap());
     }

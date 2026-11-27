@@ -521,7 +521,9 @@ impl Hub {
             MatrixEvent::Rooms(rooms) => self.on_rooms(rooms),
             MatrixEvent::Agent(event) => self.on_agent(event),
             // Everything else is for a screen: there is none.
-            MatrixEvent::LoginFailed(_)
+            // Serve never logs out; the worker's clean-up is for the app's storage.
+            MatrixEvent::LoggedOut
+            | MatrixEvent::LoginFailed(_)
             | MatrixEvent::BrowserLoginUrl(_)
             | MatrixEvent::Sync(_)
             | MatrixEvent::Recovery(_)

@@ -137,18 +137,66 @@ today's code paths: the new names re-export what is used now.
    `termquery.rs`, the editor/suspend handling, signals, the theme/portal watchers, the
    desktop notifications and the audio/note/summary runners), leaving `App` with a
    platform-free surface: `on_input`, `on_matrix`, `on_tick`, the `take_*` effects,
-   `ui::draw`, `after_draw`.
+   `ui::draw`, `after_draw`. What step 5 left in `App` for this step: `IconCache` (its own
+   file, `notify/icon_cache.rs`) together with `notify_mode.resolved()` (the shell says
+   whether desktop notices are on, or resolves the icons when it sends them), the WAV copy a
+   transcription makes (`TempAudio::create` in `app/notes.rs`), mpv's socket name
+   (`audio::socket_path` in `app/playback.rs`), and `Graphics::detect_with_term`.
+   **Done** (2026-11-27, `e822212..927c5c8`): `src/shell.rs` with `shell/terminal.rs` (the old
+   `terminal.rs`, its panic hook and tests unchanged, plus the event loop `run`, `carry_out`,
+   `flush_images`), `shell/terminal/termquery.rs`, `shell/terminal/external_editor.rs` (the
+   worker's news held during the editor's turn; `App`'s half stays in
+   `app/external_editor.rs`) and `shell/terminal/icon_cache.rs`. `main.rs` calls
+   `shell::terminal::run`. What the loop calls of `App` is `pub(crate)`, nothing renamed.
+   The loop alone holds the icon cache (`App` asks for its clearing with
+   `OsRequest::ClearNoticeIcons`), names mpv's socket and makes the WAV file of a
+   transcription (`take_wav_requests`/`on_wav_file`); what `auto` notifications are here is
+   a new probe, `Probes::notify_auto`. `Graphics::detect_with_term` went with `run`.
+   Deliberately not moved: the runner halves from step 5 (`audio::run`,
+   `audio::record::run`, `textcmd::run`, `catchup::run`, `editor`, `clipboard`), `notify`'s
+   senders, `portal`, `watch`, `focus` and `images/detect.rs`. Only the shell calls them now;
+   moving their files would be renames that 7b's `cfg` makes unnecessary. Left in `App` for 7b, as
+   listed there: the key file checks (`app/devices.rs`), the saved download's
+   `path.exists()` (`app/files.rs`), the `upload` checks and `files::display`/`resolve_dir`,
+   and the images' encoder thread (`images/store.rs`).
 7. **Native-only behind `cfg`, as a library, with the gate.** Two parts, each reviewed:
    - **7a, on native only:** the modules move from `main.rs` into `src/lib.rs`, which takes the
      crate-level attributes (`recursion_limit`, the two test-only allows, the
      `wildcard_enum_match_arm` warning; `main.rs` keeps them for itself); `main.rs` becomes the
      CLI using the library, and its ~650 lines of tests move into the library modules they
      reach into (no `#[doc(hidden)] pub` shims).
+     **Done** (2026-11-27, `fceec8b..8023f67`): `src/lib.rs` (the library `matrix_rat`)
+     declares every module, all private, and has the attributes; `main.rs` keeps them and is
+     the command line only (`Args`, `Command`, `main`, `client_command`). What it uses is
+     public through one module of re-exports, `matrix_rat::cli`, under the paths the items
+     have inside the crate (`cli::agent::client::send`, `cli::paths::Paths`,
+     `cli::shell::terminal::run`, …), so `main.rs`'s code stayed the same and nothing else of
+     those modules is public; rustdoc's `private_intra_doc_links` is allowed (the docs are
+     read with `--document-private-items`). `build_runtime` and its limits moved to
+     `src/runtime.rs` with their two tests: the ignored one that measures threads opens an
+     SDK store and a theme watch, which the command line must not make public. The other five
+     tests (clap's parsing, `client_command`'s exit codes) test `main.rs`'s own items and
+     stay there. 1670 passed and 62 ignored, as before. `Cargo.toml`, `default.nix`, the
+     workflows and `check.sh` needed no change.
    - **7b, the browser:** compiled only for `not(target_family = "wasm")`: `agent/**`,
      `matrix/agent.rs`, the runner halves from step 5, `portal`, `watch`, `lock`, `focus`,
-     `termquery`, `logging`, the CLI; `logsafe.rs`'s arms for native-only error types (a
+     `termquery`, `logging`, the CLI (`main.rs`, and the library's `cli` and `runtime`);
+     `logsafe.rs`'s arms for native-only error types (a
      browser arm for `crate::rt`'s timeout error); in `matrix/devices.rs` the key export and
-     import. Browser stubs, so `matrix/mod.rs` still compiles: `matrix/session.rs` (shared
+     import, with the checks `App` makes of the key file's path (`app/devices.rs`: metadata,
+     `is_dir`); the check that a saved download is still there (`app/files.rs`,
+     `path.exists()`); `FsStorage` (Unix file modes) and the test-only `Storage::files` hook;
+     `NativeProbes` (and the test probes); in `matrix/keyring.rs` the ssh check in
+     `ResolvePassphraseError::user_message` (or the whole backend and migration part: the
+     browser needs only `SecretStoreMode`); `audio/ipc.rs` with `Reported::take` moved next
+     to the player. Pure helpers that only runners use stay where step 5 put them, under
+     `cfg(any(not(target_family = "wasm"), test))`: in `paths`, `editor`, `clipboard`,
+     `upload`, `audio` (and `recorder`, `record`), `images` and `notify` (the gate's
+     dead-code warnings list them). Trivial browser stubs: `upload::dropped_files`,
+     `files::display` and `resolve_dir`. `App` also calls `upload::check`, `command_files`,
+     `complete` and `prepare` (the places are in step 5): they need browser stubs or a `cfg`
+     too (matrix-agy, step 6 review).
+     Browser stubs, so `matrix/mod.rs` still compiles: `matrix/session.rs` (shared
      `ReauthKind`, `ReauthTarget`, `ActiveSession`, `RestoreOutcome`, `ReauthOutcome`; phase 2
      fills in login and the IndexedDB stores), `matrix/search.rs` (shared `SearchHit`; no local
      index), `images`/`ui/image.rs` (a "[picture]" placeholder; a click opens it, phase 4 draws
@@ -166,6 +214,68 @@ today's code paths: the new names re-export what is used now.
      `[target.wasm32-unknown-unknown]`) and 0.2 its `js` feature. The gate:
      `cargo check --lib --target wasm32-unknown-unknown`, in `scripts/check.sh` (nixpkgs' rustc
      has the browser std; `cargo check` needs no linker) and in CI.
+     **Done** (2026-11-27, `ea2b670..345d927`): `Cargo.toml` by target as written; the lock
+     gained one edge (`growable-bloom-filter` under matrix-sdk-indexeddb), and native
+     `cargo tree -e features` is the same as before for x86_64 and aarch64. Native only as
+     listed (`termquery` with `shell::terminal`); the runner halves with their re-exports.
+     Browser stand-ins: `matrix/auth.rs` holds the login types both builds share (and
+     `SecretStoreMode`; `session.rs` and `keyring.rs` re-export them) and the browser's
+     `session` (no session to restore, logins not available yet); a search ends at once with a
+     note; the picture encoders make nothing (`Encoded`'s protocol is an enum without
+     variants there), so every picture keeps its placeholder; `files::write_new`,
+     `NewFile::create`, `TempAudio::create`, the key export and import and `upload`'s disk
+     calls refuse; each `spawn_blocking` of the worker does its work in place; the media
+     download reads the body whole (reqwest has no `chunk` there). Beyond the plan:
+     matrix-sdk's errors are not `Send` in the browser (`Error::UnknownError` holds a
+     `Box<dyn Error>`), so `anyhow` cannot take them: `matrix/sdk_error.rs` gives 25 places
+     `.sdk()?`/`.sdk_context(..)`, which are `?`/`.context` on native and copy the error
+     (texts, causes, `logsafe`'s `Why`) in the browser; `LeftRooms` uses matrix-sdk's
+     `BoxFuture`; `logsafe` has no `is_connect` there. Left compiled, not `cfg`'d:
+     `path.exists()` (`app/files.rs`), never asked in the browser, where no download is
+     saved. The key file checks (`app/devices.rs`) are native only, so in the browser the
+     export and the import reach the worker's stand-in and its words. The encoder thread is
+     the terminal's: `App::start_images`/`on_image_encoded`, `EncodeDone`, `ImageStore`'s
+     encoder, `set_encoder`, `on_encoded` and the `std::thread::spawn` are not in the
+     browser build; there the viewer says "pictures are not drawn in the browser yet" once
+     the pixels are there, instead of preparing the picture for ever.
+     `matrix_rat::engine` is public on both builds: what a shell outside the crate drives
+     (phase 2's web crate, in a workspace with the core library and the terminal app);
+     `shell::terminal` uses the same items. It holds `App`, `OsRequest`, `ReadyNotices`
+     (with `Notice`, `DueReminder`, `NotifyIcon`, `NotifyMode`), `Config`, `Paths`,
+     `SecretStoreMode`, the input types, `spawn_with`/`MatrixHandle`/`MatrixEvent`,
+     `Storage` (with its key types), `Probes` and `NothingHere` (the browser's probes:
+     nothing found, the same answers everywhere; the tests use it too), `ui::draw`,
+     `ColorScheme`, `time::Instant` and rt's `interval`, `MissedTickBehavior`,
+     `sleep_until`. `App`'s fields are `pub(crate)`, and its `pub` methods are exactly what
+     a shell calls, every type in them named in `engine` or std: `new_in_scheme`; at start
+     `set_config_stored`, `set_saved_stored`, `set_startup_target`, `set_keyboard_enhanced`,
+     `keep_notes_stored`, `add_demo_space`, `maybe_open_startup_target`; each turn
+     `on_event`, `on_matrix`, `on_tick`, `take_dirty`/`mark_dirty`, `take_repaint`,
+     `after_draw`, `take_os_requests`, `take_notices_with_icons`, `take_pending_copy`,
+     `take_window_title`/`window_title_lost`, `mouse_on`, `window_title_on`,
+     `reload_theme`, `on_color_scheme`, the three search debounces and their ticks; at the
+     end `should_quit`/`quit`, `sends_out`, `shut_down_worker`. What only the terminal
+     carries out (players, recorders, note and summary programs, the WAV file, the editor,
+     the clipboard's tools, `image_cleanup`) is `pub(crate)` and, with what only it and the
+     runners use, native only. `MatrixHandle::send` is `pub(crate)` too (`MatrixCmd` is the
+     crate's). The rest of the browser's dead code was runner-only helpers, under
+     `cfg(any(not(target_family = "wasm"), test))`, plus targeted
+     `expect(dead_code)` for the browser, each with its reason: `RestoreOutcome`,
+     `threads::SUPPORT`, the requests' fields only a runner reads (`audio::Request`,
+     `RecordRequest`, `catchup::Request`, `textcmd::Request`, `WavRequest`, a note run's
+     `one_paragraph` and `Phase::Converting`) and the states only a runner's answer makes
+     (`CatchUpStage::Done`, `TakePhase::Running`, `clipboard::Failure`); and three
+     `expect(unreachable_code)` after an uninhabited `NewFile` or `Encoded`. No
+     `.cargo/config.toml`: getrandom 0.4 takes its backend from the `wasm_js` feature, which
+     matrix-sdk's `js` turns on (and 0.2's `js`). The gate runs with `-D warnings` in
+     `check.sh` and in a `browser` job in `checks.yml`, there on Rust 1.96.0 (the MSRV, so a
+     new release's lints do not fail it unannounced); nixpkgs' rustc 1.99.1 has the browser
+     std, so `shell.nix` is unchanged. `cargo deny check` passes (its graph is the native
+     targets); for the browser's graph it reports `derivative` unmaintained
+     (RUSTSEC-2024-0388, via matrix-sdk-indexeddb), not ignored (see "Not in phase 1").
+     Reviewed by matrix-agy (`.claude/agy/review-web-step7b.md`): three medium findings (the
+     public surface, the key file checks, the encoder thread and the viewer) and the CI
+     toolchain, fixed in `36d4750..77e31cb`. 1672 passed and 62 ignored.
 
 ## Not in phase 1
 
@@ -177,8 +287,11 @@ today's code paths: the new names re-export what is used now.
   `Storage` in the browser (phase 2, from the phase 0 test build), and the ratzilla shell.
 - The search index (`experimental-search`, tantivy): native only; the browser goes without
   local search at first.
-- A crate split into a workspace: not needed for the gate; can come later if `cfg` gets
-  crowded.
+- A crate split into a workspace: not needed for the gate. Phase 2 makes one (the core
+  library, the terminal app, the web crate); the web crate drives `matrix_rat::engine`.
+- `cargo deny` for the browser's graph: when the web build ships, `deny.toml` gets
+  `wasm32-unknown-unknown` among its targets and a decision on RUSTSEC-2024-0388
+  (`derivative`, unmaintained, via matrix-sdk-indexeddb).
 
 ## Open questions
 

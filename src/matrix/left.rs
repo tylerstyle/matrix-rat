@@ -24,15 +24,17 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use futures::FutureExt;
-use futures::future::{BoxFuture, Shared};
+use futures::future::Shared;
 use matrix_sdk::ruma::api::client::membership::joined_rooms;
 use matrix_sdk::ruma::{OwnedRoomId, RoomId};
-use matrix_sdk::{Client, Room, RoomState};
+use matrix_sdk::{BoxFuture, Client, Room, RoomState};
 use tokio::sync::Notify;
-use tokio::task::{JoinHandle, JoinSet};
+
+use crate::rt::{self, JoinHandle, JoinSet};
+use crate::time::Instant;
 
 /// A room that shows up as joined this long after it was left is asked about.
 const ASK_AFTER: Duration = Duration::from_secs(10);
@@ -81,7 +83,8 @@ pub struct LeftRooms {
 }
 
 /// A question to the server about the rooms the account is in, shared by the rooms
-/// asked about while it is on its way.
+/// asked about while it is on its way. (matrix-sdk's `BoxFuture` is `Send` only outside
+/// the browser, where the client's requests are not.)
 type Question = Shared<BoxFuture<'static, Option<Arc<HashSet<OwnedRoomId>>>>>;
 
 impl std::fmt::Debug for LeftRooms {
@@ -199,9 +202,9 @@ impl LeftRooms {
     fn question(&self, client: &Client, since: Instant) -> Question {
         let ask = || {
             let client = client.clone();
-            async move { server_joined(&client).await.map(Arc::new) }
-                .boxed()
-                .shared()
+            let question: BoxFuture<'static, _> =
+                Box::pin(async move { server_joined(&client).await.map(Arc::new) });
+            question.shared()
         };
         let Ok(mut on_its_way) = self.question.lock() else {
             return ask();
@@ -323,7 +326,7 @@ impl LeftRooms {
         let next = self.next_ask();
         let time_to_ask = async {
             match next {
-                Some(at) => tokio::time::sleep_until(at.into()).await,
+                Some(at) => rt::sleep_until(at).await,
                 None => std::future::pending().await,
             }
         };
@@ -362,7 +365,7 @@ fn remember(rooms: &mut HashMap<OwnedRoomId, Entry>, room_id: &RoomId, now: Inst
 /// The rooms the server says the account is in; `None` if it could not be asked.
 async fn server_joined(client: &Client) -> Option<HashSet<OwnedRoomId>> {
     let request = joined_rooms::v3::Request::new();
-    let answer = tokio::time::timeout(Duration::from_secs(20), client.send(request))
+    let answer = rt::timeout(Duration::from_secs(20), client.send(request))
         .await
         .ok()?
         .ok()?;
@@ -403,7 +406,7 @@ impl StartCheck {
     /// the first call does anything.
     pub fn caught_up(&mut self, client: &Client, left: &LeftRooms) {
         if let Some(at_start) = self.at_start.take() {
-            self.task = Some(tokio::spawn(check_at_start(
+            self.task = Some(rt::spawn(check_at_start(
                 client.clone(),
                 left.clone(),
                 at_start,
@@ -469,6 +472,23 @@ fn not_in_after_all<'a>(
 /// A stand-in homeserver, for tests of what the worker does with the rooms it knows:
 /// a client that has had one sync answer from it knows the rooms in that answer, and
 /// what it asks later is answered from the same few things.
+/// The room with this id, if the account is in it (and has not left it in this
+/// session, whatever a late sync answer makes it look like).
+pub(super) fn joined_room(
+    client: &Client,
+    left: &LeftRooms,
+    room_id: &str,
+) -> anyhow::Result<Room> {
+    let id = RoomId::parse(room_id).map_err(|_| anyhow::anyhow!("invalid room id"))?;
+    let room = client
+        .get_room(&id)
+        .ok_or_else(|| anyhow::anyhow!("this room is not known"))?;
+    if room.state() != RoomState::Joined || left.gone(&room) {
+        anyhow::bail!("the account is not in this room");
+    }
+    Ok(room)
+}
+
 #[cfg(test)]
 pub(super) mod testing {
     use std::sync::{Arc, Mutex};

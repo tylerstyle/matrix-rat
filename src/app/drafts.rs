@@ -7,13 +7,14 @@
 //! for it is), and a reply is stored as plain text: what it answered is not restored.
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::attach::Scope;
 use super::{App, ComposeMode};
 use crate::matrix::MatrixCmd;
 #[cfg(test)]
 use crate::model::RoomKind;
+use crate::time::Instant;
 
 /// How long nothing must be typed before the draft is saved, so that a crash or a
 /// kill loses little.
@@ -349,7 +350,7 @@ impl App {
     /// order to stop. The worker takes them in this order. Also drops the UI's copy of
     /// the command sender so the channel can close without dropping `App` (and its
     /// temporary voice/picture files) before the worker finishes reading them.
-    pub(super) fn shut_down_worker(&mut self) {
+    pub fn shut_down_worker(&mut self) {
         self.save_draft();
         self.send_matrix(MatrixCmd::Shutdown);
         self.matrix = None;
@@ -512,16 +513,16 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use tokio::sync::mpsc::UnboundedReceiver;
 
     use super::*;
     use crate::action::{Action, Pane};
+    use crate::input::{InputEvent, KeyCode, KeyEvent, KeyModifiers};
     use crate::matrix::{MatrixEvent, MatrixHandle};
     use crate::model::{ItemRef, Message, Room};
 
-    fn key(code: KeyCode) -> Event {
-        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    fn key(code: KeyCode) -> InputEvent {
+        InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
     fn type_text(app: &mut App, text: &str) {

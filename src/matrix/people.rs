@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use futures::StreamExt;
 use matrix_sdk::ruma::api::client::profile::{AvatarUrl, DisplayName, get_profile};
@@ -18,7 +18,6 @@ use matrix_sdk::ruma::events::room::power_levels::UserPowerLevel;
 use matrix_sdk::ruma::{OwnedMxcUri, UserId};
 use matrix_sdk::{Client, Room, RoomMemberships, RoomState};
 use tokio::sync::{Notify, mpsc::UnboundedSender, watch};
-use tokio::task::JoinSet;
 
 use super::MatrixEvent;
 use super::left::LeftRooms;
@@ -27,7 +26,9 @@ use super::manage::{
     room as resolve_room,
 };
 use super::safety;
+use crate::rt::{self, JoinSet};
 use crate::text::{is_blank, sanitize_line};
+use crate::time::Instant;
 use crate::upload;
 
 /// Bound profile and cross-signing queries so an unreachable peer homeserver cannot stall the UI.
@@ -317,7 +318,7 @@ pub struct People {
     sync_poke: Arc<Notify>,
     own_room_names: OwnRoomNames,
     shared_cooldown: MemberSyncCooldown,
-    sync_task: tokio::task::JoinHandle<()>,
+    sync_task: rt::JoinHandle<()>,
     tasks: JoinSet<()>,
     /// Rooms left in this session (see [`super::left`]).
     left: LeftRooms,
@@ -337,7 +338,7 @@ impl People {
         let task_poke = sync_poke.clone();
         let task_own_room_names = own_room_names.clone();
         let task_left = left.clone();
-        let sync_task = tokio::spawn(async move {
+        let sync_task = rt::spawn(async move {
             loop {
                 let profile =
                     load_own_profile(&task_client, &task_left, &task_own_room_names).await;
@@ -453,7 +454,7 @@ pub(super) async fn load_own_profile(
 ) -> OwnProfile {
     let mut display_name = None;
     let mut avatar = None;
-    match tokio::time::timeout(PROFILE_TIMEOUT, client.account().fetch_user_profile()).await {
+    match rt::timeout(PROFILE_TIMEOUT, client.account().fetch_user_profile()).await {
         Ok(Ok(profile)) => {
             (display_name, avatar) = extract_profile(&profile);
         }
@@ -509,7 +510,7 @@ async fn fetch_user_profile(
     let own = own_user.as_deref() == Some(&*parsed);
 
     let account = client.account();
-    let profile_fut = tokio::time::timeout(PROFILE_TIMEOUT, account.fetch_user_profile_of(&parsed));
+    let profile_fut = rt::timeout(PROFILE_TIMEOUT, account.fetch_user_profile_of(&parsed));
     let verify_fut = lookup_verify_status(client, &parsed);
     let (profile_res, verify) = tokio::join!(profile_fut, verify_fut);
 
@@ -663,7 +664,7 @@ async fn fetch_single_member_state(
         StateEventType::RoomMember,
         target.to_string(),
     );
-    let resp = match tokio::time::timeout(KEYS_TIMEOUT, client.send(req)).await {
+    let resp = match rt::timeout(KEYS_TIMEOUT, client.send(req)).await {
         Ok(Ok(resp)) => resp,
         Ok(Err(err)) if matches!(err.client_api_error_kind(), Some(ErrorKind::NotFound)) => {
             return SingleMemberFetch::NotFound;
@@ -703,7 +704,7 @@ async fn resolve_context_member(
             .joined_members_count()
             .saturating_add(room.invited_members_count());
         if count <= SHARED_ROOM_MAX_MEMBERS {
-            return match tokio::time::timeout(KEYS_TIMEOUT, room.get_member(target)).await {
+            return match rt::timeout(KEYS_TIMEOUT, room.get_member(target)).await {
                 Ok(Ok(Some(member))) => (Some(member_from_local(&member, false)), false),
                 Ok(Ok(None)) => (None, false),
                 Ok(Err(_)) | Err(_) => (None, true),
@@ -878,7 +879,7 @@ async fn fallback_check_room(
 ) -> FallbackCheck {
     let matched = match mode {
         FallbackMode::SyncMembers => {
-            match tokio::time::timeout(KEYS_TIMEOUT, room.get_member(target)).await {
+            match rt::timeout(KEYS_TIMEOUT, room.get_member(target)).await {
                 Ok(Ok(Some(member))) => matches!(
                     *member.membership(),
                     MembershipState::Join | MembershipState::Invite
@@ -1005,9 +1006,8 @@ async fn collect_shared_rooms(
         }))
         .buffer_unordered(SHARED_ROOM_CONCURRENCY);
 
-        let deadline = tokio::time::Instant::now() + SHARED_ROOM_SYNC_TIMEOUT;
-        while let Ok(Some((rid, outcome))) = tokio::time::timeout_at(deadline, stream.next()).await
-        {
+        let deadline = Instant::now() + SHARED_ROOM_SYNC_TIMEOUT;
+        while let Ok(Some((rid, outcome))) = rt::timeout_at(deadline, stream.next()).await {
             match outcome {
                 FallbackCheck::Matched(shared) => {
                     completed.insert(rid, true);
@@ -1074,7 +1074,7 @@ async fn lookup_verify_status(client: &Client, target: &UserId) -> UserVerifySta
     let enc = client.encryption();
     let existing = match enc.get_user_identity(target).await {
         Ok(Some(identity)) => Some(identity),
-        Ok(None) => tokio::time::timeout(KEYS_TIMEOUT, enc.request_user_identity(target))
+        Ok(None) => rt::timeout(KEYS_TIMEOUT, enc.request_user_identity(target))
             .await
             .ok()
             .and_then(Result::ok)
@@ -1103,7 +1103,7 @@ pub(super) async fn prepare_avatar_upload(
     client: &Client,
     path: &Path,
 ) -> Result<(mime::Mime, Vec<u8>), String> {
-    let limit = tokio::time::timeout(
+    let limit = rt::timeout(
         Duration::from_secs(5),
         client.load_or_fetch_max_upload_size(),
     )
@@ -1112,9 +1112,12 @@ pub(super) async fn prepare_avatar_upload(
     .and_then(Result::ok)
     .map(Into::into);
     let owned_path = path.to_owned();
-    let prepared = tokio::task::spawn_blocking(move || upload::prepare(&owned_path, limit))
-        .await
-        .map_err(|_| "Could not read that image.".to_owned())??;
+    #[cfg(not(target_family = "wasm"))]
+    let prepared = tokio::task::spawn_blocking(move || upload::prepare(&owned_path, limit)).await;
+    // The browser has the page's thread only: the work is done in place.
+    #[cfg(target_family = "wasm")]
+    let prepared = Ok::<_, rt::JoinError>(upload::prepare(&owned_path, limit));
+    let prepared = prepared.map_err(|_| "Could not read that image.".to_owned())??;
     if prepared.picture.is_none() {
         return Err(format!("{} is not a readable image", prepared.name));
     }
@@ -1130,7 +1133,7 @@ pub(super) async fn prepare_avatar_upload(
 
 pub(super) async fn set_avatar(client: &Client, path: &Path) -> Result<(), String> {
     let (mime, bytes) = prepare_avatar_upload(client, path).await?;
-    let mxc = tokio::time::timeout(UPLOAD_TIMEOUT, client.account().upload_avatar(&mime, bytes))
+    let mxc = rt::timeout(UPLOAD_TIMEOUT, client.account().upload_avatar(&mime, bytes))
         .await
         .map_err(|_| "Uploading the avatar took too long.".to_owned())?
         .map_err(|err| failed("upload your avatar", &err))?;

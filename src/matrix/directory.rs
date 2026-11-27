@@ -17,6 +17,7 @@ use super::left::LeftRooms;
 use super::manage::{failed, failed_saying};
 use super::paging::Paging;
 use super::safety::safe_mxc;
+use crate::rt;
 use crate::text::{is_blank, sanitize, sanitize_line};
 
 const DIRECTORY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -210,7 +211,7 @@ impl DirectorySearcher {
         let filter = clean_query(&query);
 
         self.task = Some(Paging::spawn(self.events.clone(), async move {
-            let outcome = tokio::time::timeout(DIRECTORY_TIMEOUT, async move {
+            let outcome = rt::timeout(DIRECTORY_TIMEOUT, async move {
                 let mut guard = search.lock().await;
                 guard
                     .search(filter, DIRECTORY_PAGE_SIZE, via_server)
@@ -249,7 +250,7 @@ impl DirectorySearcher {
         let left = self.left.clone();
 
         self.task = Some(Paging::spawn(self.events.clone(), async move {
-            let outcome = tokio::time::timeout(DIRECTORY_TIMEOUT, async move {
+            let outcome = rt::timeout(DIRECTORY_TIMEOUT, async move {
                 let mut guard = search.lock().await;
                 if guard.is_at_last_page() {
                     return Ok::<_, matrix_sdk::Error>(DirectoryPage {
@@ -302,7 +303,7 @@ impl Drop for DirectorySearcher {
 fn directory_answer(
     generation: u64,
     server: Option<&str>,
-    outcome: Result<Result<DirectoryPage, matrix_sdk::Error>, tokio::time::error::Elapsed>,
+    outcome: Result<Result<DirectoryPage, matrix_sdk::Error>, rt::Elapsed>,
 ) -> MatrixEvent {
     match outcome {
         Ok(Ok(page)) => MatrixEvent::DirectoryResults(page),
@@ -438,7 +439,7 @@ pub(super) async fn fetch_preview(
     let preview_fut = client.get_room_preview(&target_id, via_servers.clone());
     let summary_fut = client.send(summary_req);
 
-    let (preview_res, summary_res) = tokio::time::timeout(PREVIEW_TIMEOUT, async {
+    let (preview_res, summary_res) = rt::timeout(PREVIEW_TIMEOUT, async {
         tokio::join!(preview_fut, summary_fut)
     })
     .await
@@ -509,7 +510,7 @@ pub(super) async fn knock(
         (!is_blank(&s)).then_some(s)
     });
 
-    let room = tokio::time::timeout(KNOCK_TIMEOUT, client.knock(target_id, reason, via_servers))
+    let room = rt::timeout(KNOCK_TIMEOUT, client.knock(target_id, reason, via_servers))
         .await
         .map_err(|_| "Timed out while asking to join that room.".to_owned())?
         .map_err(|err| friendly_knock_error(&err))?;
