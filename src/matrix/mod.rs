@@ -1990,6 +1990,7 @@ impl Worker {
             client.clone(),
             self.events.clone(),
             self.options.search_history,
+            Some(self.paths.search_dir()),
         );
         // The sync said it is offline and has not been through since (see `back_online`).
         let mut offline = false;

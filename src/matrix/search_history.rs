@@ -12,14 +12,20 @@
 //! SDK's future drops its handles, which cancels its requests, and dropping our walk lets
 //! go of its room; a batch on its way completes in the SDK's own task, and nothing more
 //! is asked.
+//!
+//! What is fetched reaches the search index a moment later, and what has not reached it
+//! when the session ends is lost to it for good; [`Marks`] has the profile's next start
+//! index the stored events again then.
 
 use std::panic::AssertUnwindSafe;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use chrono::{Datelike, Days, NaiveDate};
 use futures::FutureExt;
 use matrix_sdk::event_cache::{
-    BackPaginationOutcome, EventCache, RoomPagination, SearchBackfillStrategy,
+    BackPaginationOutcome, EventCache, EventsOrigin, RoomEventCacheUpdate, RoomPagination,
+    SearchBackfillStrategy, Subscriber,
 };
 use matrix_sdk::ruma::{MilliSecondsSinceUnixEpoch, RoomId};
 use matrix_sdk::{Client, RoomState};
@@ -54,6 +60,10 @@ const MAX_BATCHES: usize = 130;
 const ROOM_PACING: Duration = Duration::from_secs(1);
 #[cfg(test)]
 const ROOM_PACING: Duration = Duration::ZERO;
+
+/// After a run that fetched, how long the search index is given to take it all in before
+/// [`Marks`] counts it as in. On the dev server it took 7 s after a run of 9 000 events.
+const SETTLE: Duration = Duration::from_secs(30);
 
 /// How often a batch that is loading is looked at again, for a panic another task took
 /// (as in `paging::backwards`).
@@ -245,11 +255,23 @@ pub(super) struct SearchHistory {
     reports: UnboundedSender<Report>,
     reports_rx: UnboundedReceiver<Report>,
     shown: Option<HistoryRun>,
+    /// The search index's folder, for [`Marks`]; `None`: no marks.
+    index_dir: Option<PathBuf>,
+    /// A run of this session has looked for what an earlier session left unindexed.
+    looked_for_leftovers: bool,
+    /// See [`SETTLE`].
+    settle: Duration,
 }
 
 impl SearchHistory {
-    /// `enabled`: the setting. Nothing runs before [`SearchHistory::caught_up`].
-    pub(super) fn new(client: Client, events: UnboundedSender<MatrixEvent>, enabled: bool) -> Self {
+    /// `enabled`: the setting. `index_dir`: the search index's folder. Nothing runs before
+    /// [`SearchHistory::caught_up`].
+    pub(super) fn new(
+        client: Client,
+        events: UnboundedSender<MatrixEvent>,
+        enabled: bool,
+        index_dir: Option<PathBuf>,
+    ) -> Self {
         let (reports, reports_rx) = unbounded_channel();
         let mut history = Self {
             client,
@@ -261,6 +283,9 @@ impl SearchHistory {
             reports,
             reports_rx,
             shown: None,
+            index_dir,
+            looked_for_leftovers: false,
+            settle: SETTLE,
         };
         // The browser keeps no index and has no queue: nothing to fetch for.
         history.apply(Input::Setting(enabled && cfg!(not(target_family = "wasm"))));
@@ -302,7 +327,8 @@ impl SearchHistory {
                 self.show();
             }
             Report::Ended { run, finished } if run == self.run && self.rules.running => {
-                self.task = None;
+                // The task is kept: it may be waiting for the index to settle, which the
+                // end of the session cancels (see `Marks`).
                 self.apply(Input::Ended { finished });
             }
             // Of a run that was stopped.
@@ -333,7 +359,13 @@ impl SearchHistory {
                     run: self.run,
                     finished: false,
                 };
-                self.task = Some(rt::spawn(run(self.client.clone(), delay, ended)));
+                let how = How {
+                    delay,
+                    leftovers: !std::mem::replace(&mut self.looked_for_leftovers, true),
+                    settle: self.settle,
+                };
+                let marks = Marks::new(self.index_dir.clone());
+                self.task = Some(rt::spawn(run(self.client.clone(), how, marks, ended)));
             }
             Step::Stop => self.stop(),
         }
@@ -377,10 +409,97 @@ impl Drop for SearchHistory {
     }
 }
 
-/// One run: wait, then the SDK's sweep under the time limit. `ended` says how it ended
-/// when it is dropped, also when the task is cancelled or panics.
-async fn run(client: Client, delay: bool, mut ended: EndReport) {
-    if delay {
+/// How a run goes: `delay`: [`START_DELAY`] first; `leftovers`: look for what an earlier
+/// session left unindexed (the session's first run does); `settle`: see [`SETTLE`].
+struct How {
+    delay: bool,
+    leftovers: bool,
+    settle: Duration,
+}
+
+/// Small files of ours in the search index's folder, beside the SDK's `reindexed-v1`
+/// (written once the SDK has indexed the stored events, after which it never does again).
+/// The folder goes at logout, and with it these; `search::prune_search_dir` leaves files
+/// alone. Without a folder (tests, the browser) there are none.
+///
+/// - `history-indexing`: a run fetched, and the index may not have all of it yet. The SDK
+///   indexes what is fetched in a task of its own, from a queue in memory, a batch at a
+///   time; what is queued when the session ends (quit, logout, a crash) is lost to the
+///   index, though it is stored. Written before the first fetch, removed [`SETTLE`] after
+///   the run. Found at a start, it has the SDK index the stored events again (by removing
+///   `reindexed-v1`): CPU only, and what is in the index already is skipped.
+struct Marks {
+    dir: Option<PathBuf>,
+    /// This run wrote `history-indexing`.
+    indexing: bool,
+}
+
+/// The SDK's own (`matrix_sdk::search_index`, `REINDEX_MARKER`; matrix-sdk is pinned).
+const REINDEXED: &str = "reindexed-v1";
+const INDEXING: &str = "history-indexing";
+
+impl Marks {
+    fn new(dir: Option<PathBuf>) -> Self {
+        Self {
+            dir,
+            indexing: false,
+        }
+    }
+
+    fn has(&self, name: &str) -> bool {
+        #[cfg(not(target_family = "wasm"))]
+        if let Some(dir) = &self.dir {
+            return dir.join(name).exists();
+        }
+        let _ = (&self.dir, name);
+        false
+    }
+
+    fn put(&self, name: &str) {
+        #[cfg(not(target_family = "wasm"))]
+        if let Some(dir) = &self.dir
+            && let Err(err) =
+                std::fs::create_dir_all(dir).and_then(|()| std::fs::write(dir.join(name), b""))
+        {
+            tracing::warn!(why = %crate::logsafe::kind(&err), "search history: could not write a mark");
+        }
+        let _ = (&self.dir, name);
+    }
+
+    fn remove(&self, name: &str) {
+        #[cfg(not(target_family = "wasm"))]
+        if let Some(dir) = &self.dir
+            && let Err(err) = std::fs::remove_file(dir.join(name))
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(why = %crate::logsafe::kind(&err), "search history: could not remove a mark");
+        }
+        let _ = (&self.dir, name);
+    }
+
+    /// An earlier session ended before the index had all a run fetched: the SDK is to
+    /// index the stored events again.
+    fn catch_up_on_leftovers(&self) {
+        if self.has(INDEXING) {
+            tracing::info!("search history: the index missed some of the last run; it is redone");
+            self.remove(REINDEXED);
+        }
+    }
+
+    /// Before anything is fetched that the index has yet to take in.
+    fn fetching(&mut self) {
+        if !self.indexing {
+            self.indexing = true;
+            self.put(INDEXING);
+        }
+    }
+}
+
+/// One run: wait, then the SDK's sweep and our walk, under the time limit.
+/// `ended` says how it ended when it is dropped, also when the task is cancelled or
+/// panics; it is sent as soon as the run is through, before the index settles.
+async fn run(client: Client, how: How, mut marks: Marks, mut ended: EndReport) {
+    if how.delay {
         rt::sleep(START_DELAY).await;
     }
     let Some(cache) = super::cache::of(&client) else {
@@ -391,6 +510,12 @@ async fn run(client: Client, delay: bool, mut ended: EndReport) {
         tracing::warn!("search history: the client has no back-pagination queue");
         return;
     }
+    if how.leftovers {
+        marks.catch_up_on_leftovers();
+    }
+    // A mark of this session's last run, stopped before the index settled: this run takes
+    // it over, and removes it once it has settled in turn.
+    marks.indexing = marks.has(INDEXING);
     let rooms = client.joined_rooms().len();
     tracing::info!(rooms, "search history started");
     let _ = ended.reports.send(Report::Begun {
@@ -398,15 +523,14 @@ async fn run(client: Client, delay: bool, mut ended: EndReport) {
         back_to: back_to(chrono::Local::now().date_naive()),
     });
     let started = crate::time::Instant::now();
-    let sweep = async {
-        // The last week of every room first (and what is stored, indexed once), a second
-        // between rooms; then each room the rest of the way.
+    let work = async {
+        marks.fetching();
         cache
             .run_search_backfill(SearchBackfillStrategy::Foreground)
             .await;
-        deepen(&client, cache).await
+        deepen(&client, cache, &mut marks).await
     };
-    match rt::timeout(TIME_LIMIT, sweep).await {
+    match rt::timeout(TIME_LIMIT, work).await {
         Ok(true) => {
             let elapsed_s = started.elapsed().as_secs();
             tracing::info!(elapsed_s, "search history done");
@@ -415,6 +539,14 @@ async fn run(client: Client, delay: bool, mut ended: EndReport) {
         // Stopped, as at the time limit: the setting may try again.
         Ok(false) => tracing::warn!("search history stopped: the SDK failed"),
         Err(_) => tracing::warn!("search history stopped at the time limit"),
+    }
+    // The box says so now; the index may still be taking in the last batches. The client
+    // goes, so a session that ends meanwhile is not held up (and this task is cancelled).
+    drop(ended);
+    drop(client);
+    if marks.indexing {
+        rt::sleep(how.settle).await;
+        marks.remove(INDEXING);
     }
 }
 
@@ -432,7 +564,7 @@ async fn run(client: Client, delay: bool, mut ended: EndReport) {
 /// to 13 weeks, the room's start, or [`MAX_BATCHES`]. One room at a time, so at most one
 /// room's older events are in memory; the room shrinks back when it is let go. False if
 /// the SDK panicked and the walk ended there.
-async fn deepen(client: &Client, cache: &EventCache) -> bool {
+async fn deepen(client: &Client, cache: &EventCache, marks: &mut Marks) -> bool {
     let back_ms = BACK_DAYS * 24 * 60 * 60 * 1000;
     let oldest = u64::from(MilliSecondsSinceUnixEpoch::now().get()).saturating_sub(back_ms);
     let mut rooms = client.joined_rooms();
@@ -446,23 +578,34 @@ async fn deepen(client: &Client, cache: &EventCache) -> bool {
         if n > 0 {
             rt::sleep(ROOM_PACING).await;
         }
-        if !walk(cache, room.room_id(), oldest).await {
+        if let Walked::Panicked = walk(cache, room.room_id(), oldest, marks).await {
             return false;
         }
     }
     true
 }
 
-/// Walks one room back to `oldest` (ms since the epoch); false if the SDK panicked, and
-/// the walk had better end.
-async fn walk(cache: &EventCache, room_id: &RoomId, oldest: u64) -> bool {
+/// How the walk of a room went.
+enum Walked {
+    /// It asked the server (or may have).
+    Fetched,
+    /// It read the store alone.
+    Stored,
+    /// The SDK panicked: the walk had better end.
+    Panicked,
+}
+
+/// Walks one room back to `oldest` (ms since the epoch).
+async fn walk(cache: &EventCache, room_id: &RoomId, oldest: u64, marks: &mut Marks) -> Walked {
     let Ok((room, _handles)) = cache.room(room_id).await else {
-        return true;
+        return Walked::Stored;
     };
-    // Held while it is walked: the room keeps what was loaded in memory.
-    let Ok((_events, _held)) = room.subscribe().await else {
-        return true;
+    // Held while it is walked: the room keeps what was loaded in memory. What it hears
+    // tells a batch from the server from one read back from the store.
+    let Ok((_events, mut held)) = room.subscribe().await else {
+        return Walked::Stored;
     };
+    let mut walked = Walked::Stored;
     let pagination = room.pagination();
     let mut rest = Duration::ZERO;
     for n in 0..MAX_BATCHES {
@@ -474,11 +617,16 @@ async fn walk(cache: &EventCache, room_id: &RoomId, oldest: u64) -> bool {
             rt::sleep(rest).await;
         }
         let started = crate::time::Instant::now();
-        let outcome = match page(&pagination).await {
+        let answer = page(&pagination).await;
+        if from_the_server(&mut held) {
+            walked = Walked::Fetched;
+            marks.fetching();
+        }
+        let outcome = match answer {
             Ok(Some(outcome)) => outcome,
             // An error: this room is left as it is.
-            Ok(None) => return true,
-            Err(()) => return false,
+            Ok(None) => return walked,
+            Err(()) => return Walked::Panicked,
         };
         // Newest first, so the oldest is last.
         let reached = outcome
@@ -488,11 +636,28 @@ async fn walk(cache: &EventCache, room_id: &RoomId, oldest: u64) -> bool {
             .find_map(|event| event.timestamp())
             .is_some_and(|ts| u64::from(ts.get()) <= oldest);
         if outcome.reached_start || outcome.events.is_empty() || reached {
-            return true;
+            return walked;
         }
         rest = (started.elapsed() / 2).min(MAX_REST);
     }
-    true
+    walked
+}
+
+/// Whether the room heard of events from the server's pages since it was last asked (or
+/// heard too much to tell). A page of the SDK's tells the room before it answers.
+fn from_the_server(held: &mut Subscriber<RoomEventCacheUpdate>) -> bool {
+    use tokio::sync::broadcast::error::TryRecvError;
+    let mut fetched = false;
+    loop {
+        match held.try_recv() {
+            Ok(RoomEventCacheUpdate::UpdateTimelineEvents(diffs)) => {
+                fetched |= matches!(diffs.origin, EventsOrigin::Pagination);
+            }
+            Ok(_) => {}
+            Err(TryRecvError::Lagged(_)) => fetched = true,
+            Err(TryRecvError::Empty | TryRecvError::Closed) => return fetched,
+        }
+    }
 }
 
 /// One batch of the room's older events; `Ok(None)` on an error, `Err` if the SDK
@@ -681,7 +846,7 @@ mod tests {
         use serde_json::{Value, json};
         use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
-        use super::super::{HistoryRun, Report, SearchHistory};
+        use super::super::{HistoryRun, INDEXING, REINDEXED, Report, SearchHistory};
         use crate::matrix::spaces::fake::{self, Reply};
         use crate::matrix::{MatrixEvent, SecretStoreMode, WorkerOptions};
 
@@ -734,14 +899,29 @@ mod tests {
         /// A client signed in as `fake::ME`, synced once, with the back-pagination queue
         /// as `options` say (see `session::offline_client`).
         async fn signed_in(server: &fake::Server, options: WorkerOptions) -> Client {
-            use matrix_sdk::authentication::SessionTokens;
-            use matrix_sdk::authentication::matrix::MatrixSession;
             let client = Client::builder()
                 .homeserver_url(&server.url)
                 .with_enable_automatic_back_pagination(options.back_pagination)
                 .build()
                 .await
                 .unwrap();
+            restored(client).await
+        }
+
+        /// A client as the app builds it, with the queue, its stores and search index on
+        /// disk in `paths`; signed in and synced once.
+        async fn on_disk(server: &fake::Server, paths: &crate::paths::Paths) -> Client {
+            let client =
+                crate::matrix::session::offline_client(paths, &server.url, "fake-secret", true)
+                    .await
+                    .unwrap();
+            restored(client).await
+        }
+
+        /// `client` signed in as `fake::ME`, synced once.
+        async fn restored(client: Client) -> Client {
+            use matrix_sdk::authentication::SessionTokens;
+            use matrix_sdk::authentication::matrix::MatrixSession;
             let session = matrix_sdk::AuthSession::Matrix(MatrixSession {
                 meta: matrix_sdk::SessionMeta {
                     user_id: fake::ME.try_into().unwrap(),
@@ -815,7 +995,7 @@ mod tests {
             .await;
             let client = signed_in(&server, app_options(true)).await;
             let (events, mut shown) = unbounded_channel();
-            let mut history = SearchHistory::new(client.clone(), events, true);
+            let mut history = SearchHistory::new(client.clone(), events, true, None);
             assert_eq!(
                 asked_for_messages(&server),
                 0,
@@ -854,7 +1034,7 @@ mod tests {
             .await;
             let client = signed_in(&server, app_options(false)).await;
             let (events, mut shown) = unbounded_channel();
-            let mut history = SearchHistory::new(client.clone(), events, false);
+            let mut history = SearchHistory::new(client.clone(), events, false, None);
             history.caught_up();
             assert_eq!(
                 shown.try_recv().ok().map(|event| event.describe()),
@@ -888,7 +1068,7 @@ mod tests {
             .await;
             let client = signed_in(&server, WorkerOptions::agent(SecretStoreMode::File)).await;
             let (events, mut shown) = unbounded_channel();
-            let mut history = SearchHistory::new(client.clone(), events, true);
+            let mut history = SearchHistory::new(client.clone(), events, true, None);
             history.caught_up();
             let seen = until(&mut history, &mut shown, |run| *run == HistoryRun::Stopped).await;
             assert_eq!(seen, [HistoryRun::Waiting, HistoryRun::Stopped]);
@@ -907,7 +1087,7 @@ mod tests {
             .await;
             let client = signed_in(&server, app_options(true)).await;
             let (events, mut shown) = unbounded_channel();
-            let mut history = SearchHistory::new(client.clone(), events, true);
+            let mut history = SearchHistory::new(client.clone(), events, true, None);
             history.caught_up();
             tokio::time::timeout(Duration::from_secs(10), async {
                 while asked_for_messages(&server) == 0 {
@@ -971,7 +1151,7 @@ mod tests {
                     .await;
             let client = signed_in(&server, app_options(true)).await;
             let (events, mut shown) = unbounded_channel();
-            let mut history = SearchHistory::new(client.clone(), events, true);
+            let mut history = SearchHistory::new(client.clone(), events, true, None);
             history.caught_up();
             until(&mut history, &mut shown, |run| {
                 matches!(run, HistoryRun::Done { .. })
@@ -980,6 +1160,116 @@ mod tests {
             // One request a day back: day 91 is the first that is 13 weeks old.
             let asked = asked_for_messages(&server);
             assert!((88..=92).contains(&asked), "{asked} requests");
+        }
+
+        /// How many messages of the room a search of the index finds.
+        async fn found(client: &Client, word: &str) -> usize {
+            let room = client.get_room(ROOM.try_into().unwrap()).expect("the room");
+            room.search(word, 10, None)
+                .await
+                .map_or(0, |result| result.total_count)
+        }
+
+        /// Until a search finds `word`, within 10 s.
+        async fn until_found(client: &Client, word: &str) {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while found(client, word).await == 0 {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("the index never found it"));
+        }
+
+        /// Until `mark` in `dir` is gone, within 5 s.
+        async fn until_gone(dir: &std::path::Path, mark: &str) {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while dir.join(mark).exists() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{mark} stayed"));
+        }
+
+        /// A session that ends before the index has settled leaves `history-indexing`, and
+        /// the next start has the SDK index the stored events again: what the index lost
+        /// is found, though the server sends it no more. With no mark left, a later start
+        /// indexes nothing again (the SDK's `reindexed-v1` contract, which this pins). The index losing a room's part is done by hand: it
+        /// is what a quit does to what is still queued for it.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn what_the_index_missed_is_indexed_at_the_next_start() {
+            const WORD: &str = "mooncake";
+            // The old message comes once; after that the room's start, empty.
+            let older: fake::Answer = {
+                let first = std::sync::atomic::AtomicBool::new(true);
+                Box::new(move |request| {
+                    if !request.path.ends_with("/messages") {
+                        return None;
+                    }
+                    let mut chunk = Vec::new();
+                    if first.swap(false, Ordering::Relaxed) {
+                        let mut old = message("$old", SOMEONE);
+                        old["content"]["body"] = json!(format!("a {WORD} from before"));
+                        old["origin_server_ts"] = json!(now_ms() - 60_000);
+                        chunk.push(old);
+                    }
+                    let body = json!({ "chunk": chunk, "start": "before-sync" });
+                    Some(Reply::Json(body.to_string()))
+                })
+            };
+            let server =
+                fake::Server::answering(rooms(vec![message("$own", fake::ME)], vec![]), older)
+                    .await;
+            let (root, paths) = super::server::profile("history-marks");
+            let dir = paths.search_dir();
+            let session = |client: &Client, settle: Duration| {
+                let (events, shown) = unbounded_channel();
+                let mut history =
+                    SearchHistory::new(client.clone(), events, true, Some(dir.clone()));
+                history.settle = settle;
+                history.caught_up();
+                (history, shown)
+            };
+            let end = |history: SearchHistory, client: Client| async move {
+                drop(history);
+                drop(client);
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            };
+            let done = |run: &HistoryRun| matches!(run, HistoryRun::Done { .. });
+
+            // 1. The first run fetches it; the session ends before the index settles.
+            let client = on_disk(&server, &paths).await;
+            let (mut history, mut shown) = session(&client, Duration::from_secs(3600));
+            until(&mut history, &mut shown, done).await;
+            until_found(&client, WORD).await;
+            for mark in [INDEXING, REINDEXED] {
+                assert!(dir.join(mark).exists(), "{mark}");
+            }
+            end(history, client).await;
+            assert!(dir.join(ROOM).is_dir(), "the room's index");
+            std::fs::remove_dir_all(dir.join(ROOM)).unwrap();
+
+            // 2. The next start indexes the stored events again.
+            let client = on_disk(&server, &paths).await;
+            assert_eq!(found(&client, WORD).await, 0, "the index lost it");
+            let (mut history, mut shown) = session(&client, Duration::ZERO);
+            until(&mut history, &mut shown, done).await;
+            until_found(&client, WORD).await;
+            until_gone(&dir, INDEXING).await;
+            assert!(dir.join(REINDEXED).exists());
+            end(history, client).await;
+            std::fs::remove_dir_all(dir.join(ROOM)).unwrap();
+
+            // 3. Nothing left over: the store alone, not indexed again.
+            let client = on_disk(&server, &paths).await;
+            let (mut history, mut shown) = session(&client, Duration::ZERO);
+            until(&mut history, &mut shown, done).await;
+            until_gone(&dir, INDEXING).await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            assert_eq!(found(&client, WORD).await, 0, "indexed again with no mark");
+            end(history, client).await;
+            let _ = std::fs::remove_dir_all(root);
         }
 
         /// The read-receipt backfill, which comes with the queue: a receipt pointing at an

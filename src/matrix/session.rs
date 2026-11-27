@@ -189,7 +189,7 @@ pub(crate) fn sqlite_store_config(
 ///
 /// `back_pagination`: with the SDK's back-pagination queue (see
 /// [`WorkerOptions::back_pagination`]), which cannot be added later.
-async fn offline_client(
+pub(super) async fn offline_client(
     paths: &Paths,
     homeserver: &str,
     passphrase: &str,
