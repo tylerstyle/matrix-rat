@@ -17,15 +17,15 @@ use matrix_sdk::ruma::{EventId, OwnedEventId, OwnedTransactionId, OwnedUserId, R
 use matrix_sdk::{Client, Room, RoomMemberships};
 use matrix_sdk_ui::eyeball_im::{Vector, VectorDiff};
 use matrix_sdk_ui::timeline::{
-    Error as TimelineError, MsgLikeKind, RoomExt, Timeline, TimelineDetails,
-    TimelineEventFocusThreadMode, TimelineEventItemId, TimelineFocus, TimelineItem,
-    TimelineItemContent, TimelineReadReceiptTracking,
+    MsgLikeKind, RoomExt, Timeline, TimelineDetails, TimelineEventFocusThreadMode,
+    TimelineEventItemId, TimelineFocus, TimelineItem, TimelineItemContent,
+    TimelineReadReceiptTracking,
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use super::paging::Paging;
+use super::paging::{self, PageError, Paging};
 use super::safety::{IgnoredSet, is_ignored_in};
 use super::{DetachedTimeline, MatrixCmd, MatrixEvent, drafts, threads};
 use crate::format::Outgoing;
@@ -475,6 +475,10 @@ impl Timelines {
         let paging = Paging::spawn(self.events.clone(), async move {
             let reached_start = match page_back(&timeline, live).await {
                 Ok(reached_start) => reached_start,
+                // All caches were cleared after a panic: the timeline starts afresh, and
+                // its reset reaches the UI on its own, perhaps before this answer, which
+                // must not then say the start of what is loaded anew was reached.
+                Err(PageError::Panicked { cleared: true }) => false,
                 Err(err) => {
                     tracing::warn!(why = %logsafe::kind(&err), "could not load older messages");
                     // Report "done" so the UI does not retry in a loop.
@@ -2175,7 +2179,7 @@ async fn mark_room_read(
     // fetch a page first; and if there still is none, say so rather than report a
     // room as read that the server goes on counting as unread.
     if timeline.latest_event_id().await.is_none() {
-        if let Err(err) = timeline.paginate_backwards(PAGE).await {
+        if let Err(err) = paging::backwards(timeline, PAGE).await {
             tracing::debug!(why = %logsafe::kind(&err), "could not load messages to mark as read");
         }
         if timeline.latest_event_id().await.is_none() {
@@ -2534,19 +2538,19 @@ fn start_loaded(items: &Vector<Arc<TimelineItem>>, thread: Option<&str>) -> bool
 /// again, from what the event cache knows, without asking the server. A page of one that
 /// was empty is asked once more after an error too: what came in meanwhile may be hidden
 /// the same way, and the UI, told the start for the error, would not ask for it.
-async fn page_back(timeline: &Timeline, live: bool) -> Result<bool, TimelineError> {
+async fn page_back(timeline: &Timeline, live: bool) -> Result<bool, PageError> {
     let was_empty = live && timeline.items().await.is_empty();
-    let answer = match timeline.paginate_backwards(PAGE).await {
+    let answer = match paging::backwards(timeline, PAGE).await {
         Err(err) if was_empty => {
             tracing::debug!(why = %logsafe::kind(&err), "the first page failed, asked once more");
-            timeline.paginate_backwards(PAGE).await
+            paging::backwards(timeline, PAGE).await
         }
         answer => answer,
     };
     // The start, said of a live timeline, is asked once more, also after a retry: what
     // came in meanwhile can still be hidden.
     match answer {
-        Ok(true) if live => timeline.paginate_backwards(PAGE).await,
+        Ok(true) if live => paging::backwards(timeline, PAGE).await,
         answer => answer,
     }
 }

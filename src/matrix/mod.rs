@@ -57,6 +57,8 @@ pub use manage::{
     RoomJoinRule, RoomKnockRequest, RoomMember, RoomPermissions,
 };
 pub use notify::Notice;
+// For `crate::logsafe` too.
+pub(crate) use paging::PageError;
 pub use people::{
     OwnProfile, OwnProfileAction, UserProfile, UserSharedRoom, UserVerifyStatus, fallback_localpart,
 };

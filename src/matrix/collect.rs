@@ -42,6 +42,7 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 
 use super::MatrixEvent;
+use super::paging::{self, PageError};
 use super::safety::IgnoredSet;
 use crate::collect::{self, Cut, Span};
 use crate::logsafe;
@@ -823,8 +824,13 @@ async fn load(
         |loaded| progress.tell(loaded),
         enough,
         |ask| async move {
-            match tokio::time::timeout(PAGE_TIMEOUT, timeline.paginate_backwards(ask)).await {
+            match tokio::time::timeout(PAGE_TIMEOUT, paging::backwards(timeline, ask)).await {
                 Ok(Ok(reached_start)) => Some(reached_start),
+                // All caches were cleared after a panic: the timeline's reset comes through
+                // its changes like any page, and the next page, of the cleared caches, is
+                // asked for from what is there then. A second panic does not clear them
+                // again (see `paging::backwards`), and ends the collection.
+                Ok(Err(PageError::Panicked { cleared: true })) => Some(false),
                 Ok(Err(err)) => {
                     tracing::debug!(why = %logsafe::kind(&err), "collect: could not load older messages");
                     None
@@ -3143,6 +3149,22 @@ mod tests {
                 count,
             }
         };
+
+        // Our joining is in our view before the other says anything: else it can reach our
+        // timeline after their messages, and count as one of the last lines asked for. It
+        // is the one joining after our invitation, whatever the names are.
+        until(&handle, &mut events, 900, last(20), |text| {
+            let lines: Vec<&str> = text.text.lines().collect();
+            lines
+                .iter()
+                .position(|line| line.contains(" was invited by "))
+                .is_some_and(|at| {
+                    lines[at + 1..]
+                        .iter()
+                        .any(|line| line.ends_with(" joined)"))
+                })
+        })
+        .await;
 
         // 1. More than asked for (and than a fresh timeline holds); all of them read.
         let said: Vec<String> = (0..ASKED + 25)
