@@ -7,25 +7,35 @@
 //! others the position is a clock started with the player. The end is always the
 //! player's exit.
 //!
-//! This file holds the pure parts: which player, with which arguments, and how a
-//! length, a waveform and a position are shown. [`temp`] keeps the files and sockets,
-//! [`ipc`] speaks to mpv, [`play`] runs the player. [`recorder`] chooses the programs
-//! a voice message is recorded with.
+//! This file holds the pure parts: the players and their arguments, what the app and a
+//! running player tell each other, and how a length, a waveform and a position are
+//! shown. [`find`] looks for the player on this machine, [`temp`] keeps the files and
+//! sockets, [`ipc`] holds what is said to mpv and read from it, [`play`] runs the
+//! player. [`recorder`] chooses the programs a voice message is recorded with.
 
 mod child;
+mod find;
 mod ipc;
 mod play;
 pub mod record;
 pub mod recorder;
 mod temp;
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub use play::{Control, End, PlayerEvent, PlayerUpdate, Reported, Request, run};
-pub use temp::{TempAudio, private_dir, remove_leftovers, socket_path};
+use tokio::sync::mpsc::UnboundedReceiver;
+
+use ipc::Said;
+
+#[cfg(test)]
+pub use find::choose;
+pub use find::choose_here;
+pub(crate) use find::{find_on_path, is_executable};
+pub use play::run;
+pub use temp::{private_dir, remove_leftovers, socket_path};
 
 /// The largest file played here: the size at which saving asks first. A larger one is
 /// saved (`s`) and played elsewhere.
@@ -195,88 +205,6 @@ pub fn is_auto(setting: &str) -> bool {
     setting.is_empty() || setting.eq_ignore_ascii_case("auto")
 }
 
-/// The player for an `audio_player` setting. `"auto"` looks for the known players on
-/// `path` (the `PATH` variable), in order, without running anything; anything else is
-/// a command line, split into words as a shell would (`mpv --volume=60`,
-/// `'/opt/my player/play' -q`), to which the file is added. Its program is looked up
-/// on `path` too, unless it names a file (`~/bin/play`, with `home` for `~`).
-pub fn choose(
-    setting: &str,
-    path: Option<&OsStr>,
-    home: Option<&OsStr>,
-) -> Result<Player, NoPlayer> {
-    if is_auto(setting) {
-        return Kind::KNOWN
-            .into_iter()
-            .find_map(|kind| {
-                find_on_path(kind.program(), path).map(|program| Player {
-                    kind,
-                    program,
-                    args: Vec::new(),
-                    custom: false,
-                })
-            })
-            .ok_or(NoPlayer::NoneFound);
-    }
-    let words = shlex::split(setting.trim()).ok_or(NoPlayer::BadCommand)?;
-    let (first, args) = words.split_first().ok_or(NoPlayer::BadCommand)?;
-    let program = named_program(first, path, home).ok_or(NoPlayer::Missing)?;
-    // A known player under the user's own arguments is still that player: mpv gets
-    // its control socket.
-    let kind = Kind::KNOWN
-        .into_iter()
-        .find(|kind| program.file_name() == Some(OsStr::new(kind.program())))
-        .unwrap_or(Kind::Other);
-    Ok(Player {
-        kind,
-        program,
-        args: args.to_vec(),
-        custom: true,
-    })
-}
-
-/// [`choose`] with this process's `PATH` and `HOME`.
-pub fn choose_here(setting: &str) -> Result<Player, NoPlayer> {
-    choose(
-        setting,
-        std::env::var_os("PATH").as_deref(),
-        std::env::var_os("HOME").as_deref(),
-    )
-}
-
-/// The program a command of the user's starts with: looked up on `path`, unless it
-/// names a file (`~/bin/play`, with `home` for `~`). `None`: not there, or not to be
-/// run.
-fn named_program(first: &str, path: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
-    if first.contains('/') {
-        let named = match (first.strip_prefix("~/"), home) {
-            (Some(rest), Some(home)) => Path::new(home).join(rest),
-            _ => PathBuf::from(first),
-        };
-        is_executable(&named).then_some(named)
-    } else {
-        find_on_path(first, path)
-    }
-}
-
-/// The first executable file called `name` in a folder of `path`. Relative folders
-/// (and the empty entry, which means the current folder) are skipped.
-pub(crate) fn find_on_path(name: &str, path: Option<&OsStr>) -> Option<PathBuf> {
-    if name.is_empty() || name.contains('/') {
-        return None;
-    }
-    std::env::split_paths(path?)
-        .filter(|dir| dir.is_absolute())
-        .map(|dir| dir.join(name))
-        .find(|candidate| is_executable(candidate))
-}
-
-pub(crate) fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-}
-
 /// A position: `m:ss`, from an hour `h:mm:ss`; whole seconds, cut.
 pub fn clock(time: Duration) -> String {
     let secs = time.as_secs();
@@ -347,6 +275,136 @@ pub fn played(position: Duration, length: Duration, cells: usize) -> usize {
     ((part * cells as f64).floor() as usize).min(cells)
 }
 
+/// A downloaded sound in a file of its own while it plays: owner-only, gone when this
+/// is dropped.
+pub struct TempAudio {
+    path: PathBuf,
+}
+
+/// Hand-written: the path names the user's runtime folder.
+impl fmt::Debug for TempAudio {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("TempAudio")
+    }
+}
+
+/// Made, written and removed in [`temp`].
+impl TempAudio {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// The ending of a file of the stated type: one of a fixed few, `audio` for anything
+/// else. The players look at what is in the file, not at its name.
+fn extension(mime: Option<&str>) -> &'static str {
+    let essence = mime
+        .and_then(|mime| mime.split(';').next())
+        .map(|mime| mime.trim().to_ascii_lowercase());
+    match essence.as_deref() {
+        Some("audio/ogg" | "audio/x-ogg" | "application/ogg" | "audio/vorbis") => "ogg",
+        Some("audio/opus") => "opus",
+        Some("audio/mpeg" | "audio/mp3" | "audio/x-mp3" | "audio/mpeg3") => "mp3",
+        Some("audio/mp4" | "audio/x-m4a" | "audio/m4a") => "m4a",
+        Some("audio/aac" | "audio/x-aac" | "audio/aacp") => "aac",
+        Some("audio/flac" | "audio/x-flac") => "flac",
+        Some("audio/wav" | "audio/x-wav" | "audio/wave" | "audio/vnd.wave") => "wav",
+        Some("audio/webm") => "webm",
+        Some("audio/3gpp") => "3gp",
+        Some("audio/amr") => "amr",
+        _ => "audio",
+    }
+}
+
+/// What the app asks of a running player.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Control {
+    /// Pause, or go on (mpv).
+    TogglePause,
+    /// Jump by this many seconds, back where negative (mpv).
+    Seek(i32),
+    Stop,
+}
+
+/// How a player ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum End {
+    /// By itself, after playing.
+    Finished,
+    /// With an error, or it could not be started at all.
+    Failed,
+    /// It was told to stop.
+    Stopped,
+}
+
+/// What mpv said last.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Reported {
+    pub position: Option<Duration>,
+    pub paused: bool,
+    /// The real length, which the sender may not have stated.
+    pub length: Option<Duration>,
+}
+
+impl Reported {
+    fn take(&mut self, said: Said) {
+        match said {
+            Said::Position(at) => self.position = Some(at),
+            Said::Length(length) => self.length = Some(length),
+            Said::Paused(paused) => self.paused = paused,
+            Said::Ended => {
+                if self.length.is_some() {
+                    self.position = self.length;
+                }
+            }
+        }
+    }
+}
+
+/// What the app hears of a player.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayerEvent {
+    /// mpv answers on its control socket: the position is its own, pause and seek work.
+    Controllable,
+    State(Reported),
+    /// The last word: the player is gone and waited for, its file removed.
+    Ended(End),
+}
+
+/// A [`PlayerEvent`] for the sound with this number. Nothing in it names a room, a
+/// message or a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerUpdate {
+    pub id: u64,
+    pub event: PlayerEvent,
+}
+
+/// A sound to play.
+pub struct Request {
+    /// The app's number for it, carried by every answer.
+    pub id: u64,
+    pub player: Player,
+    /// Removed when the last owner drops it (on player exit for downloaded messages;
+    /// kept alive by a waiting voice note while it remains in the composer).
+    pub file: std::sync::Arc<TempAudio>,
+    /// Where mpv opens its control socket; `None` for other players, or when no path
+    /// would do.
+    pub socket: Option<PathBuf>,
+    /// Closed by the app (dropped): stop.
+    pub control: UnboundedReceiver<Control>,
+}
+
+/// Hand-written: the paths name the user's runtime folder.
+impl fmt::Debug for Request {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Request")
+            .field("id", &self.id)
+            .field("player", &self.player)
+            .field("socket", &self.socket.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,184 +442,26 @@ mod tests {
         }
     }
 
-    fn os(text: &str) -> Option<&OsStr> {
-        Some(OsStr::new(text))
-    }
-
     #[test]
-    fn auto_takes_the_first_known_player_on_the_path_without_running_it() {
-        let a = Dir::new("path-a");
-        let b = Dir::new("path-b");
-        // Never run: a player that would leave a mark if it were.
-        let mark = a.0.join("ran");
-        let script = format!("#!/bin/sh\ntouch {}\n", mark.display());
-        a.file("paplay", &script, 0o755);
-        b.file("ffplay", &script, 0o755);
-        // Not executable, a folder, and a relative entry: none of them count.
-        a.file("mpv", &script, 0o644);
-        std::fs::create_dir(b.0.join("pw-play")).unwrap();
-        let path = format!("relative:{}::{}", a.0.display(), b.0.display());
-
-        let player = choose("auto", os(&path), None).unwrap();
-        assert_eq!(player.kind(), Kind::Ffplay);
-        assert_eq!(player.name(), "ffplay");
-        assert!(!player.controllable());
-        // The order of the players counts, not the order of the folders.
-        let player = choose("", os(&format!("{}", a.0.display())), None).unwrap();
-        assert_eq!(player.kind(), Kind::Paplay);
-        a.file("mpv", &script, 0o755);
-        let player = choose(" AUTO ", os(&path), None).unwrap();
-        assert_eq!(player.kind(), Kind::Mpv);
-        assert!(player.controllable());
-        assert!(!mark.exists(), "nothing was run");
-
-        assert_eq!(
-            choose("auto", os("/nonexistent"), None),
-            Err(NoPlayer::NoneFound)
-        );
-        assert_eq!(choose("auto", None, None), Err(NoPlayer::NoneFound));
-        assert_eq!(choose("auto", os(""), None), Err(NoPlayer::NoneFound));
-    }
-
-    #[test]
-    fn known_players_get_fixed_quiet_arguments_and_the_file_last() {
-        let dir = Dir::new("args");
-        let file = Path::new("/run/user/1000/matrix-rat/default-audio/play-0123.ogg");
-        let socket = Path::new("/run/user/1000/matrix-rat/default-audio/ipc-0123.sock");
-        let argv = |name: &str, socket: Option<&Path>| {
-            let found = dir.file(name, "", 0o755);
-            let player = choose("auto", Some(dir.0.as_os_str()), None).unwrap();
-            assert_eq!(player.argv(file, socket).0, found);
-            let args: Vec<String> = player
-                .argv(file, socket)
-                .1
-                .into_iter()
-                .map(|arg| arg.into_string().unwrap())
-                .collect();
-            std::fs::remove_file(found).unwrap();
-            args
-        };
-        let mpv = argv("mpv", Some(socket));
-        assert_eq!(
-            mpv,
-            [
-                "--no-video",
-                "--force-window=no",
-                "--audio-display=no",
-                "--no-terminal",
-                "--really-quiet",
-                "--idle=no",
-                "--keep-open=no",
-                "--save-position-on-quit=no",
-                "--resume-playback=no",
-                "--input-ipc-server=/run/user/1000/matrix-rat/default-audio/ipc-0123.sock",
-                "/run/user/1000/matrix-rat/default-audio/play-0123.ogg",
-            ]
-        );
-        // Without a socket (its path would be too long), mpv plays all the same.
-        assert!(!argv("mpv", None).iter().any(|arg| arg.contains("ipc")));
-        assert_eq!(
-            argv("ffplay", Some(socket)),
-            [
-                "-nodisp",
-                "-autoexit",
-                "-loglevel",
-                "quiet",
-                "/run/user/1000/matrix-rat/default-audio/play-0123.ogg"
-            ]
-        );
-        assert_eq!(
-            argv("pw-play", Some(socket)),
-            ["/run/user/1000/matrix-rat/default-audio/play-0123.ogg"]
-        );
-        assert_eq!(
-            argv("paplay", None),
-            ["/run/user/1000/matrix-rat/default-audio/play-0123.ogg"]
-        );
-        assert_eq!(
-            argv("aplay", None),
-            [
-                "-q",
-                "/run/user/1000/matrix-rat/default-audio/play-0123.ogg"
-            ]
-        );
-    }
-
-    #[test]
-    fn a_command_of_the_users_is_split_like_a_shell_would() {
-        let bin = Dir::new("custom-bin");
-        let home = Dir::new("custom-home");
-        let file = Path::new("/tmp/x/play-1.ogg");
-        bin.file("cvlc", "", 0o755);
-        bin.file("mpv", "", 0o755);
-        std::fs::create_dir(home.0.join("bin")).unwrap();
-        home.file("bin/my player", "", 0o755);
-        let path = bin.0.display().to_string();
-        let words = |player: &Player| -> Vec<String> {
-            let (program, args) = player.argv(file, Some(Path::new("/s.sock")));
-            std::iter::once(program.into_os_string())
-                .chain(args)
-                .map(|word| word.into_string().unwrap())
-                .collect()
-        };
-
-        let player = choose(
-            "cvlc --play-and-exit 'a b' c\\ d",
-            os(&path),
-            Some(home.0.as_os_str()),
-        )
-        .unwrap();
-        assert_eq!(player.kind(), Kind::Other);
-        assert!(!player.controllable());
-        let cvlc = bin.0.join("cvlc").display().to_string();
-        assert_eq!(
-            words(&player),
-            [
-                cvlc.as_str(),
-                "--play-and-exit",
-                "a b",
-                "c d",
-                "/tmp/x/play-1.ogg"
-            ]
-        );
-        // Under the user's own words mpv is still mpv: no fixed arguments of ours,
-        // but its control socket.
-        let player = choose("mpv --volume=60", os(&path), None).unwrap();
-        assert!(player.controllable());
-        assert_eq!(
-            words(&player)[1..],
-            [
-                "--volume=60",
-                "--input-ipc-server=/s.sock",
-                "/tmp/x/play-1.ogg"
-            ]
-        );
-        // A path, with `~` for the home folder.
-        let player = choose("'~/bin/my player' -q", os(""), Some(home.0.as_os_str())).unwrap();
-        assert_eq!(player.name(), "my player");
-        assert_eq!(words(&player)[1..], ["-q", "/tmp/x/play-1.ogg"]);
-
-        assert_eq!(
-            choose("'unclosed", os(&path), None),
-            Err(NoPlayer::BadCommand)
-        );
-        assert_eq!(
-            choose("\"\"", os(&path), None).map(|_| ()),
-            Err(NoPlayer::Missing)
-        );
-        assert_eq!(
-            choose("nosuchplayer -x", os(&path), None),
-            Err(NoPlayer::Missing)
-        );
-        assert_eq!(
-            choose("/no/such/player", os(&path), None),
-            Err(NoPlayer::Missing)
-        );
-        // A shell is never what runs it: what looks like shell syntax is a word.
-        let player = choose("cvlc ; rm -rf ~", os(&path), None).unwrap();
-        assert_eq!(words(&player)[1..4], [";", "rm", "-rf"]);
-        // The user's command line stays out of debug output.
-        assert_eq!(format!("{player:?}"), "Player(Other, custom: true)");
+    fn endings_come_from_a_fixed_list() {
+        for (mime, ending) in [
+            (Some("audio/ogg"), "ogg"),
+            (Some("AUDIO/OGG; codecs=opus"), "ogg"),
+            (Some("audio/opus"), "opus"),
+            (Some("audio/mpeg"), "mp3"),
+            (Some("audio/mp4"), "m4a"),
+            (Some("audio/x-m4a"), "m4a"),
+            (Some("audio/aac"), "aac"),
+            (Some("audio/flac"), "flac"),
+            (Some("audio/x-wav"), "wav"),
+            (Some("audio/webm"), "webm"),
+            (Some("audio/ogg/../../x"), "audio"),
+            (Some("text/x-shellscript"), "audio"),
+            (Some(""), "audio"),
+            (None, "audio"),
+        ] {
+            assert_eq!(extension(mime), ending, "{mime:?}");
+        }
     }
 
     #[test]

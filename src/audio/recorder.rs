@@ -12,7 +12,8 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use super::{find_on_path, is_auto, named_program};
+use super::find::named_program;
+use super::{find_on_path, is_auto};
 
 /// A program with its arguments, started without a shell.
 #[derive(Clone, PartialEq, Eq)]
