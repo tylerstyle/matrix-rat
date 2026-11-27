@@ -1166,7 +1166,26 @@ pub(super) async fn set_room_display_name(
             .flatten()
             .and_then(|global| clean_name(Some(&global))),
     };
-    room.set_own_member_display_name(target_name.clone())
+    // Our member event as the server has it now, not as the local store does: the store may not
+    // hold it yet (a room just created or joined, before sync brings its state; the SDK's
+    // `set_own_member_display_name` then fails with "Local cache doesn't contain all necessary
+    // data"), or may be behind (an avatar changed on another device would be put back).
+    let own = room.own_user_id().to_owned();
+    let request = get_state_event_for_key::v3::Request::new(
+        room.room_id().to_owned(),
+        StateEventType::RoomMember,
+        own.to_string(),
+    );
+    let response = client
+        .send(request)
+        .await
+        .map_err(|err| failed("update your name in this room", &err.into()))?;
+    let mut content = response
+        .into_content()
+        .deserialize_as_unchecked::<RoomMemberEventContent>()
+        .map_err(|err| failed("update your name in this room", &err.into()))?;
+    content.displayname = target_name.clone();
+    room.send_state_event_for_key(&own, content)
         .await
         .map(|_| target_name)
         .map_err(|err| failed("update your name in this room", &err))
