@@ -257,7 +257,8 @@ backend, and installable on iOS and Android as a home-screen app (a PWA).
 - **Phase 0 on the user's iPhone** (2026-11-27): OAuth login to matrix.org works in Safari
   and in the home-screen app (which needs its own login: iOS keeps its storage apart from
   Safari's, and it is a device of its own); sending works; still logged in after the app was
-  closed for an hour; old messages decrypt after the recovery key. For phases 2 and 3, from
+  closed for an hour; old messages decrypt after the recovery key. Firefox on Windows, behind
+  a network with restrictions, works too, old messages decrypted. For phases 2 and 3, from
   the test:
   - **The on-screen keyboard squashes the chat:** the grid measures itself only when the
     window resizes, and iOS shrinks only the visual viewport for the keyboard, so rows are
