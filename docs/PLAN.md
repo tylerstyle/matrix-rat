@@ -271,6 +271,12 @@ backend, and installable on iOS and Android as a home-screen app (a PWA).
 - **Reading the shortcode a received custom-emoji reaction carries** (the SDK does not
   expose it).
 - **A numbered decisions file**, should §5 outgrow a table.
+- **Shared rooms in a person's info on a fresh login** (`matrix-agy`, 2026-11-27): the bounded
+  look-up (`collect_shared_rooms`, 12 rooms a time) sorts rooms whose member count is not known
+  yet (0) before small known ones, and loads the whole member list of such a room, which may be
+  large. Asking for only the one member instead fills no store, so asking again would not get
+  past the first 12: it needs remembering which rooms were checked. Also: room info's own name
+  can be empty on a fresh login although the member list has it.
 
 ### 6.4 Not wanted or not pursued
 
