@@ -20,6 +20,8 @@
 
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use chrono::{Datelike, Days, NaiveDate};
@@ -270,6 +272,8 @@ pub(super) struct SearchHistory {
     start_delay: Duration,
     /// See [`SETTLE`].
     settle: Duration,
+    /// The run going is at its work: past its delay, not yet through.
+    going: Arc<AtomicBool>,
 }
 
 impl SearchHistory {
@@ -296,6 +300,7 @@ impl SearchHistory {
             looked_for_leftovers: false,
             start_delay: START_DELAY,
             settle: SETTLE,
+            going: Arc::new(AtomicBool::new(false)),
         };
         // The browser keeps no index and has no queue: nothing to fetch for.
         history.apply(Input::Setting(enabled && cfg!(not(target_family = "wasm"))));
@@ -363,6 +368,13 @@ impl SearchHistory {
         self.run += 1;
         if let Some(task) = self.task.take() {
             task.abort();
+            // A batch it had asked for can still come, be stored and be handed to the
+            // index while the session ends, though the run never heard of it: the next
+            // start indexes the stored events again (see `Marks`; CPU only). An empty
+            // file, once a run at most.
+            if self.going.swap(false, Ordering::Relaxed) {
+                Marks::new(self.index_dir.clone()).put(INDEXING);
+            }
         }
     }
 
@@ -381,6 +393,7 @@ impl SearchHistory {
                     finished: false,
                     clean: false,
                 };
+                self.going = Arc::new(AtomicBool::new(false));
                 let how = How {
                     delay: if delay {
                         self.start_delay
@@ -389,6 +402,7 @@ impl SearchHistory {
                     },
                     leftovers: !self.looked_for_leftovers,
                     settle: self.settle,
+                    going: self.going.clone(),
                 };
                 let marks = Marks::new(self.index_dir.clone());
                 self.task = Some(rt::spawn(run(self.client.clone(), how, marks, ended)));
@@ -437,11 +451,12 @@ impl Drop for SearchHistory {
 
 /// How a run goes: `delay`: how long it waits first ([`START_DELAY`] or none);
 /// `leftovers`: look for what an earlier session left unindexed (until a run of the
-/// session has begun); `settle`: see [`SETTLE`].
+/// session has begun); `settle`: see [`SETTLE`]; `going`: set while it is at its work.
 struct How {
     delay: Duration,
     leftovers: bool,
     settle: Duration,
+    going: Arc<AtomicBool>,
 }
 
 /// Small files of ours in the search index's folder, beside the SDK's `reindexed-v1`
@@ -568,6 +583,7 @@ async fn run(client: Client, how: How, mut marks: Marks, mut ended: EndReport) {
     let sweep = plan(marks.has(DONE), !marks.has(REINDEXED));
     let rooms = client.joined_rooms().len();
     tracing::info!(rooms, sweep = sweep.is_some(), "search history started");
+    how.going.store(true, Ordering::Relaxed);
     // After the look for leftovers: the session counts it as done from here.
     let _ = ended.reports.send(Report::Begun {
         run: ended.run,
@@ -593,6 +609,7 @@ async fn run(client: Client, how: How, mut marks: Marks, mut ended: EndReport) {
         }
         Err(_) => tracing::warn!("search history stopped at the time limit"),
     }
+    how.going.store(false, Ordering::Relaxed);
     // The box says so now; the index may still be taking in the last batches. The client
     // goes, so a session that ends meanwhile is not held up (and this task is cancelled).
     drop(ended);
@@ -1424,6 +1441,40 @@ mod tests {
             let took = started.elapsed();
             assert!(took >= Duration::from_millis(1900), "{took:?}");
             assert!(asked_for_messages(&server) >= 3);
+            let _ = std::fs::remove_dir_all(root);
+        }
+
+        /// Stopped while the first batch of a later start is on its way (the session ends),
+        /// the run leaves `history-indexing`: the batch can still be stored and queued for
+        /// the index as the session ends, and the run would not have heard of it.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn stopped_with_a_batch_on_its_way_it_leaves_the_mark() {
+            let server = fake::Server::answering(
+                rooms(vec![message("$own", fake::ME)], vec![]),
+                Box::new(|request| request.path.ends_with("/messages").then_some(Reply::Never)),
+            )
+            .await;
+            let client = signed_in(&server, app_options(true)).await;
+            let (root, dir) = marked("history-stopped", &[DONE, REINDEXED]);
+            let (events, _shown) = unbounded_channel();
+            let mut history = SearchHistory::new(client.clone(), events, true, Some(dir.clone()));
+            history.caught_up();
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while asked_for_messages(&server) == 0 {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("the run asked for older messages");
+            assert!(
+                !dir.join(INDEXING).exists(),
+                "marked before it heard of a batch"
+            );
+            drop(history);
+            assert!(
+                dir.join(INDEXING).exists(),
+                "no mark for the batch on its way"
+            );
             let _ = std::fs::remove_dir_all(root);
         }
 
