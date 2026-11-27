@@ -196,6 +196,18 @@ the dot. `--mobile` is dropped (§6.4). Building starts once all is talked throu
     random 256-bit passphrase), and keys exported or backed up by 0.20 read differently on
     0.19.1. A profile used with 1.1.0 should not be opened with 1.0.x again; the release notes
     say so. Tested with a real 1.0.3 profile before release.
+  - Comes with it at no cost: after a kick or ban the room's keys are changed; a failed message
+    no longer stops a room's send queue (our `set_enabled(true)` after a retry goes); the read
+    marker when the last read event is not shown (a reaction, an edit); smaller fixes. Room
+    list order changes a little for rooms without messages.
+- **New with matrix-sdk 0.20, chosen by the user (2026-11-27)** for 1.1.0:
+  1. **Search reaches back three months** in every room: the SDK's search backfill
+     (`EventCache::run_search_backfill`, first what the cache holds, then by recency down to
+     three months). Today search finds only what this device has loaded.
+  2. **Retry or cancel what failed**: edits, reactions and deletions too, not only messages
+     (`Timeline::retry_send`, `abort_send`); cancelling the last pending edit puts the old
+     text back.
+  3. **A deleted message shows its reason**, when one was given (`redaction_reason()`).
 
 - **notify 9** (published 2026-11-21; the file watcher behind theme reloading): kept out of
   1.0.2, which took only compatible updates. Its breaking changes reach how watch errors are
@@ -264,7 +276,12 @@ backend, and installable on iOS and Android as a home-screen app (a PWA).
   stores. **Versions** (the user, 2026-11-27): 1.2.0 is phase 2, the web app usable in
   browsers and on phones at least as the test build is; 1.3.0 is phase 3, the phone version. The phone-friendly keys come with 1.2.0
   already (the user): the key bar (Esc, Tab, Ctrl, Alt, arrows, palette) and every action
-  reachable without Esc, Ctrl or Alt.
+  reachable without Esc, Ctrl or Alt. **1.3.0 also** (from matrix-sdk 0.20, the user,
+  2026-11-27): who may invite you (`m.invite_permission_config`, Matrix 1.19; servers' support
+  checked first); image packs through the SDK (`image_packs()`, in place of our own loader) and
+  "this pack in all rooms" (`set_image_pack_enabled_globally`); in room info the spaces a room
+  belongs to (`joined_ancestors_of`) and the server's retention policy (MSC1763); in the doctor
+  screen the disk the caches and the search index take (`get_store_sizes`, `media_metrics`).
 - **Phase 0 on the user's iPhone** (2026-11-27): OAuth login to matrix.org works in Safari
   and in the home-screen app (which needs its own login: iOS keeps its storage apart from
   Safari's, and it is a device of its own); sending works; still logged in after the app was
@@ -298,7 +315,10 @@ backend, and installable on iOS and Android as a home-screen app (a PWA).
 - **Calls.** Voice calls wait until the SDK can join calls itself; with them a line in the
   room saying that a call is running, and a key that opens it in the browser. Video after
   that, if at all.
-- **QR login.**
+- **QR login.** matrix-sdk 0.20 has it behind `unstable-msc4388`; later (the user,
+  2026-11-27).
+- **Replacing the picture or file of a sent message** by an edit (matrix-sdk 0.20,
+  `edit_with_attachment`): 1.4.0 at the earliest, if it proves useful (the user, 2026-11-27).
 - **macOS**: notifications and their click, the secret store and following dark/light are
   Linux-only today (D-Bus); a medium piece of work, with nobody to test it.
 - **More Linux packaging** (AUR, a `.deb` wrapping the release archives).
@@ -328,6 +348,8 @@ backend, and installable on iOS and Android as a home-screen app (a PWA).
   chat; several accounts in one window (one window per `--profile` instead); feeds, Home
   Assistant and the like posting into rooms (a server's job); an update notice; a demo mode
   (2026-11-16); more picture protocols (2026-11-15).
+- **Sending later and sticky events** (matrix-sdk 0.20: delayed events, MSC4140; MSC4354):
+  scratched by the user on 2026-11-27.
 - **Right-to-left scripts**: looked into on 2026-11-20. ratatui has no support, terminals
   disagree with each other, and other terminal chat clients do nothing; not pursued.
 - **Looked at and not proposed**: a line-by-line mode for screen readers and pipes
