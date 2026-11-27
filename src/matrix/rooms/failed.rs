@@ -719,12 +719,12 @@ async fn failed_changes_can_be_retried_or_discarded() {
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let seen = bob_sees(bob_room.clone()).await;
-            let edit = seen.iter().any(|event| {
-                event["content"]["m.new_content"]["body"] == Value::from(edited.as_str())
-            });
+            let edit = seen
+                .iter()
+                .any(|event| event["content"]["m.new_content"]["body"] == edited.as_str());
             let after = seen
                 .iter()
-                .any(|event| event["content"]["body"] == Value::from(after_edit.as_str()));
+                .any(|event| event["content"]["body"] == after_edit.as_str());
             if edit && after {
                 return;
             }
@@ -769,7 +769,7 @@ async fn failed_changes_can_be_retried_or_discarded() {
             let seen = bob_sees(bob_room.clone()).await;
             if seen
                 .iter()
-                .any(|event| event["content"]["body"] == Value::from(after_reaction.as_str()))
+                .any(|event| event["content"]["body"] == after_reaction.as_str())
             {
                 return seen;
             }
@@ -824,7 +824,7 @@ async fn failed_changes_can_be_retried_or_discarded() {
             let seen = bob_sees(bob_room.clone()).await;
             if seen
                 .iter()
-                .any(|event| event["content"]["body"] == Value::from(after_deletion.as_str()))
+                .any(|event| event["content"]["body"] == after_deletion.as_str())
             {
                 return seen;
             }
@@ -839,7 +839,7 @@ async fn failed_changes_can_be_retried_or_discarded() {
     );
     let original_event = seen
         .iter()
-        .find(|event| event["event_id"] == Value::from(mine_id.as_str()))
+        .find(|event| event["event_id"] == mine_id.as_str())
         .expect("bob has the message");
     assert_eq!(
         original_event["content"]["body"],
