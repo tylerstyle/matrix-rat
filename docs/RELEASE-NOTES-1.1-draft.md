@@ -88,8 +88,7 @@ Through matrix-sdk 0.20:
 - matrix-sdk, matrix-sdk-base and matrix-sdk-ui 0.20.0 (from 0.19.1), pinned exactly as
   before, with ruma 0.18, rusqlite 0.41 (libsqlite3-sys 0.39.1, SQLite 3.54.1) and
   tantivy 0.27 for the search index. The SDK moved from anymap2 to anymap3 (one
-  unmaintained crate less) and matrix-sdk-ui from chrono to jiff. No other dependency of
-  matrix-rat changed for it.
+  unmaintained crate less) and matrix-sdk-ui from chrono to jiff.
 - **Rust 1.99 or newer** is needed to build matrix-rat (was 1.96).
 - notify 9 (from 8) for watching theme files, signal-hook 0.4 (from 0.3) for suspending
   with `Ctrl-Z`, and every other dependency at its newest compatible version.
