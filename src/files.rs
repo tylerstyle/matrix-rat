@@ -22,11 +22,48 @@ mod home {
 }
 #[cfg(not(target_family = "wasm"))]
 mod write;
+/// The browser has no folder to write into: every file is refused (phase 2 gives it
+/// downloads).
+#[cfg(target_family = "wasm")]
+mod write {
+    use std::io;
+    use std::path::{Path, PathBuf};
+
+    fn refused() -> io::Error {
+        io::Error::from(io::ErrorKind::Unsupported)
+    }
+
+    pub fn write_new(_dir: &Path, _name: &str, _bytes: &[u8]) -> io::Result<PathBuf> {
+        Err(refused())
+    }
+
+    /// Never made: [`NewFile::create`] refuses.
+    pub enum NewFile {}
+
+    impl NewFile {
+        pub fn create(_dir: &Path, _name: &str) -> io::Result<Self> {
+            Err(refused())
+        }
+
+        pub fn finish(self) -> io::Result<PathBuf> {
+            match self {}
+        }
+    }
+
+    impl io::Write for NewFile {
+        fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
+            match *self {}
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            match *self {}
+        }
+    }
+}
 
 use std::path::Path;
 
 pub use home::{display, resolve_dir};
-#[cfg(not(target_family = "wasm"))]
 pub use write::{NewFile, write_new};
 
 use crate::text::sanitize_line;

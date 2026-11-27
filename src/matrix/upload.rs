@@ -194,7 +194,11 @@ impl Uploads {
                 caption.map(caption_content).unwrap_or((None, None));
             let mut reply_to = reply_to;
             for (n, file) in files.into_iter().enumerate() {
+                #[cfg(not(target_family = "wasm"))]
                 let ready = tokio::task::spawn_blocking(move || ready(file, limit)).await;
+                // The browser has the page's thread only: the work is done in place.
+                #[cfg(target_family = "wasm")]
+                let ready = Ok::<_, rt::JoinError>(ready(file, limit));
                 let outcome = match ready {
                     Ok(Ok((told, source, mime, mut config))) => {
                         // Only ever with the first file.

@@ -1175,8 +1175,13 @@ async fn archive(
     // The file first: a folder that cannot be written to is said at once, not after
     // the whole room was loaded. Nothing of it stays if this is given up.
     let name = crate::archive::file_name(&room_name, now.date_naive());
-    let file = tokio::task::spawn_blocking(move || crate::files::NewFile::create(&dir, &name))
-        .await
+    #[cfg(not(target_family = "wasm"))]
+    let file =
+        tokio::task::spawn_blocking(move || crate::files::NewFile::create(&dir, &name)).await;
+    // The browser has the page's thread only: the work is done in place.
+    #[cfg(target_family = "wasm")]
+    let file = Ok::<_, rt::JoinError>(crate::files::NewFile::create(&dir, &name));
+    let file = file
         .map_err(|_| anyhow!("could not write to the folder"))?
         .map_err(|err| anyhow!("could not write to the folder: {err}"))?;
     let timeline = open(room).await?;
@@ -1196,14 +1201,18 @@ async fn archive(
     let stop = Arc::new(AtomicBool::new(false));
     // Given up while the file is written: the writing ends at the next message.
     let _guard = StopOnDrop(stop.clone());
-    let written = tokio::task::spawn_blocking(move || {
+    let work = move || {
         let messages = || messages_of(&items, &own, &ignored);
         write(
             file, messages, &members, since, cut, &room_name, &now, &stop,
         )
-    })
-    .await
-    .map_err(|_| anyhow!("writing the file failed"))?;
+    };
+    #[cfg(not(target_family = "wasm"))]
+    let written = tokio::task::spawn_blocking(work).await;
+    // The browser has the page's thread only: the work is done in place.
+    #[cfg(target_family = "wasm")]
+    let written = Ok::<_, rt::JoinError>(work());
+    let written = written.map_err(|_| anyhow!("writing the file failed"))?;
     let (path, messages) = written.map_err(|err| anyhow!("could not write the file: {err}"))?;
     Ok(Archived {
         path,
@@ -1265,6 +1274,13 @@ fn pairs(members: &[(String, String)]) -> impl Iterator<Item = (&str, &str)> {
 /// it. Only those: a message between newer ones stays whatever time it claims, so
 /// nobody can keep their message out of an archive with a forged date.
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(
+    target_family = "wasm",
+    expect(
+        unreachable_code,
+        reason = "the browser's NewFile is never made (crate::files), so nothing gets past the writer"
+    )
+)]
 fn write<Tz: chrono::TimeZone, I: Iterator<Item = Message>>(
     file: crate::files::NewFile,
     messages: impl Fn() -> I,

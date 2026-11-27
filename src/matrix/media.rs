@@ -215,8 +215,14 @@ impl Media {
                         "the download failed".to_owned()
                     })?;
                 let name = file.name;
-                tokio::task::spawn_blocking(move || files::write_new(&dir, &name, &bytes))
-                    .await
+                #[cfg(not(target_family = "wasm"))]
+                let written =
+                    tokio::task::spawn_blocking(move || files::write_new(&dir, &name, &bytes))
+                        .await;
+                // The browser has the page's thread only: the work is done in place.
+                #[cfg(target_family = "wasm")]
+                let written = Ok::<_, rt::JoinError>(files::write_new(&dir, &name, &bytes));
+                written
                     .map_err(|_| "writing the file failed".to_owned())?
                     .map_err(|err| format!("{err}"))
             };
@@ -307,8 +313,13 @@ async fn load_audio(client: &Client, file: &Attachment, dir: PathBuf) -> Result<
             Refused::Failed => "the download failed".to_owned(),
         })?;
     let mime = file.audio.as_ref().and_then(|meta| meta.mime.clone());
-    tokio::task::spawn_blocking(move || TempAudio::create(&dir, mime.as_deref(), &bytes))
-        .await
+    #[cfg(not(target_family = "wasm"))]
+    let created =
+        tokio::task::spawn_blocking(move || TempAudio::create(&dir, mime.as_deref(), &bytes)).await;
+    // The browser has the page's thread only: the work is done in place.
+    #[cfg(target_family = "wasm")]
+    let created = Ok::<_, rt::JoinError>(TempAudio::create(&dir, mime.as_deref(), &bytes));
+    created
         .map_err(|_| "it could not be put into a file".to_owned())?
         .map_err(|err| {
             tracing::debug!(why = %crate::logsafe::kind(&err), "could not write a sound to play");
@@ -325,12 +336,15 @@ async fn load(
     let bytes = download(client, media, size, full).await?;
     let max = if full { FULL_PIXELS } else { THUMBNAIL_PIXELS };
     // Decoding is CPU work and must not hold up the async threads.
-    tokio::task::spawn_blocking(move || images::decode(&bytes, max))
-        .await
-        .map_err(|err| {
-            tracing::warn!(why = %crate::logsafe::kind(&err), "image decoder crashed");
-            FAILED.to_owned()
-        })?
+    #[cfg(not(target_family = "wasm"))]
+    let decoded = tokio::task::spawn_blocking(move || images::decode(&bytes, max)).await;
+    // The browser has the page's thread only: the work is done in place.
+    #[cfg(target_family = "wasm")]
+    let decoded = Ok::<_, rt::JoinError>(images::decode(&bytes, max));
+    decoded.map_err(|err| {
+        tracing::warn!(why = %crate::logsafe::kind(&err), "image decoder crashed");
+        FAILED.to_owned()
+    })?
 }
 
 /// A square thumbnail from the server; the file itself where the server has none.
@@ -345,9 +359,12 @@ async fn load_avatar(client: &Client, url: &str) -> Result<Decoded, String> {
             .await
             .map_err(|refused| refused.reason())?,
     };
-    tokio::task::spawn_blocking(move || images::decode_avatar(&bytes))
-        .await
-        .map_err(|_| FAILED.to_owned())?
+    #[cfg(not(target_family = "wasm"))]
+    let decoded = tokio::task::spawn_blocking(move || images::decode_avatar(&bytes)).await;
+    // The browser has the page's thread only: the work is done in place.
+    #[cfg(target_family = "wasm")]
+    let decoded = Ok::<_, rt::JoinError>(images::decode_avatar(&bytes));
+    decoded.map_err(|_| FAILED.to_owned())?
 }
 
 /// A custom emoji: a thumbnail from the server, scaled rather than cut so a wide one
@@ -362,9 +379,12 @@ async fn load_emote(client: &Client, url: &str) -> Result<Decoded, String> {
             .await
             .map_err(|refused| refused.reason())?,
     };
-    tokio::task::spawn_blocking(move || images::decode(&bytes, EMOTE_PIXELS))
-        .await
-        .map_err(|_| FAILED.to_owned())?
+    #[cfg(not(target_family = "wasm"))]
+    let decoded = tokio::task::spawn_blocking(move || images::decode(&bytes, EMOTE_PIXELS)).await;
+    // The browser has the page's thread only: the work is done in place.
+    #[cfg(target_family = "wasm")]
+    let decoded = Ok::<_, rt::JoinError>(images::decode(&bytes, EMOTE_PIXELS));
+    decoded.map_err(|_| FAILED.to_owned())?
 }
 
 /// Why a download was given up.
@@ -402,7 +422,7 @@ async fn bounded_get(
         Refused::Failed
     };
     let mut refreshed = false;
-    let mut response = loop {
+    let response = loop {
         let mut request = client.http_client().get(url.clone());
         if authenticated && let Some(token) = client.access_token() {
             request = request.bearer_auth(token);
@@ -431,14 +451,40 @@ async fn bounded_get(
     if let Some(length) = response.content_length().filter(|length| *length > limit) {
         return Err(Refused::TooLarge(Some(length)));
     }
+    read_body(response, limit, failed).await.map(Some)
+}
+
+/// The body of `response`, read piece by piece and dropped as soon as it passes
+/// `limit`.
+#[cfg(not(target_family = "wasm"))]
+async fn read_body(
+    mut response: reqwest::Response,
+    limit: u64,
+    failed: impl Fn(reqwest::Error) -> Refused,
+) -> Result<Vec<u8>, Refused> {
     let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(failed)? {
+    while let Some(chunk) = response.chunk().await.map_err(&failed)? {
         if (bytes.len() + chunk.len()) as u64 > limit {
             return Err(Refused::TooLarge(None));
         }
         bytes.extend_from_slice(&chunk);
     }
-    Ok(Some(bytes))
+    Ok(bytes)
+}
+
+/// The browser's fetch hands the body over whole (reqwest has no `chunk` there): a
+/// stated length was checked before it was read, the real one is checked after.
+#[cfg(target_family = "wasm")]
+async fn read_body(
+    response: reqwest::Response,
+    limit: u64,
+    failed: impl Fn(reqwest::Error) -> Refused,
+) -> Result<Vec<u8>, Refused> {
+    let bytes = response.bytes().await.map_err(failed)?;
+    if bytes.len() as u64 > limit {
+        return Err(Refused::TooLarge(None));
+    }
+    Ok(bytes.to_vec())
 }
 
 /// The address of a file or its thumbnail on the homeserver.

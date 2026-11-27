@@ -1112,9 +1112,12 @@ pub(super) async fn prepare_avatar_upload(
     .and_then(Result::ok)
     .map(Into::into);
     let owned_path = path.to_owned();
-    let prepared = tokio::task::spawn_blocking(move || upload::prepare(&owned_path, limit))
-        .await
-        .map_err(|_| "Could not read that image.".to_owned())??;
+    #[cfg(not(target_family = "wasm"))]
+    let prepared = tokio::task::spawn_blocking(move || upload::prepare(&owned_path, limit)).await;
+    // The browser has the page's thread only: the work is done in place.
+    #[cfg(target_family = "wasm")]
+    let prepared = Ok::<_, rt::JoinError>(upload::prepare(&owned_path, limit));
+    let prepared = prepared.map_err(|_| "Could not read that image.".to_owned())??;
     if prepared.picture.is_none() {
         return Err(format!("{} is not a readable image", prepared.name));
     }

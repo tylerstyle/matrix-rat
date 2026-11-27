@@ -58,6 +58,14 @@ pub const WAVE_BARS: usize = 24;
 /// How far the seek keys jump, in seconds.
 pub const SEEK_SECONDS: i32 = 5;
 
+/// The browser has no folder a sound could be played from: phase 2 plays it there.
+#[cfg(target_family = "wasm")]
+impl TempAudio {
+    pub fn create(_dir: &Path, _mime: Option<&str>, _bytes: &[u8]) -> std::io::Result<Self> {
+        Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+    }
+}
+
 /// The players `"auto"` knows, in the order it looks for them; `Other` is any other
 /// program the user named.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
