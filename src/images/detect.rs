@@ -4,13 +4,13 @@ use std::time::Duration;
 
 use super::{Graphics, Protocol};
 use crate::config::ImageMode;
-use crate::termquery;
+use crate::shell::terminal::termquery;
 
 /// How long the terminal gets to answer the question about what it can draw.
 const QUERY_TIMEOUT: Duration = Duration::from_millis(1000);
 
 impl Graphics {
-    /// Asks the terminal what it can do (see [`crate::termquery`] for when this may
+    /// Asks the terminal what it can do (see [`termquery`] for when this may
     /// run). Takes at most [`QUERY_TIMEOUT`]; without an answer it falls back to
     /// half blocks for graphics. When `probe_appearance` is true, colour-scheme and
     /// background probes are batched into the same round-trip (or run alone when
@@ -105,7 +105,7 @@ mod tests {
 
     #[test]
     fn terminal_answers_decide_how_pictures_are_drawn() {
-        use crate::termquery::Reply;
+        use crate::shell::terminal::termquery::Reply;
         let kitty = Reply {
             kitty: true,
             compression: true,

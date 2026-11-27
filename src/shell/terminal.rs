@@ -13,6 +13,8 @@
 //! whenever it hands it back (on exit, around Ctrl-Z and the editor, and from the
 //! panic hook). With the setting off the title is never touched, not even saved.
 
+pub mod termquery;
+
 use std::io::{self, Stdout, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 

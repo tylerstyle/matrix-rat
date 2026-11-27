@@ -53,7 +53,7 @@ pub fn command_line(config_file: &Path) -> String {
     let (config, config_broken) = read_config(config_file);
     let in_terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     let asked = in_terminal
-        .then(|| crate::terminal::ask_for_doctor(config.images).ok())
+        .then(|| crate::shell::terminal::ask_for_doctor(config.images).ok())
         .flatten();
     let size = in_terminal
         .then(|| crossterm::terminal::size().ok())

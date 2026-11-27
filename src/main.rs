@@ -55,9 +55,8 @@ mod probes;
 mod rich;
 mod rt;
 mod saved;
+mod shell;
 mod storage;
-mod terminal;
-mod termquery;
 #[cfg(test)]
 mod testbus;
 mod text;

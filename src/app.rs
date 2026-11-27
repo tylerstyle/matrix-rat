@@ -77,8 +77,8 @@ use crate::model::{
 use crate::paths::Paths;
 use crate::probes::Probes;
 use crate::rt::{self, MissedTickBehavior};
+use crate::shell::terminal::{self, TerminalGuard};
 use crate::storage::{Key, Storage};
-use crate::terminal::{self, TerminalGuard};
 use crate::theme::{ColorScheme, DEFAULT_THEME, Theme};
 use crate::time::Instant;
 use crate::ui::hit::{Button, HitId, HitMap, InputTarget};
