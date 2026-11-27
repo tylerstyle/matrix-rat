@@ -863,12 +863,19 @@ mod tests {
                         if !sent(file) || !sent(picture) || fetched {
                             continue;
                         }
-                        // Once only: the batch that could not start sent nothing.
-                        let copies = messages
+                        // Once only: the batch that could not start sent nothing. For a
+                        // moment the SDK can show the local copy beside the one the server
+                        // sent back (two of its tasks bring them); it drops the local one
+                        // once the send is confirmed. So the copies are counted when none
+                        // is still a local one: a second send would still be two.
+                        let copies: Vec<_> = messages
                             .iter()
                             .filter(|m| m.file.as_ref().is_some_and(|f| f.name == text_name))
-                            .count();
-                        assert_eq!(copies, 1);
+                            .collect();
+                        if copies.iter().any(|m| !sent(m)) {
+                            continue;
+                        }
+                        assert_eq!(copies.len(), 1);
                         // The file: name, size, and the caption went with it (the first).
                         let attached = file.file.as_ref().unwrap();
                         assert_eq!(attached.size, Some(text_content.len() as u64));
