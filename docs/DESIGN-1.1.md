@@ -126,6 +126,47 @@ has the queue](#the-app-always-has-the-queue)). The setting governs only this th
 - **Indexing.** What lands in a room's stored history is indexed, including what is paged back
   (`event_cache/caches/room/updates.rs:150-166`, `tasks.rs:449`).
 
+### As built: the SDK's sweep stops at about 300 events a room
+
+Found while building (`search-backfill`), with the measuring test below and a trace of the
+SDK's sweep on the dev server. It changes what this design expected of `run_search_backfill`.
+
+- **What happens.** In a room with more than about 300 events, the sweep fetches 10 batches
+  (300 events) in week 1 and nothing more: not in weeks 2–13, not at a later start. In the
+  trace, weeks 2–13 of the bigger rooms each ended at their batch cap within 20–80 ms, without a
+  request; in the measurement, each room with 1 000 or more events got exactly 10 `/messages`,
+  a 1 000-event room was found back to its 300th message only, and a second start asked
+  nothing.
+- **Why.** `run_request` holds the room only for its own run (`back_pagination_queue.rs:547-552`).
+  When it ends, the room shrinks back to its newest chunk in memory. The next week's request
+  starts from the newest events again and reads the stored chunks back from disk, each one
+  counted as a batch (`:583-615`) against the cap of 10. It ends at the week's age or at the
+  cap, so once a room has 10 batches stored, no request of the sweep gets past them: not the
+  next week's, not a later start's. The "Later starts" reading under [Cost](#cost) was right that later
+  runs read the disk first; it missed that the cap counts those reads. The SDK's own test of the
+  sweep (`search_backfill.rs`, `test_search_backfill_drains_room`) subscribes to the room for
+  the whole test, which keeps the chunks in memory and hides it. Not reported upstream (their
+  AI policy; the user's call).
+- **What we do: our own walk after the sweep** (`deepen` and `walk` in
+  `src/matrix/search_history.rs`). The sweep stays: it indexes the stored events once, and
+  fills the last week of every room first. Then each joined room (not spaces), the most recent
+  first, one at a time and 1 s apart, is held (`RoomEventCache::subscribe`) while
+  `RoomPagination::run_backwards_once(30)` takes it back batch by batch, until a batch's oldest
+  event is 13 weeks old, the room's start, an empty batch, an error, or 130 batches (the 13 ×
+  10 this design meant as the bound). Held, the room keeps its chunks in memory, so each batch
+  goes on from the last; what is stored is read back first, and only what lies past it is
+  asked of the server. Let go, the room shrinks back.
+- **Its bounds.** One room in memory at a time (up to 3 900 events), one request of ours at a
+  time, in the same task, so the setting, logout, quit and the 6 h limit stop it as before. It
+  does not go through the queue (`enqueue` is `pub(crate)` in 0.20), so it does not wait behind
+  the other two backfills by priority; it comes after the sweep, whose first week does. A panic
+  in the SDK while it pages (matrix-rust-sdk #5416, see `src/matrix/paging.rs`) is caught as
+  in `paging::backwards`, logged as a kind, and ends the walk for this session.
+- **Later starts.** The walk reads each room's stored part back from disk again, up to 130
+  batches a room, and asks the server only where the store has a gap (after an outage, say)
+  or ends before 13 weeks. The sweep itself already reads up to 13 × 10 batches a room from
+  disk at every start.
+
 ### When it runs, and its bounds
 
 - **Start.** Once per session, `START_DELAY` (10 s) after the room list first catches up, if the
@@ -148,13 +189,18 @@ has the queue](#the-app-always-has-the-queue)). The setting governs only this th
   These rules are one small function of (run going, `saw_offline`, sync state, event), so they
   are tested without a server (below).
 - **Time.** 13 weeks back from now, as the SDK has it. We do not change it. A very busy room
-  (more than 300 events in a week) stops at the cap for that week and is covered less deep; the
-  next start goes further from what is stored.
+  (more than 3 900 events in 13 weeks) stops at our walk's cap of 130 batches and is covered
+  less deep; a later start goes no further, since the cap counts the stored batches (see [As
+  built](#as-built-the-sdks-sweep-stops-at-about-300-events-a-room)).
 - **Rooms.** All joined rooms, the most recent first. The SDK skips spaces, invites and left
   rooms.
 - **Bandwidth.** Foreground pacing (one room a second into the queue), Low priority, 3 runs at
-  once shared with the other two backfills, at most 130 requests per room per run. The other
-  two go first (High and Normal beat Low), so at start the search waits behind them.
+  once shared with the other two backfills, at most 10 requests per room and week. The 10-batch
+  cap of each week's request counts the batches read back from disk too (as for the
+  read-receipt backfill), so a week's request that starts below what is stored asks the server
+  for less, and in a busy room nothing. The other two go first (High and Normal beat Low), so
+  at start the search waits behind them. Then our walk: a room a second, one request at a
+  time, at most 130 batches a room, stored ones included.
 - **Time limit.** Our task gives up after 6 h; see the risks: a panic in a queue task makes
   `join()` wait for ever.
 - **The dev server in tests.** Only the tests about it turn it on, through the worker options
@@ -178,12 +224,14 @@ dev-server measurement in the next section, before the release.
   subscribes to the room for the run and drops it at the end, so the room's history in memory
   shrinks back (L547-552). The next week's run reads the stored part from disk again before it
   goes to the server. So a later start costs mostly disk reads, and requests only past the end
-  of what is stored.
+  of what is stored. (As built: right about the disk, but the batch cap counts those reads, so
+  the sweep never gets past them; our walk does. See [As
+  built](#as-built-the-sdks-sweep-stops-at-about-300-events-a-room).)
 - **Disk.** What is fetched stays in the SQLite event cache (encrypted) and in the search
   index. At a guessed 1–2 KB per stored event, 100 000 events are 100–200 MB; the measurement
   replaces the guess.
-- **Memory.** Shrinks back after each room (above). A room open in the app keeps what was
-  fetched for it while it is open.
+- **Memory.** Shrinks back after each room (above); our walk holds one room at a time. A room
+  open in the app keeps what was fetched for it while it is open.
 - **Duration.** Foreground with 100 rooms: at most 100 s of pacing per week, so at most about
   22 minutes for a first run, plus the requests themselves. It gets shorter week by week as
   rooms reach their start.
@@ -215,6 +263,10 @@ fills the dev server. It runs alone, like every server run.
    events meets its 10-batch cap, so every room costs the most it can: `busy` 130 batches
    (3 900 events), a `medium` room all of its 1 000 by week 4. That is the upper bound, which is
    what the estimate needs; the 13-week stop itself is covered by the SDK's tests.
+   *As built:* every event is sent now (the dev server's config is left alone), and the rooms
+   are made one after another before they are filled: a room's id is the hash of its create
+   event, and two rooms A makes in the same millisecond are the same room. The 13-week stop of
+   our walk is covered by a fake-server test.
 3. **Count.** B logs in with the worker on a new profile in a temp folder, through a counting
    relay: a test-only TCP relay in front of the dev server that forwards bytes and counts
    request lines, all of them and the `GET …/messages` ones apart. It counts kinds only; no path
@@ -232,6 +284,13 @@ fills the dev server. It runs alone, like every server run.
    request. No ids, paths or text. It asserts only loose bounds (at most 130 search requests per
    room and run; at most 20 read-receipt batches per room and sync), since times on a shared dev
    server vary.
+   *As built:* the relay also counts the `/messages` of each room of the plan (it keeps the
+   ids in memory only) and times each `/messages` up to the first byte of its answer. How far
+   back a run got is found by searching: some messages carry a word of their own at known
+   depths (100, 500, 1 000… messages from the newest). Bytes per event are the profile's growth
+   in step 2 over the events fetched (requests × 30, a little high, so the bytes a little
+   low). It also asserts that the walk reached the busy room's 3 000th message and that a
+   later start asks for at most one `/messages` a room.
 
 **The estimate for 100 000 events**, worked out from those numbers and written here and in the
 release notes:
@@ -242,10 +301,46 @@ release notes:
   dev server is local, so its seconds per request are a floor; the estimate also gives the time
   at 0.5 s a request, a guess for a busy public server, said to be one.
 
+*As built*, with our walk: requests 100 000 / 30 + one short batch a room ≈ 3 433, one after
+another (the walk takes a room at a time), so the time is requests × 0.5 s, and the measured
+server time per request beside it; the pacing apart, up to (13 + 1) × 99 s ≈ 23 min for 100
+rooms, which costs no data.
+
 **The gate.** "Measure before release" stays, on the dev server: the test runs before the 1.1.0
 release and its numbers replace the guesses above. Proposed: if 100 000 events come to more than
 1 GB of disk or more than an hour at 0.5 s a request, the default goes back to the user before
 the release.
+
+**Measured** (2026-11-27, branch `search-backfill`; the test built for tests on hpfury, the dev
+server on hpserver through fury-check's tunnel; 9 101 events in 9 rooms, filled in 156 s):
+
+| Step | `/messages` (busy, medium a, medium b, 5 quiet, state-only) | Other requests | Down | Time | Profile |
+|---|---|---|---|---|---|
+| 1. Off, previews on | 87 (0, 0, 20, 0 each, 67) | 5 sync, 4 keys, 21 other | 1.4 MB | quiet after 6 s | 12.4 MB |
+| 2. Turned on | 189 (130, 34, 14, 2 each, 1) | 4 sync | 2.3 MB | 54 s, Running to Done | +12.4 MB |
+| 3. A later start | 0 | 6 sync, 3 keys, 5 other | 9 KB | 45 s | +0 |
+
+- Step 1: the 20 are the read-receipt backfill of the room B has no receipt in (to its cap);
+  the 67 are the latest-event backfill walking back through 2 000 topic changes.
+- Step 2: the busy room took its 130 batches (10 of the sweep's, 120 of our walk), the medium
+  rooms went to their start, and search found the busy room's 3 000th message from the end,
+  both medium rooms' oldest and every quiet room's. The server took 0.03 s for a `/messages`
+  (local, a floor); 427 B came down and 2.3 KB went to disk per event fetched (the store and
+  the index). The index had caught up 7 s after the run's end.
+- Step 3: nothing from the server; the time is the sweep's pacing and the disk reads.
+- **For 100 000 events in 100 rooms:** about 3 433 requests and 229 MB of disk; 29 min at
+  0.5 s a request (2 min at the measured 0.03 s), plus up to 23 min of pacing, which costs
+  no data. **Within the gate**: the default stays on.
+- **Before our walk** (the SDK's sweep alone, the same test): each room of 1 000 events or more
+  got exactly 10 `/messages`, a room of 1 000 was found back to its 100th message and not its
+  500th, and a later start asked nothing. That is the [As
+  built](#as-built-the-sdks-sweep-stops-at-about-300-events-a-room) finding.
+- **Before the walk rested between batches:** it fetched as fast as the local server answered,
+  the SDK's index fell behind, and what it had not indexed when the session ended was never
+  indexed: after the restart, search still missed the busy room's 3 000th message and the medium
+  rooms' oldest. The SDK indexes what is fetched in a task of its own, from a queue that goes
+  with the client, and it reindexes the stored events only once per profile. Resting half as
+  long as each batch took brought the lag down to the 7 s above; see the risks.
 
 ### Encrypted rooms
 
@@ -292,10 +387,12 @@ fetches.
     points at an event that is not loaded.
   - *Bounds:* Normal priority, detached, at most 20 batches of 30 (600 events) per run; it stops
     as soon as the receipt's event is loaded. A later sync of that room asks again if the event
-    is still not found; while one run is queued or going, the request joins it. As far as I read
-    (`back_pagination_queue.rs:547-552`), a later run reads the stored part from disk first, and
-    its batch count includes those, so the network cost of a room is about 600 events past what
-    is stored. The measurement checks it.
+    is still not found; while one run is queued or going, the request joins it. A run reads the
+    stored part from disk first, and its batch cap counts those batches too
+    (`back_pagination_queue.rs:610`; matrix-agy's second review, note 2). So a run costs at most
+    600 events from the network, and less once they are stored. With no receipt of ours loaded
+    at all (none in the room, say), the run has no event to stop at and goes to its cap
+    (`stop_on_event_ids`, `read_receipts.rs:167-183`).
   - *On screen:* little. We show unread as a dot, from `num_unread_notifications() > 0 ||
     num_unread_messages() > 0` (`src/matrix/mod.rs:2623-2632`), not the count. When the receipt
     is not loaded, every loaded event counts as unread, so the dot is on either way; the
@@ -518,6 +615,14 @@ Size **M**, and **S** for the measuring test and its relay.
   - The queue may run with fewer slots for the rest of the session. Nothing more can be done
     from outside.
 - **Disk grows without a cap.** Store sizes come to the doctor in 1.3.
+- **What the SDK has not indexed when the session ends is never indexed** (found while
+  measuring, see Measured). Its index takes fetched events from an in-memory queue, one batch
+  at a time, and its reindex of the stored events runs once per profile. Our walk rests half as
+  long as each batch took, which kept the lag to 7 s on the dev server; quitting within those
+  seconds of the run, or during it, can leave the last batches out of the index for good. A
+  slower server means a smaller lag. Not fixed here: nothing public tells how far the index has
+  got. A fix would delete the SDK's reindex marker (`reindexed-v1`) when a session ends with a
+  run going, so the next start reindexes all that is stored (CPU, no data).
 - **An open room gets older events added at the top while the user reads it.** The paging state
   (`src/matrix/paging.rs`) and the selection must stay right. The server test opens the room
   while the run fetches it.
@@ -1209,7 +1314,7 @@ Size **M**.
 | `verify-keys` | 4 | M | `src/verify.rs`, `src/ui/verify.rs` (+ snapshots), `src/app/verify.rs` (`verify_tick`), `src/app/devices.rs`, `src/matrix/verify.rs` (tests included), README (encryption) |
 | `deletion-reason` | 3 | S–M | `src/model.rs` (`people`, `mark_among`), `src/matrix/convert.rs`, `src/matrix/receipts.rs` (`plan`, `annotate`), `src/matrix/rooms.rs` (fake-server tests), `src/ui/timeline.rs`, `src/ui/timeline/memo.rs`, `src/details.rs`, `src/menu.rs`, `src/keymap.rs`, `src/palette.rs`, `src/app.rs`, `src/app/moderation.rs`, snapshots, README |
 | `send-retry` | 2 | M | `src/model.rs`, `src/matrix/convert.rs`, `src/matrix/rooms.rs` (`prepare_messages`, `Retry`, `Discard`, `Redact`), `src/matrix/mod.rs` (`MatrixCmd`, the sync arm), `src/ui/timeline.rs`, `src/ui/timeline/memo.rs`, `src/ui/status.rs`, `src/details.rs`, `src/menu.rs`, `src/palette.rs`, `src/app.rs`, `src/app/palette.rs`, snapshots, README |
-| `search-backfill` | 1 | M (+ S) | `src/matrix/session.rs`, `src/matrix/auth.rs`, `src/matrix/mod.rs` (`spawn`, `spawn_with`, `Worker`, protocol, session loop, a server test's options), new `src/matrix/search_history.rs` (with `short_date`, the measuring test and its relay), `src/matrix/rooms.rs` (two server tests' options), `src/agent/serve.rs`, `src/shell/terminal.rs`, `src/matrix/agent.rs` (test call), `src/config.rs`, `src/modal.rs`, `src/app.rs`, `src/ui/global_search.rs` (+ snapshots), README, release notes |
+| `search-backfill` | 1 | M (+ S) | `src/matrix/session.rs`, `src/matrix/auth.rs`, `src/matrix/mod.rs` (`spawn`, `spawn_with`, `Worker`, protocol, session loop, a server test's options), new `src/matrix/search_history.rs` (with `short_date`, the measuring test and its relay), `src/matrix/rooms.rs` (two server tests' options), `src/agent/serve.rs`, `src/shell/terminal.rs`, `src/matrix/agent.rs` (test call), `src/config.rs`, `src/modal.rs`, `src/app.rs`, `src/ui/global_search.rs` (+ snapshots), README, release notes. *As built* also: `src/matrix/search_history.rs` holds our walk past the SDK's sweep (see [As built](#as-built-the-sdks-sweep-stops-at-about-300-events-a-room)); `src/app/global_search.rs` (test), `src/ui/mod.rs` (snapshot tests), `src/lib.rs` (`WorkerOptions` for the engine), `src/ui/modal.rs`, `src/app/notes.rs`, `src/app/palette.rs` (the Settings row), and one match arm each in `src/app/thread.rs`, `src/shell/terminal/external_editor.rs` |
 
 `verify-keys` leaves `src/app.rs` alone: `on_tick` already calls `verify_tick`, and
 `reset_session` resets the whole `VerifyState`, `done_at` included. Only its tests may go there.
