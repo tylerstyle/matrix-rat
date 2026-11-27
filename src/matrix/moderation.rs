@@ -1652,4 +1652,187 @@ mod tests {
             std::panic::resume_unwind(err);
         }
     }
+
+    /// A moderator deletes a message with a reason: its sender sees the reason and the
+    /// moderator's name. The sender deletes one of their own with a reason: the others
+    /// see "Message deleted" with the reason, and no one named.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs a local homeserver"]
+    async fn server_deleted_messages_say_who_and_why() {
+        use crate::model::{DeletedBy, Deletion, ItemRef, MsgKind};
+        let hs = hs();
+        let alice_user = std::env::var("MATRIX_RAT_TEST_USER").expect("MATRIX_RAT_TEST_USER");
+        let alice_pass =
+            std::env::var("MATRIX_RAT_TEST_PASSWORD").expect("MATRIX_RAT_TEST_PASSWORD");
+        let (root_a, h_a, mut ev_a, alice_id) =
+            login_worker("deleted-a", &hs, &alice_user, &alice_pass).await;
+        let (root_b, h_b, mut ev_b, bob_id) =
+            login_worker("deleted-b", &hs, "bob", "bobpass").await;
+
+        let room_id = create_room(&h_a, &mut ev_a, "matrix-rat deletion reason test", false).await;
+        let cleanup_ids = vec![room_id.clone()];
+
+        let outcome = AssertUnwindSafe(async {
+            h_a.send(MatrixCmd::Manage(ManageCmd::Invite {
+                room_id: room_id.clone(),
+                user_id: bob_id.clone(),
+            }));
+            wait_done(&mut ev_a, Change::Invite).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(60), async {
+                loop {
+                    match ev_b.recv().await.expect("worker stopped") {
+                        MatrixEvent::Rooms(rooms) if rooms.iter().any(|r| r.id == room_id) => {
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .expect("bob invite timed out");
+            h_b.send(MatrixCmd::Manage(ManageCmd::Join {
+                request: 0,
+                target: room_id.clone(),
+                via: Vec::new(),
+            }));
+            tokio::time::timeout(Duration::from_secs(60), async {
+                loop {
+                    match ev_b.recv().await.expect("worker stopped") {
+                        MatrixEvent::Rooms(rooms)
+                            if rooms.iter().any(|r| r.id == room_id && !r.is_pending()) =>
+                        {
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .expect("bob join timed out");
+            for (handle, events) in [(&h_a, &mut ev_a), (&h_b, &mut ev_b)] {
+                handle.send(MatrixCmd::OpenRoom {
+                    room_id: room_id.clone(),
+                    generation: 1,
+                });
+                wait_power(events, &room_id, |_| true).await;
+            }
+
+            // Bob says two things; alice sees both.
+            let mut ids = Vec::new();
+            for body in ["bob spam", "bob wrong room"] {
+                h_b.send(MatrixCmd::Send {
+                    room_id: room_id.clone(),
+                    message: format::parse(body),
+                    reply_to: None,
+                });
+                let sent = wait_timeline_msg(&mut ev_b, &room_id, |msgs| {
+                    msgs.iter()
+                        .find(|m| m.body == body && m.event_id().is_some())
+                        .cloned()
+                })
+                .await;
+                ids.push(sent.event_id().unwrap().to_owned());
+            }
+            let (spam, wrong_room) = (ids[0].clone(), ids[1].clone());
+            wait_timeline_msg(&mut ev_a, &room_id, |msgs| {
+                msgs.iter()
+                    .find(|m| m.event_id() == Some(wrong_room.as_str()))
+                    .cloned()
+            })
+            .await;
+            let deletion_of = |msgs: &[Message], id: &str| {
+                msgs.iter()
+                    .find(|m| m.event_id() == Some(id) && m.kind == MsgKind::Redacted)
+                    .and_then(|m| m.deleted.clone())
+            };
+
+            // Alice, the room's admin, deletes bob's message with a reason.
+            h_a.send(MatrixCmd::Redact {
+                room_id: room_id.clone(),
+                item: ItemRef::Event(spam.clone()),
+                reason: Some("spam link".into()),
+            });
+            let ours = wait_timeline_msg(&mut ev_a, &room_id, |msgs| {
+                msgs.iter()
+                    .find(|m| m.event_id() == Some(spam.as_str()) && m.deleted.is_some())
+                    .cloned()
+            })
+            .await;
+            assert_eq!(
+                ours.deleted,
+                Some(Deletion {
+                    reason: Some("spam link".into()),
+                    by: DeletedBy::Us,
+                })
+            );
+            assert_eq!(ours.deleted_line(), "Deleted by you: spam link");
+            // Bob sees who deleted it, by name, and why. The reason may come a moment
+            // before the name.
+            let seen = wait_timeline_msg(&mut ev_b, &room_id, |msgs| {
+                let deletion = deletion_of(msgs, &spam)?;
+                matches!(&deletion.by, DeletedBy::Other { name, .. } if !name.starts_with('@'))
+                    .then(|| msgs.iter().find(|m| m.event_id() == Some(spam.as_str())))
+                    .flatten()
+                    .cloned()
+            })
+            .await;
+            let Some(Deletion {
+                reason,
+                by: DeletedBy::Other { user_id, name },
+            }) = &seen.deleted
+            else {
+                panic!("not deleted by someone else: {:?}", seen.deleted);
+            };
+            assert_eq!(reason.as_deref(), Some("spam link"));
+            assert_eq!(user_id, &alice_id);
+            assert!(!name.is_empty() && name != &alice_id);
+            assert_eq!(seen.body, "Message deleted");
+            assert_eq!(seen.deleted_line(), format!("Deleted by {name}: spam link"));
+
+            // Bob deletes his own message with a reason: alice sees no one named.
+            h_b.send(MatrixCmd::Redact {
+                room_id: room_id.clone(),
+                item: ItemRef::Event(wrong_room.clone()),
+                reason: Some("sent to the wrong room".into()),
+            });
+            let seen = wait_timeline_msg(&mut ev_a, &room_id, |msgs| {
+                let deletion = deletion_of(msgs, &wrong_room)?;
+                (deletion.reason.is_some())
+                    .then(|| {
+                        msgs.iter()
+                            .find(|m| m.event_id() == Some(wrong_room.as_str()))
+                    })
+                    .flatten()
+                    .cloned()
+            })
+            .await;
+            assert_eq!(
+                seen.deleted,
+                Some(Deletion {
+                    reason: Some("sent to the wrong room".into()),
+                    by: DeletedBy::Sender,
+                })
+            );
+            assert_eq!(
+                seen.deleted_line(),
+                "Message deleted: sent to the wrong room"
+            );
+        })
+        .catch_unwind()
+        .await;
+
+        cleanup_rooms(
+            vec![
+                (&h_a, &mut ev_a, &cleanup_ids),
+                (&h_b, &mut ev_b, &cleanup_ids),
+            ],
+            None,
+            &[],
+            vec![root_a, root_b],
+        )
+        .await;
+        if let Err(err) = outcome {
+            std::panic::resume_unwind(err);
+        }
+    }
 }
