@@ -1127,7 +1127,11 @@ fn message_rows(i: usize, message: &Message, before: Before, lay: &Lay, out: &mu
             match chip.strip_suffix(FAILED_CHIP) {
                 Some(head) if reaction.failed => {
                     spans.push(Span::styled(format!("{head} "), theme.style(role)));
-                    spans.push(Span::styled("✕", theme.style(Role::Error)));
+                    // Red, on the chip's own background.
+                    spans.push(Span::styled(
+                        "✕",
+                        theme.style(role).patch(theme.style(Role::Error)),
+                    ));
                     spans.push(Span::styled(" ", theme.style(role)));
                 }
                 _ => spans.push(Span::styled(chip, theme.style(role))),
@@ -2591,6 +2595,36 @@ mod tests {
         assert_eq!(message_rows(&room, 12), ["  ", "  (pinned) …"]);
         // Wide enough: beside it.
         assert_eq!(message_rows(&room, 30), ["   (pinned) (saved)"]);
+    }
+
+    /// The ✕ of a reaction of ours that could not be sent is red on the chip's own
+    /// background, not a hole in the chip.
+    #[test]
+    fn a_failed_reaction_chip_keeps_its_background() {
+        let theme = Theme::builtin(DEFAULT_THEME).unwrap();
+        let images = ImageStore::new(Graphics::halfblocks());
+        let mut room = demo_rooms().remove(0);
+        room.messages = vec![Message {
+            body: "Ship it".into(),
+            own: true,
+            reactions: vec![crate::model::Reaction {
+                key: "👍".into(),
+                count: 1,
+                own: true,
+                failed: true,
+            }],
+            ..Message::default()
+        }];
+        let rows = build_rows(&room, 40, &theme, None, &images);
+        let chip = rows
+            .iter()
+            .flat_map(|row| &row.line.spans)
+            .find(|span| span.content == "✕")
+            .expect("the chip's ✕");
+        let own = theme.style(Role::ReactionOwn);
+        assert_eq!(chip.style, own.patch(theme.style(Role::Error)));
+        assert_eq!(chip.style.bg, own.bg);
+        assert_eq!(chip.style.fg, theme.style(Role::Error).fg);
     }
 
     #[test]
