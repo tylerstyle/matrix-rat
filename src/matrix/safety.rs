@@ -97,11 +97,8 @@ impl IgnoreTracker {
                         .await;
                     }
                     sync_list = stream.next() => {
-                        let Some(raw_ids) = sync_list else { break };
-                        let synced: HashSet<OwnedUserId> = raw_ids
-                            .into_iter()
-                            .filter_map(|id| OwnedUserId::try_from(id.as_str()).ok())
-                            .collect();
+                        let Some(ids) = sync_list else { break };
+                        let synced: HashSet<OwnedUserId> = ids.into_iter().collect();
                         if let Some((at, ref pending)) = local_content {
                             let pending_set: HashSet<OwnedUserId> =
                                 pending.ignored_users.keys().cloned().collect();

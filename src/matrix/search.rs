@@ -11,8 +11,6 @@ use futures::StreamExt;
 #[cfg(any(not(target_family = "wasm"), test))]
 use matrix_sdk::RoomState;
 use matrix_sdk::deserialized_responses::TimelineEvent;
-#[cfg(not(target_family = "wasm"))]
-use matrix_sdk::event_cache::RedecryptorReport;
 use matrix_sdk::event_cache::RoomEventCache;
 #[cfg(any(not(target_family = "wasm"), test))]
 use matrix_sdk::ruma::OwnedEventId;
@@ -66,8 +64,8 @@ impl fmt::Debug for SearchHit {
 
 /// Removes persisted per-room search index directories whose room IDs are no longer
 /// joined. Called when no `RoomIndex` handles are open (startup before sync/search, and
-/// session shutdown after dropping the `Client`) because `matrix-sdk 0.19.1` keeps an
-/// in-memory `HashMap<OwnedRoomId, RoomIndex>` without a public room-removal API.
+/// session shutdown after dropping the `Client`) because matrix-sdk (0.19.1 and 0.20.0)
+/// keeps an in-memory `HashMap<OwnedRoomId, RoomIndex>` without a public room-removal API.
 #[cfg(not(target_family = "wasm"))]
 fn prune_search_dir(search_dir: &Path, joined_room_ids: &HashSet<String>) {
     let Ok(entries) = std::fs::read_dir(search_dir) else {
@@ -129,7 +127,6 @@ pub(super) struct Searcher {
     ignored: watch::Receiver<IgnoredSet>,
     left: LeftRooms,
     task: Option<JoinHandle<()>>,
-    redecrypt_task: Option<JoinHandle<()>>,
 }
 
 impl Searcher {
@@ -139,18 +136,12 @@ impl Searcher {
         ignored: watch::Receiver<IgnoredSet>,
         left: LeftRooms,
     ) -> Self {
-        #[cfg(not(target_family = "wasm"))]
-        let redecrypt_task = Some(rt::spawn(index_redecrypted(client.clone())));
-        // The browser keeps no index to add to.
-        #[cfg(target_family = "wasm")]
-        let redecrypt_task = None;
         Self {
             client,
             events,
             ignored,
             left,
             task: None,
-            redecrypt_task,
         }
     }
 
@@ -170,98 +161,11 @@ impl Searcher {
             task.abort();
         }
     }
-
-    pub(super) fn stop(&mut self) {
-        self.cancel();
-        if let Some(task) = self.redecrypt_task.take() {
-            task.abort();
-        }
-    }
 }
 
 impl Drop for Searcher {
     fn drop(&mut self) {
-        self.stop();
-    }
-}
-
-/// Indexes events that the SDK's `Redecryptor` decrypted asynchronously.
-///
-/// In matrix-sdk 0.19.1, `Redecryptor::on_resolved_utds` writes decrypted UTDs
-/// back into the event cache and timeline subscribers via
-/// `RoomEventCacheUpdate`, bypassing `RoomEventCacheLinkedChunkUpdate` where
-/// the SDK's `search_indexing_task` listens. Forwarding `ResolvedUtds` reports
-/// keeps encrypted rooms searchable once keys arrive later.
-#[cfg(not(target_family = "wasm"))]
-async fn index_redecrypted(client: Client) {
-    let stream = client.event_cache().subscribe_to_decryption_reports();
-    tokio::pin!(stream);
-    while let Some(item) = stream.next().await {
-        let Ok(RedecryptorReport::ResolvedUtds { room_id, events }) = item else {
-            continue;
-        };
-        if events.is_empty() {
-            continue;
-        }
-        let Some(room) = client.get_room(&room_id) else {
-            continue;
-        };
-        let Ok((room_cache, _drops)) = client.event_cache().room(&room_id).await else {
-            continue;
-        };
-        let mut resolved = Vec::with_capacity(events.len());
-        for event_id in events {
-            let Ok(Some(mut event)) = room_cache.find_event(&event_id).await else {
-                continue;
-            };
-            if event.kind.is_utd()
-                && let Some(decrypted) = try_decrypt_utd(&room, &event).await
-            {
-                event = decrypted;
-            }
-            if !event.kind.is_utd() {
-                resolved.push(event);
-            }
-        }
-        if resolved.is_empty() {
-            continue;
-        }
-        let redaction_rules = room.clone_info().room_version_rules_or_default().redaction;
-        let mut pending = resolved;
-        for _ in 0..3 {
-            for event in &pending {
-                ensure_decrypted_in_store(&client, &room_id, &room_cache, event).await;
-            }
-            {
-                let mut guard = client.search_index().lock().await;
-                if let Err(err) = guard
-                    .bulk_handle_timeline_event(
-                        pending.iter().cloned(),
-                        &room_cache,
-                        &room_id,
-                        &redaction_rules,
-                    )
-                    .await
-                {
-                    tracing::warn!(why = %crate::logsafe::kind(&err), "failed to index redecrypted events");
-                    break;
-                }
-            }
-            // In matrix-sdk 0.19.1, `post_process_upserted_events` saves
-            // `bundled_latest_thread_event` with `INSERT OR REPLACE INTO events`,
-            // which can overwrite a decrypted thread reply in SQLite with an
-            // encrypted UTD copy and make `get_most_recent_edit` skip indexing it.
-            let mut overwritten = Vec::new();
-            for event in pending {
-                if store_missing_or_utd(&room_cache, &event).await {
-                    overwritten.push(event);
-                }
-            }
-            if overwritten.is_empty() {
-                break;
-            }
-            pending = overwritten;
-        }
+        self.cancel();
     }
 }
 
@@ -370,7 +274,7 @@ async fn run_search(
             }
         };
 
-        for (room_id, _score, event_id) in entries {
+        for (room_id, _timestamp, event_id) in entries {
             let Some(hit) = resolve_hit(
                 &client,
                 &ignored,
@@ -392,7 +296,7 @@ async fn run_search(
 
             if resolved_count >= MAX_SEARCH_RESULTS {
                 note = Some(format!(
-                    "Showing first {MAX_SEARCH_RESULTS} matches — refine your search"
+                    "Showing the newest {MAX_SEARCH_RESULTS} matches — refine your search"
                 ));
                 break 'outer;
             }
@@ -577,7 +481,7 @@ pub(super) async fn load_event_with_replacements(
     room: &Room,
     event_id: &EventId,
 ) -> Option<(TimelineEvent, Vec<TimelineEvent>)> {
-    if let Ok((cache, _drops)) = room.event_cache().await
+    if let Some((cache, _drops)) = super::cache::room(room).await
         && let Ok(Some((event, mut edits))) = cache
             .find_event_with_relations(event_id, Some(vec![RelationType::Replacement]))
             .await

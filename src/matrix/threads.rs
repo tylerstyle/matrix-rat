@@ -65,7 +65,9 @@ pub async fn open(room: &Room, root: &str) -> Result<Timeline> {
     let root_event_id = EventId::parse(root).map_err(|_| anyhow!("invalid event id"))?;
     room.timeline_builder()
         .with_internal_id_prefix(super::next_timeline_prefix())
-        .with_focus(TimelineFocus::Thread { root_event_id })
+        .with_focus(TimelineFocus::Thread {
+            thread_id: root_event_id,
+        })
         .track_read_marker_and_receipts(TimelineReadReceiptTracking::MessageLikeEvents)
         .build()
         .await
@@ -77,7 +79,8 @@ pub async fn open(room: &Room, root: &str) -> Result<Timeline> {
 /// previewed (the number of replies is the server's, and still counts it).
 pub fn summary(content: &MsgLikeContent, ignored: &HashSet<OwnedUserId>) -> Option<ThreadSummary> {
     let summary = content.thread_summary.as_ref()?;
-    // Every reply was deleted: nothing to announce.
+    // Every reply was deleted (matrix-sdk-ui 0.20 keeps the summary then, with no
+    // replies and no newest one): nothing to announce.
     if summary.num_replies == 0 {
         return None;
     }
@@ -415,7 +418,7 @@ async fn describe(
         root: root_id.to_string(),
         sender: short_name(room, &sender, names).await,
         text: first_message(&root),
-        replies: root.thread_summary.summary().map_or(0, |s| s.num_replies),
+        replies: root.thread_summary().map_or(0, |s| s.num_replies),
         mine: sender == own || participated(&root),
         ..ThreadInfo::default()
     };
@@ -555,6 +558,32 @@ mod tests {
         assert!(!marks.covers("room\n$other", "$two"));
     }
 
+    /// Since matrix-sdk-ui 0.20 a root whose replies were all deleted keeps a summary,
+    /// with no replies and no newest one: it shows no thread line. One whose newest
+    /// reply is not known (yet) shows its count alone.
+    #[test]
+    fn a_thread_without_replies_shows_no_line() {
+        let root = |num_replies| MsgLikeContent {
+            kind: MsgLikeKind::Redacted,
+            in_reply_to: None,
+            thread_root: None,
+            thread_summary: Some(matrix_sdk_ui::timeline::ThreadSummary {
+                latest_event: TimelineDetails::Unavailable,
+                num_replies,
+            }),
+        };
+        let ignored = HashSet::new();
+        assert!(summary(&root(0), &ignored).is_none());
+        let line = summary(&root(3), &ignored).expect("a thread line");
+        assert_eq!(line.replies, 3);
+        assert!(line.latest.is_none() && line.latest_sender.is_none());
+        let plain = MsgLikeContent {
+            thread_summary: None,
+            ..root(0)
+        };
+        assert!(summary(&plain, &ignored).is_none());
+    }
+
     #[test]
     fn summaries_are_marked_unread_and_hidden_inside_a_thread() {
         let root = |id: &str| Message {
@@ -664,7 +693,6 @@ mod tests {
             .send()
             .await
             .expect("login of the second user");
-        other.event_cache().subscribe().expect("event cache");
         other
             .sync_once(SyncSettings::default())
             .await

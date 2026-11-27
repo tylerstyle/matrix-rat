@@ -2178,11 +2178,22 @@ pub(super) mod tests {
         async fn finish(&mut self) -> Vec<SasEmoji> {
             let (mut a_emoji, mut b_emoji) = (Vec::new(), Vec::new());
             let (mut a_done, mut b_done) = (false, false);
+            // B gets signed by A and receives the private keys, without a restart. That
+            // news comes once (the status is sent when it changes), and nothing holds it
+            // back until this loop has seen A's Done: it is looked for from the start,
+            // so it cannot go by unseen.
+            let with_keys = |s: &Security| s.device == DeviceTrust::Verified && s.signing_keys;
+            let mut b_keys = false;
             let run = async {
                 while !(a_done && b_done) {
                     tokio::select! {
                         Some(event) = self.a_events.recv() => step(&self.a, event, &mut a_emoji, &mut a_done),
-                        Some(event) = self.b_events.recv() => step(&self.b, event, &mut b_emoji, &mut b_done),
+                        Some(event) = self.b_events.recv() => {
+                            if let MatrixEvent::Security(s) = &event {
+                                b_keys = with_keys(s);
+                            }
+                            step(&self.b, event, &mut b_emoji, &mut b_done);
+                        }
                     }
                 }
             };
@@ -2191,12 +2202,14 @@ pub(super) mod tests {
                 .expect("timed out during the verification");
             assert_eq!(a_emoji.len(), 7);
             assert_eq!(a_emoji, b_emoji, "both devices must show the same emoji");
-            // B gets signed by A and receives the private keys, without a restart.
-            wait_for(&mut self.b_events, "B verified with the keys", |e| {
-                matches!(e, MatrixEvent::Security(s)
-                    if s.device == DeviceTrust::Verified && s.signing_keys)
-            })
-            .await;
+            if !b_keys {
+                wait_for(
+                    &mut self.b_events,
+                    "B verified with the keys",
+                    |e| matches!(e, MatrixEvent::Security(s) if with_keys(s)),
+                )
+                .await;
+            }
             a_emoji
         }
 

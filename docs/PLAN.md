@@ -59,11 +59,12 @@ a real homeserver at 0.7.0; 1034 and 44 at 0.8.0; 1109 and 45 at 0.9.0; 1113 and
 1589 and 47 at 1.0.0; 1593 and 47 at 1.0.1 and 1.0.2; 1620 and 49 at 1.0.3, besides 12
 measurements that are run by hand).
 
-**Stack.** `matrix-sdk`, `matrix-sdk-ui` and `matrix-sdk-base` 0.19.1, pinned exactly (every minor
-release breaks APIs); `ratatui` 0.30 on `crossterm` 0.29; `tokio`; `ratatui-image` and `image` for
-pictures; `comrak` for Markdown; `syntect` (pure-Rust matcher) for code colours; `nucleo-matcher`
-for fuzzy search; `toml` and `toml_edit` for the config (comments survive a write-back); `zbus`
-and `notify-rust` for the desktop; `notify` for watching theme files; `insta` for snapshots.
+**Stack.** `matrix-sdk`, `matrix-sdk-ui` and `matrix-sdk-base` 0.20.0 (0.19.1 up to 1.0.3),
+pinned exactly (every minor release breaks APIs); `ratatui` 0.30 on `crossterm` 0.29; `tokio`;
+`ratatui-image` and `image` for pictures; `comrak` for Markdown; `syntect` (pure-Rust matcher)
+for code colours; `nucleo-matcher` for fuzzy search; `toml` and `toml_edit` for the config
+(comments survive a write-back); `zbus` and `notify-rust` for the desktop; `notify` for watching
+theme files; `insta` for snapshots.
 Rust 1.96 or newer.
 
 **The two halves.**
@@ -195,8 +196,8 @@ the dot. `--mobile` is dropped (§6.4). Building starts once all is talked throu
   to 2.5 days with tests; the largest: `Client::event_cache()` (and `latest_events()`) answer an
   `Option` and the cache is always on (~25 places), `Room::event_cache()` is gone, reactions
   move back to the event item. ruma 0.17 → 0.18, MSRV unchanged, all our features remain.
-  - It fixes the SQLite advisory of §7 (rusqlite 0.41 → libsqlite3-sys 0.39 bundles SQLite
-    3.54.0), and the cause our panic catch names (all caches cleared at the start with an
+  - It fixes the SQLite advisory of §7 (rusqlite 0.41 → libsqlite3-sys 0.39.1 bundles SQLite
+    3.54.1), and the cause our panic catch names (all caches cleared at the start with an
     ignore list, #7397); #5416 itself is not named, so the catch stays until it no longer
     happens on the dev homeserver.
   - **No way back:** the stores are migrated (the event cache is emptied once and fetched
@@ -204,8 +205,10 @@ the dot. `--mobile` is dropped (§6.4). Building starts once all is talked throu
     random 256-bit passphrase), and keys exported or backed up by 0.20 read differently on
     0.19.1. A profile used with 1.1.0 should not be opened with 1.0.x again; the release notes
     say so. Tested with a real 1.0.3 profile before release.
-  - Comes with it at no cost: after a kick or ban the room's keys are changed; a failed message
-    no longer stops a room's send queue (our `set_enabled(true)` after a retry goes); the read
+  - Comes with it at no cost: after a kick or ban the room's keys are changed; a message that
+    failed for good no longer turns the room's send queue off (it still holds back the ones
+    after it until it is retried or cancelled; our `set_enabled(true)` after a retry stays for
+    a failure the SDK takes as passing, a network error, which still turns it off); the read
     marker when the last read event is not shown (a reaction, an edit); smaller fixes. Room
     list order changes a little for rooms without messages.
 - **New with matrix-sdk 0.20, chosen by the user (2026-11-27)** for 1.1.0:
@@ -248,9 +251,9 @@ browser (WebAssembly) with [ratzilla](https://github.com/ratatui/ratzilla), rata
 backend, and installable on iOS and Android as a home-screen app (a PWA).
 
 - **What carries over:** drawing (`ui::draw`) and key handling (`App::on_key`) as they are.
-  matrix-sdk and matrix-sdk-ui 0.19.1 build for the browser (feature `js`; upstream CI checks
-  it) with the IndexedDB stores (state, crypto, event cache, media), as Element Web's
-  encryption does.
+  matrix-sdk and matrix-sdk-ui 0.19.1 (and 0.20.0) build for the browser (feature `js`;
+  upstream CI checks it) with the IndexedDB stores (state, crypto, event cache, media), as
+  Element Web's encryption does.
 - **What does not:** `serve`, `mcp`, the agent socket; `$EDITOR`, translate and summary
   commands; the local search index (`experimental-search`); mpv and voice recording; terminal
   graphics; D-Bus notifications and the keyring; files in the profile directory. Each gets a
@@ -388,17 +391,25 @@ backend, and installable on iOS and Android as a home-screen app (a PWA).
 - **The test homeserver** (continuwuity) sends only the text of a thread's newest reply, so the
   threads list shows no "who and when" there; and one test with two accounts waiting for a
   member count failed once in 120 runs, during a network interruption, unexplained.
-- `chrono` was declared unmaintained on 2026-11-17 (RUSTSEC-2026-0543; no known flaw). The
-  SDK uses it too, so it stays in the tree until the SDK moves; `cargo deny` is told so. Our
-  own use (a message's local time, fourteen places) can move to `jiff` or `time` then.
-- **The SQLite built into the release archives** (through matrix-sdk 0.19.1) is older than
-  3.54.0 and has a known flaw (RUSTSEC-2026-0459): opening a database whose `-wal` file has
-  another page size can hand out stale memory. It takes someone who can write into the
-  profile's private folder, who could read the store there anyway. The fix comes with the
-  next matrix-sdk; the Nix package links the system's SQLite (3.54.0 in nixos-unstable today)
-  and is not affected there.
-  Two more advisories only say "unmaintained" (anymap2, bincode 1), both deep in
-  dependencies.
+- `chrono` was declared unmaintained on 2026-11-17 (RUSTSEC-2026-0543; no known flaw).
+  matrix-sdk-ui moved to `jiff` with 0.20, but `oauth2` (through matrix-sdk) still uses it, so
+  it stays in the tree; `cargo deny` is told so. Our own use (a message's local time,
+  fourteen places) can move to `jiff`, which the SDK brings now.
+- **The SQLite built into the release archives** up to 1.0.3 (through matrix-sdk 0.19.1) is
+  older than 3.54.0 and has a known flaw (RUSTSEC-2026-0459): opening a database whose `-wal`
+  file has another page size can hand out stale memory. It takes someone who can write into
+  the profile's private folder, who could read the store there anyway. Fixed with 1.1.0:
+  matrix-sdk 0.20 takes rusqlite 0.41, whose libsqlite3-sys 0.39.1 bundles SQLite 3.54.1;
+  the `deny.toml` entry is gone. The Nix package links the system's SQLite, as before.
+  One more advisory only says "unmaintained" (bincode 1, through syntect); anymap2 left the
+  tree with matrix-sdk 0.20 (it took anymap3).
+- **Loading older messages can panic inside matrix-sdk** (matrix-rust-sdk #5416, "The chunk
+  is not found", still open; not named as fixed in 0.20.0): `matrix::paging::backwards`
+  makes it a failed load, clears the event caches at most every five minutes, and is the
+  only caller of `Timeline::paginate_backwards` (`clippy.toml`). The cause seen on the dev
+  homeserver with 0.19.1, all caches cleared at the start of every session of an account
+  with an ignore list, is gone with 0.20 (matrix-rust-sdk #7397); the catch stays until the
+  panic no longer shows on the dev homeserver for a while.
 - **The test homeserver's own fault**: continuwuity now and then answers a sync with an
   error ("pdu should have a shortstatehash"), in bursts, and a server-backed test that waits
   for something then times out (seen in the threads, people and media tests, on `main` as
@@ -407,11 +418,13 @@ backend, and installable on iOS and Android as a home-screen app (a PWA).
   messages of a flood stood twice, right after themselves, while sync still brought the newest
   ones. Archive and catch up count an event once. `matrix-agy` traced it to matrix-sdk-ui 0.19.1:
   a live timeline built while sync brings a batch gets that batch twice. The room view can show it
-  too; fixed on our side (`dup-block`, merged 2026-11-21). Upstream already fixed the race in
-  matrix-rust-sdk PR #7248 (merged 2026-10-09, in no release yet; 0.19.1 is the newest). Our fix
-  stays as a safety net when the SDK is updated: upstream `main` can still apply updates twice when
-  a timeline falls more than 32 updates behind (`RecvError::Lagged` reloads the events but keeps
-  the old receiver; checked 2026-11-21, reported as matrix-rust-sdk issue #7533).
+  too; fixed on our side (`dup-block`, merged 2026-11-21). matrix-sdk-ui 0.20.0 fixes the race
+  (PR #7284 in its changelog), and matrix-sdk 0.20.0 no longer sends a timeline's updates out
+  of order when sync, the send queue and paging from the store meet (#7468), another way to a
+  message twice. Our fix stays as a safety net: 0.20.0 can still apply updates twice when a
+  timeline falls more than 32 updates behind (`RecvError::Lagged` reloads the events but keeps
+  the old receiver; checked 2026-11-21 on `main` and again in the 0.20.0 source on 2026-11-27,
+  matrix-rust-sdk issue #7533, not named as fixed).
   Seen once more on 2026-11-23, in the same test on the 1.0.2 release commit: after a flood,
   three messages stood again after forty newer ones, and keeping the later copy in place made
   them the "newest". A server test that collects again and again while 1500 messages come in

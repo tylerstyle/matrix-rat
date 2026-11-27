@@ -23,7 +23,7 @@ cargo test -- --ignored --test-threads=1
 ```
 
 ## Key Rules & Safety
-- **Exact `matrix-sdk` pin**: `matrix-sdk` and `matrix-sdk-base` are pinned (`=0.19.1`) because minor releases break APIs; do not loosen carelessly.
+- **Exact `matrix-sdk` pin**: `matrix-sdk` and `matrix-sdk-base` are pinned (`=0.20.0`, with `matrix-sdk-ui`) because minor releases break APIs; do not loosen carelessly.
 - **No blocking calls in async code**: Respect `clippy.toml` bans on blocking calls without justification.
 - **No concurrent profile sharing**: Interactive `matrix-rat` and `matrix-rat serve` cannot share the same `--profile` simultaneously; stop `serve` before opening that profile interactively.
 - **Privacy & security**: Never log message content, secrets, IDs, paths, or raw error text in logs/`Debug` output. Never use `--allow-unverified` in agent MCP configs and never bind agents to direct chats.

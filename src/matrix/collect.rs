@@ -715,10 +715,12 @@ where
 
 /// `items` with each event once: matrix-sdk-ui 0.19.1 can hold an event in a live
 /// timeline twice (its builder reads the event cache a second time after subscribing to
-/// it, and what came in between is applied again; fixed upstream after 0.19.1, PR
-/// #7248). The repeated copy lands wherever the replayed update points, which can be
-/// after newer events (seen in the server test while a flood came in: three messages
-/// again after forty newer ones). So each event keeps its first copy's place, as the
+/// it, and what came in between is applied again; fixed in 0.20.0, PR #7284). Kept as a
+/// safety net: a timeline that falls behind its updates can still apply them twice
+/// (matrix-rust-sdk issue #7533, not named as fixed in 0.20.0). The repeated copy lands
+/// wherever the replayed update points, which can be after newer events (seen in the
+/// server test while a flood came in: three messages again after forty newer ones).
+/// So each event keeps its first copy's place, as the
 /// room view does (`super::convert::EventDedup`), with the content of its last copy,
 /// which the SDK's later updates (an edit, a decryption) reach; but a copy still
 /// `locked` never stands in for one that was decrypted (see
@@ -1031,7 +1033,7 @@ pub(super) mod probe {
             })
             .collect();
         let mut cache = Vec::new();
-        if let Ok((events, _drops)) = room.event_cache().await
+        if let Some((events, _drops)) = crate::matrix::cache::room(room).await
             && let Ok(events) = events.events().await
         {
             use matrix_sdk::ruma::events::{
@@ -2892,9 +2894,9 @@ mod tests {
     }
 
     /// While a flood comes in, each collection opens a timeline as sync brings more:
-    /// matrix-sdk-ui 0.19.1 can then hold messages twice, a copy even after newer ones
-    /// (see [`without_repeats`]). What is collected must still be each message once,
-    /// in the order sent.
+    /// matrix-sdk-ui 0.19.1 could then hold messages twice, a copy even after newer ones
+    /// (see [`without_repeats`], kept on 0.20.0 as a safety net). What is collected must
+    /// still be each message once, in the order sent.
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "needs a local homeserver"]
     async fn while_a_flood_comes_in_what_is_collected_is_in_order_and_once() {

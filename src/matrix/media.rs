@@ -423,7 +423,7 @@ async fn bounded_get(
     };
     let mut refreshed = false;
     let response = loop {
-        let mut request = client.http_client().get(url.clone());
+        let mut request = client.http_client().raw().get(url.clone());
         if authenticated && let Some(token) = client.access_token() {
             request = request.bearer_auth(token);
         }

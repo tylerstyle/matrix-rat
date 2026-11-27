@@ -223,6 +223,9 @@ pub enum UtdWhy {
     SenderDeviceUnknown,
     /// Not encrypted in a way this program understands.
     Unsupported,
+    /// Damaged or not built as it should be (the SDK's `UtdCause::Malformed`): no key
+    /// will help.
+    Malformed,
 }
 
 impl UtdWhy {
@@ -256,6 +259,7 @@ impl UtdWhy {
                 "Not decrypted: sent from a device that is unknown or was removed"
             }
             Self::Unsupported => "Unable to decrypt: unknown kind of encryption",
+            Self::Malformed => "Unable to decrypt: the message is malformed",
         }
     }
 
@@ -282,6 +286,7 @@ impl UtdWhy {
                 "Still not decrypted: the sender's device does not pass this device's checks."
             }
             Self::Unsupported => "This kind of encryption is not supported.",
+            Self::Malformed => "The message is malformed and cannot be decrypted.",
         }
     }
 }

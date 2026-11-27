@@ -19,7 +19,8 @@ disallowed-methods = [
     # Not a blocking ban like the others: it asks the terminal for the cursor position and
     # cannot read the answer while the event stream waits for input (see `terminal::clear`).
     { path = "ratatui::Terminal::clear", reason = "asks the terminal for the cursor; use `terminal::clear`" },
-    # Nor this: matrix-sdk 0.19.1 can panic in it (matrix-rust-sdk #5416), which ended the
-    # task that asked; `matrix::paging::backwards` makes that a failed load.
-    { path = "matrix_sdk_ui::timeline::Timeline::paginate_backwards", reason = "can panic in matrix-sdk 0.19.1 (#5416); use `paging::backwards`" },
+    # Nor this: matrix-sdk 0.19.1 and 0.20.0 can panic in it (matrix-rust-sdk #5416, not
+    # named as fixed in 0.20.0), which ended the task that asked;
+    # `matrix::paging::backwards` makes that a failed load.
+    { path = "matrix_sdk_ui::timeline::Timeline::paginate_backwards", reason = "can panic in matrix-sdk 0.19.1 and 0.20.0 (#5416); use `paging::backwards`" },
 ]

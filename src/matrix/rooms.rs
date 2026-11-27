@@ -1438,8 +1438,9 @@ impl Timelines {
                         .and_then(|event| event.local_echo_send_handle())
                         .ok_or_else(|| anyhow!("this message is no longer waiting"))?;
                     handle.unwedge().await.sdk()?;
-                    // The SDK stops a room's queue after any failure; nothing would
-                    // be tried again without this.
+                    // The SDK stops a room's queue after a failure it takes as
+                    // passing, such as a network error (since 0.20.0 no longer after
+                    // the others); nothing would be tried again without this.
                     timeline.room().send_queue().set_enabled(true);
                     Ok(())
                 })
@@ -3259,10 +3260,6 @@ mod tests {
             }))
             .await
             .unwrap();
-        // Subscribing before sync ensures `$root` is delivered to the room's event cache
-        // before `OpenThread` ever creates a `ThreadEventCache` for it — the race where
-        // the SDK's thread cache otherwise starts and stays empty until paginated.
-        client.event_cache().subscribe().unwrap();
         client.sync_once(SyncSettings::default()).await.unwrap();
 
         let left = LeftRooms::default();
@@ -3462,7 +3459,6 @@ mod tests {
             }))
             .await
             .unwrap();
-        client.event_cache().subscribe().unwrap();
         client.sync_once(SyncSettings::default()).await.unwrap();
 
         let (event_tx, _events) = tokio::sync::mpsc::unbounded_channel::<MatrixEvent>();
@@ -3594,7 +3590,6 @@ mod tests {
             }))
             .await
             .unwrap();
-        client.event_cache().subscribe().unwrap();
         client.sync_once(SyncSettings::default()).await.unwrap();
 
         let (mut timelines, mut events, _watches) =
@@ -3761,7 +3756,6 @@ mod tests {
             }))
             .await
             .unwrap();
-        client.event_cache().subscribe().unwrap();
         client.sync_once(SyncSettings::default()).await.unwrap();
         client
     }
@@ -4721,7 +4715,12 @@ mod tests {
         let shown_key = super::threads::key(shown, None);
         let before = [&kept_key, &shown_key].map(|key| timelines.cached(key).unwrap());
 
-        client.event_cache().clear_all_rooms().await.unwrap();
+        client
+            .event_cache()
+            .expect("the event cache is on")
+            .clear_all_rooms()
+            .await
+            .unwrap();
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 match events.recv().await {
@@ -5189,7 +5188,6 @@ mod tests {
             .send()
             .await
             .unwrap();
-        bob.event_cache().subscribe().unwrap();
         bob.sync_once(SyncSettings::default()).await.unwrap();
         let bob_id = bob.user_id().unwrap().to_owned();
         let bob_sync = tokio::spawn({

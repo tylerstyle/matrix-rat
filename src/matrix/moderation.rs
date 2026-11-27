@@ -306,7 +306,7 @@ async fn load_event(
 ) -> Option<CachedPinned> {
     let eid_str = eid.to_string();
     // Local EventCache reflects redactions and edits without network traffic.
-    if let Ok((event_cache, _drops)) = room.event_cache().await
+    if let Some((event_cache, _drops)) = super::cache::room(room).await
         && let Ok(Some((ev, mut edits))) = event_cache
             .find_event_with_relations(eid, Some(vec![RelationType::Replacement]))
             .await

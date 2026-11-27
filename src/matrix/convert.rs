@@ -81,10 +81,11 @@ fn read_marker(item: &TimelineItem, last: bool) -> Option<Message> {
 /// - its item. The SDK never changes one: an edit, a reaction, a read receipt, a
 ///   decryption, a send state, the details of the message replied to, a sender's
 ///   profile or a thread's summary each put a new `Arc<TimelineItem>` in its place
-///   (matrix-sdk-ui 0.19.1: `TimelineItem::with_kind`, `ObservableItems::replace`), and
-///   nothing in an item changes behind a shared reference. What was made is found by
-///   the address of the item and holds the item, so that no other item can be put at
-///   that address while it is kept: the same address is the same item, unchanged.
+///   (matrix-sdk-ui 0.19.1 and 0.20.0: `TimelineItem::with_kind`,
+///   `ObservableItems::replace`), and nothing in an item changes behind a shared
+///   reference. What was made is found by the address of the item and holds the item,
+///   so that no other item can be put at that address while it is kept: the same
+///   address is the same item, unchanged.
 /// - whose account it is, whom the user ignores (hidden senders, reaction counts,
 ///   votes, quoted replies), and today's date and the local time's offset ("Today",
 ///   "Yesterday", the time). These are the same for every message; when one of them
@@ -252,6 +253,7 @@ pub(super) fn utd_why(encrypted: &EncryptedMessage) -> UtdWhy {
         UtdCause::HistoricalMessageAndDeviceIsUnverified => UtdWhy::HistoryNeedsVerification,
         UtdCause::WithheldForUnverifiedOrInsecureDevice => UtdWhy::WithheldUnverified,
         UtdCause::WithheldBySender => UtdWhy::Withheld,
+        UtdCause::Malformed => UtdWhy::Malformed,
     }
 }
 
@@ -293,6 +295,10 @@ impl EventDedup {
     /// Works around a `matrix-sdk-ui 0.19.1` race in `TimelineBuilder::build()` where a
     /// live sync batch can be replayed on top of `event_cache.events()`, leaving a block
     /// of events in the timeline twice while later updates target the trailing copy.
+    /// Fixed in 0.20.0 (matrix-rust-sdk PR #7284, and #7468 for updates sent out of
+    /// order); kept as a safety net, since a timeline that falls behind its updates
+    /// (`RecvError::Lagged`) reloads its events but keeps the old receiver and can still
+    /// apply them twice (matrix-rust-sdk issue #7533, not named as fixed in 0.20.0).
     pub(super) fn dedup(&mut self, messages: &mut Vec<Message>) {
         if messages.len() < 2 {
             return;
@@ -610,8 +616,10 @@ pub(super) fn event_message(
     match event.content() {
         TimelineItemContent::MsgLike(content) => {
             message.thread = super::threads::summary(content, ignored);
-            message.reactions = content
-                .reactions
+            // Since matrix-sdk-ui 0.20 any event can carry reactions; they are shown
+            // under messages only, as before, and those on other events are left out.
+            message.reactions = event
+                .reactions()
                 .iter()
                 .filter_map(|(key, senders)| {
                     let count = senders
@@ -1154,7 +1162,7 @@ fn convert_poll_parts(
     disclosed: bool,
     max_selections: u64,
     raw_answers: Vec<(String, String)>,
-    votes_by_answer: &std::collections::HashMap<String, Vec<String>>,
+    votes_by_answer: &std::collections::HashMap<String, Vec<OwnedUserId>>,
     ended: bool,
     has_been_edited: bool,
     editable: bool,
@@ -1172,7 +1180,7 @@ fn convert_poll_parts(
             .collect()
     };
     let question = cut(raw_question);
-    let mut voters: HashSet<String> = HashSet::new();
+    let mut voters: HashSet<&UserId> = HashSet::new();
     let answers: Vec<crate::model::PollAnswer> = raw_answers
         .into_iter()
         .filter(|(id, _)| !id.is_empty() && id.len() <= ID_BYTES)
@@ -1182,16 +1190,14 @@ fn convert_poll_parts(
             let mut own_voted = false;
             if let Some(list) = votes_by_answer.get(&id) {
                 for uid in list {
-                    let is_ignored =
-                        <&UserId>::try_from(uid.as_str()).is_ok_and(|u| ignored.contains(u));
-                    if is_ignored {
+                    if ignored.contains(uid) {
                         continue;
                     }
                     votes = votes.saturating_add(1);
-                    if uid == own.as_str() {
+                    if uid == own {
                         own_voted = true;
                     }
-                    voters.insert(uid.clone());
+                    voters.insert(uid);
                 }
             }
             crate::model::PollAnswer {
@@ -1263,6 +1269,7 @@ mod tests {
                 UtdWhy::WithheldUnverified,
             ),
             (UtdCause::WithheldBySender, UtdWhy::Withheld),
+            (UtdCause::Malformed, UtdWhy::Malformed),
         ];
         let mut texts = HashSet::new();
         for (cause, why) in causes {
@@ -1585,13 +1592,13 @@ mod tests {
         use std::collections::HashMap;
 
         let own = owned_user_id!("@alice:example.org");
-        let bob = "@bob:example.org".to_owned();
+        let bob = owned_user_id!("@bob:example.org");
         let eve = owned_user_id!("@eve:example.org");
         let ignored = HashSet::from([eve.clone()]);
 
         let mut votes = HashMap::new();
-        votes.insert("a1".to_owned(), vec![own.to_string(), eve.to_string()]);
-        votes.insert("a2".to_owned(), vec![bob.clone(), eve.to_string()]);
+        votes.insert("a1".to_owned(), vec![own.clone(), eve.clone()]);
+        votes.insert("a2".to_owned(), vec![bob.clone(), eve.clone()]);
 
         let mut msg = Message {
             own: true,
