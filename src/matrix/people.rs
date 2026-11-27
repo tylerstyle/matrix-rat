@@ -1602,6 +1602,10 @@ mod tests {
     #[ignore = "needs a local homeserver"]
     async fn own_profile_room_name_avatar_and_user_info_sync() {
         use std::io::Cursor;
+        use std::panic::AssertUnwindSafe;
+
+        use futures::FutureExt;
+        use matrix_sdk::ruma::OwnedRoomId;
         use tokio::sync::mpsc::UnboundedReceiver;
 
         use crate::format::Outgoing;
@@ -1681,367 +1685,438 @@ mod tests {
         })
         .await;
 
-        let tag = std::process::id();
-        let global_name = format!("Alice People {tag}");
+        // What a failed run must still take down: its room, which would keep bob and us in it
+        // (later runs' shared-room look-ups would meet it, and past the bounded fallback
+        // they are incomplete).
+        let mut created: Option<String> = None;
+        let cleanup_login = (homeserver.clone(), username.clone(), password.clone());
+        let outcome = AssertUnwindSafe(async {
+            let tag = std::process::id();
+            let global_name = format!("Alice People {tag}");
 
-        // 1. Set global display name and verify sync + plain-client lookup.
-        handle.send(MatrixCmd::SetOwnDisplayName {
-            name: Some(global_name.clone()),
-        });
-        recv_until(&mut events, "set display name result", |e| match e {
-            MatrixEvent::OwnProfileResult {
-                what: OwnProfileAction::DisplayName,
-                result,
-            } => {
-                result.expect("set display name");
-                Some(())
-            }
-            _ => None,
-        })
-        .await;
-        recv_until(&mut events, "global display name synced", |e| match e {
-            MatrixEvent::OwnProfile(p) if p.display_name.as_deref() == Some(&global_name) => {
-                Some(())
-            }
-            _ => None,
-        })
-        .await;
-
-        // 2. Upload avatar picture, observe it from another account, then remove it.
-        let mut png_bytes = Vec::new();
-        crate::images::demo_picture(32, 20)
-            .write_to(&mut Cursor::new(&mut png_bytes), image::ImageFormat::Png)
-            .unwrap();
-        let avatar_path = root.join("avatar.png");
-        std::fs::write(&avatar_path, &png_bytes).unwrap();
-        handle.send(MatrixCmd::SetOwnAvatar { path: avatar_path });
-        recv_until(&mut events, "set avatar result", |e| match e {
-            MatrixEvent::OwnProfileResult {
-                what: OwnProfileAction::Avatar,
-                result,
-            } => {
-                result.expect("set avatar");
-                Some(())
-            }
-            _ => None,
-        })
-        .await;
-        let uploaded_avatar = recv_until(&mut events, "avatar mxc synced", |e| match e {
-            MatrixEvent::OwnProfile(p) => p.avatar,
-            _ => None,
-        })
-        .await;
-        let own_uid = UserId::parse(&own_id).unwrap();
-        let bob_seen = bob.account().fetch_user_profile_of(&own_uid).await.unwrap();
-        let (seen_name, seen_avatar) = extract_profile(&bob_seen);
-        assert_eq!(seen_name.as_deref(), Some(global_name.as_str()));
-        assert_eq!(seen_avatar.as_deref(), Some(uploaded_avatar.as_str()));
-
-        handle.send(MatrixCmd::RemoveOwnAvatar);
-        recv_until(&mut events, "remove avatar result", |e| match e {
-            MatrixEvent::OwnProfileResult {
-                what: OwnProfileAction::RemoveAvatar,
-                result,
-            } => {
-                result.expect("remove avatar");
-                Some(())
-            }
-            _ => None,
-        })
-        .await;
-        recv_until(&mut events, "avatar removal synced", |e| match e {
-            MatrixEvent::OwnProfile(p) if p.avatar.is_none() => Some(()),
-            _ => None,
-        })
-        .await;
-
-        // 3. Create a shared room, join Bob, test per-room display name + timeline live updates.
-        handle.send(MatrixCmd::Manage(ManageCmd::Create {
-            request: 1,
-            name: format!("matrix-rat people {tag}"),
-            topic: None,
-            alias: None,
-            encrypted: false,
-        }));
-        let room_id = recv_until(&mut events, "create room", |e| match e {
-            MatrixEvent::Manage(ManageEvent::Opened { request: 1, result }) => {
-                Some(result.unwrap())
-            }
-            _ => None,
-        })
-        .await;
-        handle.send(MatrixCmd::Manage(ManageCmd::Invite {
-            room_id: room_id.clone(),
-            user_id: bob_id.clone(),
-        }));
-        recv_until(&mut events, "invite bob", |e| match e {
-            MatrixEvent::Manage(ManageEvent::Done {
-                change: Change::Invite,
-                result,
-                ..
-            }) => {
-                result.expect("invite bob");
-                Some(())
-            }
-            _ => None,
-        })
-        .await;
-        let parsed_room = matrix_sdk::ruma::RoomId::parse(&room_id).unwrap();
-        bob.join_room_by_id(&parsed_room).await.unwrap();
-
-        // Wait until room details include Bob as joined.
-        loop {
-            handle.send(MatrixCmd::Manage(ManageCmd::Info {
-                room_id: room_id.clone(),
-            }));
-            let details = recv_until(&mut events, "room info poll bob", |e| match e {
-                MatrixEvent::Manage(ManageEvent::Info {
-                    room_id: r,
-                    result: Ok(d),
-                }) if r == room_id => Some(*d),
+            // 1. Set global display name and verify sync + plain-client lookup.
+            handle.send(MatrixCmd::SetOwnDisplayName {
+                name: Some(global_name.clone()),
+            });
+            recv_until(&mut events, "set display name result", |e| match e {
+                MatrixEvent::OwnProfileResult {
+                    what: OwnProfileAction::DisplayName,
+                    result,
+                } => {
+                    result.expect("set display name");
+                    Some(())
+                }
                 _ => None,
             })
             .await;
-            if details
-                .members
-                .iter()
-                .any(|m| m.user_id == bob_id && !m.invited)
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(150)).await;
-        }
+            recv_until(&mut events, "global display name synced", |e| match e {
+                MatrixEvent::OwnProfile(p) if p.display_name.as_deref() == Some(&global_name) => {
+                    Some(())
+                }
+                _ => None,
+            })
+            .await;
 
-        // Set per-room name, send message, open room timeline -> message shows per-room name.
-        let room_nick = format!("Alice Room {tag}");
-        handle.send(MatrixCmd::Manage(ManageCmd::SetOwnName {
-            room_id: room_id.clone(),
-            name: Some(room_nick.clone()),
-        }));
-        recv_until(&mut events, "set room own name", |e| match e {
-            MatrixEvent::Manage(ManageEvent::Done {
-                change: Change::OwnName,
-                result,
-                ..
-            }) => {
-                result.expect("set room own name");
-                Some(())
-            }
-            _ => None,
-        })
-        .await;
-        recv_until(&mut events, "room own name in OwnProfile", |e| match e {
-            MatrixEvent::OwnProfile(p)
-                if p.effective_display_name(Some(&room_id)) == Some(room_nick.as_str()) =>
-            {
-                Some(())
-            }
-            _ => None,
-        })
-        .await;
+            // 2. Upload avatar picture, observe it from another account, then remove it.
+            let mut png_bytes = Vec::new();
+            crate::images::demo_picture(32, 20)
+                .write_to(&mut Cursor::new(&mut png_bytes), image::ImageFormat::Png)
+                .unwrap();
+            let avatar_path = root.join("avatar.png");
+            std::fs::write(&avatar_path, &png_bytes).unwrap();
+            handle.send(MatrixCmd::SetOwnAvatar { path: avatar_path });
+            recv_until(&mut events, "set avatar result", |e| match e {
+                MatrixEvent::OwnProfileResult {
+                    what: OwnProfileAction::Avatar,
+                    result,
+                } => {
+                    result.expect("set avatar");
+                    Some(())
+                }
+                _ => None,
+            })
+            .await;
+            let uploaded_avatar = recv_until(&mut events, "avatar mxc synced", |e| match e {
+                MatrixEvent::OwnProfile(p) => p.avatar,
+                _ => None,
+            })
+            .await;
+            let own_uid = UserId::parse(&own_id).unwrap();
+            let bob_seen = bob.account().fetch_user_profile_of(&own_uid).await.unwrap();
+            let (seen_name, seen_avatar) = extract_profile(&bob_seen);
+            assert_eq!(seen_name.as_deref(), Some(global_name.as_str()));
+            assert_eq!(seen_avatar.as_deref(), Some(uploaded_avatar.as_str()));
 
-        handle.send(MatrixCmd::Manage(ManageCmd::Info {
-            room_id: room_id.clone(),
-        }));
-        let info = recv_until(&mut events, "room info after SetOwnName", |e| match e {
-            MatrixEvent::Manage(ManageEvent::Info {
-                room_id: r,
-                result: Ok(d),
-            }) if r == room_id && !d.members_loading => Some(*d),
-            _ => None,
-        })
-        .await;
-        assert_eq!(info.own_display_name.as_deref(), Some(room_nick.as_str()));
-        assert!(info.members.iter().any(|m| m.own && m.name == room_nick));
+            handle.send(MatrixCmd::RemoveOwnAvatar);
+            recv_until(&mut events, "remove avatar result", |e| match e {
+                MatrixEvent::OwnProfileResult {
+                    what: OwnProfileAction::RemoveAvatar,
+                    result,
+                } => {
+                    result.expect("remove avatar");
+                    Some(())
+                }
+                _ => None,
+            })
+            .await;
+            recv_until(&mut events, "avatar removal synced", |e| match e {
+                MatrixEvent::OwnProfile(p) if p.avatar.is_none() => Some(()),
+                _ => None,
+            })
+            .await;
 
-        handle.send(MatrixCmd::OpenRoom {
-            room_id: room_id.clone(),
-            generation: 1,
-        });
-        handle.send(MatrixCmd::Send {
-            room_id: room_id.clone(),
-            message: Outgoing::Text {
-                plain: "hi under room nick".into(),
-                html: None,
-                mentions: None,
-            },
-            reply_to: None,
-        });
-        recv_until(
-            &mut events,
-            "timeline message under room nick",
-            |e| match e {
-                MatrixEvent::Timeline {
-                    room_id: r,
-                    messages,
+            // 3. Create a shared room, join Bob, test per-room display name + timeline live updates.
+            handle.send(MatrixCmd::Manage(ManageCmd::Create {
+                request: 1,
+                name: format!("matrix-rat people {tag}"),
+                topic: None,
+                alias: None,
+                encrypted: false,
+            }));
+            let room_id = recv_until(&mut events, "create room", |e| match e {
+                MatrixEvent::Manage(ManageEvent::Opened { request: 1, result }) => {
+                    Some(result.unwrap())
+                }
+                _ => None,
+            })
+            .await;
+            created = Some(room_id.clone());
+            handle.send(MatrixCmd::Manage(ManageCmd::Invite {
+                room_id: room_id.clone(),
+                user_id: bob_id.clone(),
+            }));
+            recv_until(&mut events, "invite bob", |e| match e {
+                MatrixEvent::Manage(ManageEvent::Done {
+                    change: Change::Invite,
+                    result,
                     ..
-                } if r == room_id
-                    && messages.iter().any(|m| {
-                        m.own && m.body.contains("hi under room nick") && m.sender == room_nick
-                    }) =>
+                }) => {
+                    result.expect("invite bob");
+                    Some(())
+                }
+                _ => None,
+            })
+            .await;
+            let parsed_room = matrix_sdk::ruma::RoomId::parse(&room_id).unwrap();
+            bob.join_room_by_id(&parsed_room).await.unwrap();
+
+            // Wait until room details include Bob as joined.
+            loop {
+                handle.send(MatrixCmd::Manage(ManageCmd::Info {
+                    room_id: room_id.clone(),
+                }));
+                let details = recv_until(&mut events, "room info poll bob", |e| match e {
+                    MatrixEvent::Manage(ManageEvent::Info {
+                        room_id: r,
+                        result: Ok(d),
+                    }) if r == room_id => Some(*d),
+                    _ => None,
+                })
+                .await;
+                if details
+                    .members
+                    .iter()
+                    .any(|m| m.user_id == bob_id && !m.invited)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            }
+
+            // Set per-room name, send message, open room timeline -> message shows per-room name.
+            let room_nick = format!("Alice Room {tag}");
+            handle.send(MatrixCmd::Manage(ManageCmd::SetOwnName {
+                room_id: room_id.clone(),
+                name: Some(room_nick.clone()),
+            }));
+            recv_until(&mut events, "set room own name", |e| match e {
+                MatrixEvent::Manage(ManageEvent::Done {
+                    change: Change::OwnName,
+                    result,
+                    ..
+                }) => {
+                    result.expect("set room own name");
+                    Some(())
+                }
+                _ => None,
+            })
+            .await;
+            recv_until(&mut events, "room own name in OwnProfile", |e| match e {
+                MatrixEvent::OwnProfile(p)
+                    if p.effective_display_name(Some(&room_id)) == Some(room_nick.as_str()) =>
                 {
                     Some(())
                 }
                 _ => None,
-            },
-        )
-        .await;
+            })
+            .await;
 
-        // Clear per-room name -> timeline live-refreshes back to global display name.
-        handle.send(MatrixCmd::Manage(ManageCmd::SetOwnName {
-            room_id: room_id.clone(),
-            name: None,
-        }));
-        recv_until(&mut events, "clear room own name", |e| match e {
-            MatrixEvent::Manage(ManageEvent::Done {
-                change: Change::OwnName,
-                result,
-                ..
-            }) => {
-                result.expect("clear room own name");
-                Some(())
-            }
-            _ => None,
-        })
-        .await;
-        recv_until(
-            &mut events,
-            "timeline message reverted to global name",
-            |e| match e {
-                MatrixEvent::Timeline {
+            handle.send(MatrixCmd::Manage(ManageCmd::Info {
+                room_id: room_id.clone(),
+            }));
+            // Room info is a live view: an update worked out just before the name was set can
+            // still arrive after it; the next one has the name.
+            let info = recv_until(&mut events, "room info after SetOwnName", |e| match e {
+                MatrixEvent::Manage(ManageEvent::Info {
                     room_id: r,
-                    messages,
-                    ..
-                } if r == room_id
-                    && messages.iter().any(|m| {
-                        m.own && m.body.contains("hi under room nick") && m.sender == global_name
-                    }) =>
+                    result: Ok(d),
+                }) if r == room_id
+                    && !d.members_loading
+                    && d.own_display_name.as_deref() == Some(room_nick.as_str()) =>
                 {
+                    Some(*d)
+                }
+                _ => None,
+            })
+            .await;
+            assert!(info.members.iter().any(|m| m.own && m.name == room_nick));
+
+            handle.send(MatrixCmd::OpenRoom {
+                room_id: room_id.clone(),
+                generation: 1,
+            });
+            handle.send(MatrixCmd::Send {
+                room_id: room_id.clone(),
+                message: Outgoing::Text {
+                    plain: "hi under room nick".into(),
+                    html: None,
+                    mentions: None,
+                },
+                reply_to: None,
+            });
+            recv_until(
+                &mut events,
+                "timeline message under room nick",
+                |e| match e {
+                    MatrixEvent::Timeline {
+                        room_id: r,
+                        messages,
+                        ..
+                    } if r == room_id
+                        && messages.iter().any(|m| {
+                            m.own && m.body.contains("hi under room nick") && m.sender == room_nick
+                        }) =>
+                    {
+                        Some(())
+                    }
+                    _ => None,
+                },
+            )
+            .await;
+
+            // Clear per-room name -> timeline live-refreshes back to global display name.
+            handle.send(MatrixCmd::Manage(ManageCmd::SetOwnName {
+                room_id: room_id.clone(),
+                name: None,
+            }));
+            recv_until(&mut events, "clear room own name", |e| match e {
+                MatrixEvent::Manage(ManageEvent::Done {
+                    change: Change::OwnName,
+                    result,
+                    ..
+                }) => {
+                    result.expect("clear room own name");
                     Some(())
                 }
                 _ => None,
-            },
-        )
-        .await;
+            })
+            .await;
+            recv_until(
+                &mut events,
+                "timeline message reverted to global name",
+                |e| match e {
+                    MatrixEvent::Timeline {
+                        room_id: r,
+                        messages,
+                        ..
+                    } if r == room_id
+                        && messages.iter().any(|m| {
+                            m.own
+                                && m.body.contains("hi under room nick")
+                                && m.sender == global_name
+                        }) =>
+                    {
+                        Some(())
+                    }
+                    _ => None,
+                },
+            )
+            .await;
 
-        // 4. FetchUserProfile returns Bob's shared room + room member details.
-        handle.send(MatrixCmd::FetchUserProfile {
-            request: 42,
-            user_id: bob_id.clone(),
-            room_id: Some(room_id.clone()),
-        });
-        let profile = recv_until(&mut events, "fetch bob profile", |e| match e {
-            MatrixEvent::UserProfile {
+            // 4. FetchUserProfile returns Bob's shared room + room member details.
+            handle.send(MatrixCmd::FetchUserProfile {
                 request: 42,
-                result,
-            } => Some(result.unwrap()),
-            _ => None,
-        })
-        .await;
-        assert_eq!(profile.user_id, bob_id);
-        assert!(profile.shared_rooms.iter().any(|r| r.room_id == room_id));
-        assert!(
-            profile
-                .room_member
-                .as_ref()
-                .is_some_and(|m| m.user_id == bob_id)
-        );
-
-        // 5. Verify action initiates a cross-user verification request cleanly.
-        handle.send(MatrixCmd::Verification(VerifyCmd::RequestUser {
-            user_id: bob_id.clone(),
-        }));
-        let flow = recv_until(&mut events, "verification event for bob", |e| match e {
-            MatrixEvent::Verification(v) if !v.own && v.peer == bob_id => Some(v.flow),
-            _ => None,
-        })
-        .await;
-        handle.send(MatrixCmd::Verification(VerifyCmd::Answer {
-            flow,
-            answer: Answer::Cancel,
-        }));
-
-        // 6. Fresh session without opening the room still discovers shared_rooms via bounded fallback.
-        handle.send(MatrixCmd::Logout);
-        recv_until(&mut events, "logout session 1", |e| match e {
-            MatrixEvent::NeedLogin { .. } => Some(()),
-            _ => None,
-        })
-        .await;
-        handle.send(MatrixCmd::Shutdown);
-        while events.recv().await.is_some() {}
-
-        let paths2 = Paths {
-            config_dir: root.join("config2"),
-            data_dir: root.join("data2"),
-            log_dir: root.join("log2"),
-            runtime_dir: root.join("run2"),
-            profile: "it2".into(),
-        };
-        paths2.create_dirs().unwrap();
-        let (handle2, mut events2) = spawn(paths2);
-        handle2.send(MatrixCmd::LoginPassword {
-            homeserver,
-            username,
-            password: password.into(),
-        });
-        recv_until(&mut events2, "login session 2", |e| match e {
-            MatrixEvent::LoggedIn { .. } => Some(()),
-            _ => None,
-        })
-        .await;
-        recv_until(&mut events2, "room list sees shared room", |e| match e {
-            MatrixEvent::Rooms(rooms) if rooms.iter().any(|r| r.id == room_id) => Some(()),
-            _ => None,
-        })
-        .await;
-        handle2.send(MatrixCmd::FetchUserProfile {
-            request: 43,
-            user_id: bob_id.clone(),
-            room_id: None,
-        });
-        let profile2 = recv_until(
-            &mut events2,
-            "fetch bob profile in fresh session",
-            |e| match e {
+                user_id: bob_id.clone(),
+                room_id: Some(room_id.clone()),
+            });
+            let profile = recv_until(&mut events, "fetch bob profile", |e| match e {
                 MatrixEvent::UserProfile {
-                    request: 43,
+                    request: 42,
                     result,
                 } => Some(result.unwrap()),
                 _ => None,
-            },
-        )
-        .await;
-        assert!(profile2.shared_rooms.iter().any(|r| r.room_id == room_id));
+            })
+            .await;
+            assert_eq!(profile.user_id, bob_id);
+            assert!(profile.shared_rooms.iter().any(|r| r.room_id == room_id));
+            assert!(
+                profile
+                    .room_member
+                    .as_ref()
+                    .is_some_and(|m| m.user_id == bob_id)
+            );
 
-        // Clean up.
-        let _ = bob.get_room(&parsed_room).unwrap().leave().await;
-        let _ = bob.logout().await;
-        handle2.send(MatrixCmd::SetOwnDisplayName { name: None });
-        let _ = recv_until(&mut events2, "cleanup clear display name", |e| match e {
-            MatrixEvent::OwnProfileResult {
-                what: OwnProfileAction::DisplayName,
-                ..
-            } => Some(()),
-            _ => None,
+            // 5. Verify action initiates a cross-user verification request cleanly.
+            handle.send(MatrixCmd::Verification(VerifyCmd::RequestUser {
+                user_id: bob_id.clone(),
+            }));
+            let flow = recv_until(&mut events, "verification event for bob", |e| match e {
+                MatrixEvent::Verification(v) if !v.own && v.peer == bob_id => Some(v.flow),
+                _ => None,
+            })
+            .await;
+            handle.send(MatrixCmd::Verification(VerifyCmd::Answer {
+                flow,
+                answer: Answer::Cancel,
+            }));
+
+            // 6. Fresh session without opening the room still discovers shared_rooms via bounded fallback.
+            handle.send(MatrixCmd::Logout);
+            recv_until(&mut events, "logout session 1", |e| match e {
+                MatrixEvent::NeedLogin { .. } => Some(()),
+                _ => None,
+            })
+            .await;
+            handle.send(MatrixCmd::Shutdown);
+            while events.recv().await.is_some() {}
+
+            let paths2 = Paths {
+                config_dir: root.join("config2"),
+                data_dir: root.join("data2"),
+                log_dir: root.join("log2"),
+                runtime_dir: root.join("run2"),
+                profile: "it2".into(),
+            };
+            paths2.create_dirs().unwrap();
+            let (handle2, mut events2) = spawn(paths2);
+            handle2.send(MatrixCmd::LoginPassword {
+                homeserver,
+                username,
+                password: password.into(),
+            });
+            recv_until(&mut events2, "login session 2", |e| match e {
+                MatrixEvent::LoggedIn { .. } => Some(()),
+                _ => None,
+            })
+            .await;
+            recv_until(&mut events2, "room list sees shared room", |e| match e {
+                MatrixEvent::Rooms(rooms) if rooms.iter().any(|r| r.id == room_id) => Some(()),
+                _ => None,
+            })
+            .await;
+            // Each look-up checks at most SHARED_ROOM_MAX_SYNCS rooms whose members are not
+            // loaded and says when it stopped short; the rooms it checked keep their member
+            // lists, so asking again goes further. An account with more joined rooms than that
+            // (the test accounts collect them) needs a second or third ask.
+            // Each look-up checks at most SHARED_ROOM_MAX_SYNCS rooms whose members are not
+            // loaded and says when it stopped short; the rooms it checked keep their member
+            // lists, so asking again goes further. The test accounts collect joined rooms over
+            // runs, so a second or third ask can be needed.
+            let mut seen = Vec::new();
+            let mut found = false;
+            for request in 43..46 {
+                handle2.send(MatrixCmd::FetchUserProfile {
+                    request,
+                    user_id: bob_id.clone(),
+                    room_id: None,
+                });
+                let profile2 = recv_until(
+                    &mut events2,
+                    "fetch bob profile in fresh session",
+                    |e| match e {
+                        MatrixEvent::UserProfile { request: r, result } if r == request => {
+                            Some(result.unwrap())
+                        }
+                        _ => None,
+                    },
+                )
+                .await;
+                found = profile2.shared_rooms.iter().any(|r| r.room_id == room_id);
+                seen.push((
+                    profile2.shared_rooms.len(),
+                    profile2.shared_rooms_incomplete,
+                ));
+                if found || !profile2.shared_rooms_incomplete {
+                    break;
+                }
+            }
+            // Shown when the test fails: what each ask found (no ids).
+            assert!(
+                found,
+                "fresh session, (shared, incomplete) per ask: {seen:?}"
+            );
+
+            // Clean up.
+            let _ = bob.get_room(&parsed_room).unwrap().leave().await;
+            let _ = bob.logout().await;
+            handle2.send(MatrixCmd::SetOwnDisplayName { name: None });
+            let _ = recv_until(&mut events2, "cleanup clear display name", |e| match e {
+                MatrixEvent::OwnProfileResult {
+                    what: OwnProfileAction::DisplayName,
+                    ..
+                } => Some(()),
+                _ => None,
+            })
+            .await;
+            handle2.send(MatrixCmd::Manage(ManageCmd::Leave {
+                room_id: room_id.clone(),
+            }));
+            let _ = recv_until(&mut events2, "cleanup leave room", |e| match e {
+                MatrixEvent::Manage(_) => Some(()),
+                _ => None,
+            })
+            .await;
+            handle2.send(MatrixCmd::Logout);
+            recv_until(&mut events2, "cleanup logout", |e| match e {
+                MatrixEvent::NeedLogin { .. } => Some(()),
+                _ => None,
+            })
+            .await;
+            handle2.send(MatrixCmd::Shutdown);
+            while events2.recv().await.is_some() {}
         })
+        .catch_unwind()
         .await;
-        handle2.send(MatrixCmd::Manage(ManageCmd::Leave {
-            room_id: room_id.clone(),
-        }));
-        let _ = recv_until(&mut events2, "cleanup leave room", |e| match e {
-            MatrixEvent::Manage(_) => Some(()),
-            _ => None,
-        })
-        .await;
-        handle2.send(MatrixCmd::Logout);
-        recv_until(&mut events2, "cleanup logout", |e| match e {
-            MatrixEvent::NeedLogin { .. } => Some(()),
-            _ => None,
-        })
-        .await;
-        handle2.send(MatrixCmd::Shutdown);
-        while events2.recv().await.is_some() {}
+
+        if let Err(payload) = outcome {
+            if let Some(room_id) = created
+                .as_deref()
+                .and_then(|r| OwnedRoomId::try_from(r).ok())
+            {
+                if let Some(room) = bob.get_room(&room_id) {
+                    let _ = room.leave().await;
+                }
+                let (homeserver, username, password) = cleanup_login;
+                if let Ok(alice) = Client::builder().homeserver_url(&homeserver).build().await
+                    && alice
+                        .matrix_auth()
+                        .login_username(&username, &password)
+                        .initial_device_display_name("matrix-rat people test clean-up")
+                        .send()
+                        .await
+                        .is_ok()
+                {
+                    if let Ok(room) = alice.join_room_by_id(&room_id).await {
+                        let _ = room.leave().await;
+                        let _ = room.forget().await;
+                    }
+                    let _ = alice.logout().await;
+                }
+            }
+            let _ = bob.logout().await;
+            let _ = std::fs::remove_dir_all(&root);
+            std::panic::resume_unwind(payload);
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 }
