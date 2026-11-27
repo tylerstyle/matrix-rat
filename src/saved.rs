@@ -19,6 +19,7 @@ use crate::storage::{Aside, Key, Storage};
 /// read at every start and its rows are asked from the worker.
 pub const MAX_SAVED: usize = 500;
 /// A file larger than this is not ours.
+#[cfg(any(not(target_family = "wasm"), test))]
 pub(crate) const MAX_FILE_BYTES: u64 = 1024 * 1024;
 /// Matrix ids are at most 255 bytes.
 const MAX_ID_BYTES: usize = 255;

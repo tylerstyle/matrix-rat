@@ -48,6 +48,7 @@ impl Tool {
     }
 
     /// A program found by `"auto"`, with our own fixed arguments.
+    #[cfg(any(not(target_family = "wasm"), test))]
     fn known(program: PathBuf, args: &[&str]) -> Self {
         Self::new(program, args.iter().map(OsString::from).collect())
     }
@@ -78,6 +79,7 @@ pub enum Capture {
 
 /// The sound server a capture program records from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(not(target_family = "wasm"), test))]
 enum Server {
     PipeWire,
     Pulse,
@@ -113,6 +115,7 @@ impl Capture {
     /// What a capture program found by `"auto"` is started with: raw signed 16-bit
     /// mono sound at 48 kHz on its standard output, from the default microphone, and
     /// nothing said on the terminal.
+    #[cfg(any(not(target_family = "wasm"), test))]
     fn args(self) -> &'static [&'static str] {
         match self {
             // `s16` is the machine's byte order, which is little-endian wherever this
@@ -174,6 +177,7 @@ impl Capture {
         }
     }
 
+    #[cfg(any(not(target_family = "wasm"), test))]
     fn server(self) -> Option<Server> {
         match self {
             Capture::PwRecord => Some(Server::PipeWire),
@@ -203,6 +207,7 @@ impl Encoder {
 
     /// Raw sound as the capture programs write it on the standard input, Ogg/Opus at
     /// a bitrate fit for speech on the standard output.
+    #[cfg(any(not(target_family = "wasm"), test))]
     fn args(self) -> &'static [&'static str] {
         match self {
             Encoder::Opusenc => &[
@@ -256,6 +261,7 @@ impl Encoder {
 
 /// What of the machine's sound was seen, without running or opening anything.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg(any(not(target_family = "wasm"), test))]
 pub struct Seen {
     /// PipeWire's socket is in the runtime folder.
     pub pipewire: bool,
@@ -269,6 +275,7 @@ pub struct Seen {
     pub alsa_capture: bool,
 }
 
+#[cfg(any(not(target_family = "wasm"), test))]
 impl Seen {
     /// A microphone is plausible: a device that records, or a sound server elsewhere
     /// whose devices cannot be seen from here. Whether it really hears something
@@ -292,6 +299,7 @@ impl Seen {
 /// Whether `/proc/asound/pcm` lists a device that records. Its lines read
 /// `00-00: ALC256 Analog : ALC256 Analog : playback 1 : capture 1`: the device, its
 /// name twice, then how many streams it has each way.
+#[cfg(any(not(target_family = "wasm"), test))]
 fn lists_capture(pcm: &str) -> bool {
     pcm.lines().any(|line| {
         line.split(" : ").skip(2).any(|field| {
@@ -342,6 +350,7 @@ impl Recorder {
 /// Where the programs and the sound are looked for: plain values, so that tests name
 /// their own. The default is a machine with nothing on it.
 #[derive(Clone, Default, PartialEq, Eq)]
+#[cfg(any(not(target_family = "wasm"), test))]
 pub struct Env {
     /// The `PATH` variable.
     pub path: Option<OsString>,
@@ -353,6 +362,7 @@ pub struct Env {
 }
 
 /// Hand-written: the two variables name the user's folders.
+#[cfg(any(not(target_family = "wasm"), test))]
 impl fmt::Debug for Env {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Env")

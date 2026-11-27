@@ -344,6 +344,7 @@ impl Notes {
 /// The file's format; a file of another is not read.
 const FILE_VERSION: u32 = 1;
 /// The largest file read (by `FsStorage`): far more than `save` ever writes.
+#[cfg(any(not(target_family = "wasm"), test))]
 pub(crate) const MAX_FILE: u64 = 16 * 1024 * 1024;
 
 #[derive(Serialize)]

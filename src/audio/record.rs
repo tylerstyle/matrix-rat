@@ -34,22 +34,28 @@ use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedReceiver;
 
+#[cfg(any(not(target_family = "wasm"), test))]
+use super::MAX_AMPLITUDE;
+use super::TempAudio;
 use super::recorder::Tool;
-use super::{MAX_AMPLITUDE, TempAudio};
 
 #[cfg(not(target_family = "wasm"))]
 pub use run::run;
 
 /// Samples a second, of the sound between the two programs.
+#[cfg(any(not(target_family = "wasm"), test))]
 pub const RATE: u32 = 48_000;
 /// The loudest sample of each stretch this long is one value of the waveform, before
 /// it is thinned out: a twentieth of a second.
+#[cfg(any(not(target_family = "wasm"), test))]
 const WINDOW: u32 = RATE / 20;
 /// The most values of a waveform sent with a voice message.
+#[cfg(any(not(target_family = "wasm"), test))]
 pub const WAVE_VALUES: usize = 100;
 /// The waveform is drawn against the loudest moment of the recording, but never
 /// against less than this (of 32767): a recording of near silence is not blown up
 /// into a loud one.
+#[cfg(any(not(target_family = "wasm"), test))]
 const QUIET: u16 = 1024;
 /// The bounds of a recording.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,12 +187,14 @@ impl fmt::Debug for RecordRequest {
 
 /// Whether `bytes` begin as an Ogg stream of Opus does: a first page that holds the
 /// Opus header and nothing else.
+#[cfg(any(not(target_family = "wasm"), test))]
 fn is_ogg_opus(bytes: &[u8]) -> bool {
     // The page's header is 27 bytes and, for one packet, one more; then the packet.
     bytes.len() >= 36 && bytes.starts_with(b"OggS") && &bytes[28..36] == b"OpusHead"
 }
 
 /// Counts the sound that passes: how much, and how loud.
+#[cfg(any(not(target_family = "wasm"), test))]
 struct Meter {
     /// The first byte of a sample whose second has not come yet.
     half: Option<u8>,
@@ -202,6 +210,7 @@ struct Meter {
     loudest: u16,
 }
 
+#[cfg(any(not(target_family = "wasm"), test))]
 impl Meter {
     fn new(longest: Duration) -> Self {
         let limit = (longest.as_millis() as u64).saturating_mul(u64::from(RATE)) / 1000;
@@ -291,6 +300,7 @@ impl Meter {
 }
 
 /// `value` of `top`, as a waveform's value.
+#[cfg(any(not(target_family = "wasm"), test))]
 fn scaled(value: u16, top: u16) -> u16 {
     let part = u32::from(value) * u32::from(MAX_AMPLITUDE) / u32::from(top.max(1));
     part.min(u32::from(MAX_AMPLITUDE)) as u16

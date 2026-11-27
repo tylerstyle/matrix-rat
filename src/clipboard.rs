@@ -16,10 +16,12 @@
 #[cfg(not(target_family = "wasm"))]
 mod system;
 
+#[cfg(any(not(target_family = "wasm"), test))]
 use std::ffi::OsStr;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+#[cfg(any(not(target_family = "wasm"), test))]
 use image::ImageFormat;
 
 use crate::images::human_size;
@@ -39,6 +41,7 @@ pub enum Tool {
 
 impl Tool {
     /// The command that lists the kinds of content on offer, one per line.
+    #[cfg(any(not(target_family = "wasm"), test))]
     fn list(self) -> &'static [&'static str] {
         match self {
             Tool::WlPaste => &["wl-paste", "--list-types"],
@@ -48,6 +51,7 @@ impl Tool {
 
     /// The command that writes the content of one kind. `wl-paste` adds a line break to
     /// what it takes for text unless told not to.
+    #[cfg(any(not(target_family = "wasm"), test))]
     fn read(self, kind: Kind) -> Vec<&'static str> {
         match self {
             Tool::WlPaste => vec!["wl-paste", "--no-newline", "--type", kind.mime()],
@@ -66,6 +70,7 @@ impl Tool {
 
 /// The tools to try, in order, from what the environment says about the desktop.
 /// Wayland's first: under XWayland an X11 tool may not see what Wayland programs copied.
+#[cfg(any(not(target_family = "wasm"), test))]
 pub fn tools(wayland: Option<&OsStr>, x11: Option<&OsStr>) -> Vec<Tool> {
     let set = |value: Option<&OsStr>| value.is_some_and(|value| !value.is_empty());
     let mut tools = Vec::new();
@@ -80,6 +85,7 @@ pub fn tools(wayland: Option<&OsStr>, x11: Option<&OsStr>) -> Vec<Tool> {
 
 /// The kinds of picture that are asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(not(target_family = "wasm"), test))]
 enum Kind {
     Png,
     Jpeg,
@@ -87,6 +93,7 @@ enum Kind {
     Gif,
 }
 
+#[cfg(any(not(target_family = "wasm"), test))]
 impl Kind {
     /// In order of preference: a PNG is every pixel as it was copied.
     const PREFERRED: [Kind; 4] = [Kind::Png, Kind::Jpeg, Kind::Webp, Kind::Gif];
@@ -121,6 +128,7 @@ impl Kind {
 
 /// The kind of picture to ask for, from a tool's list of what is on offer: only whole
 /// lines that name one of ours count.
+#[cfg(any(not(target_family = "wasm"), test))]
 fn choose(list: &[u8]) -> Option<Kind> {
     let offered: Vec<&[u8]> = list
         .split(|byte| *byte == b'\n')
@@ -198,6 +206,7 @@ pub struct Done {
 
 /// What became of running a tool.
 #[derive(Clone, PartialEq, Eq)]
+#[cfg(any(not(target_family = "wasm"), test))]
 pub enum Ran {
     /// It ended well, having written this (no more than it was allowed).
     Output(Vec<u8>),
@@ -211,6 +220,7 @@ pub enum Ran {
     TimedOut,
 }
 
+#[cfg(any(not(target_family = "wasm"), test))]
 impl fmt::Debug for Ran {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -243,6 +253,7 @@ impl fmt::Debug for TempPicture {
 
 /// Whether `bytes` are a picture of `kind`: by its signature, then decoded whole with
 /// the bounds the timeline's pictures have (a few bytes can claim gigabytes of pixels).
+#[cfg(any(not(target_family = "wasm"), test))]
 fn check(bytes: &[u8], kind: Kind) -> Result<(), Failure> {
     if image::guess_format(bytes).ok() != Some(kind.format()) {
         return Err(Failure::NotAPicture);

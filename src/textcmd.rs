@@ -19,9 +19,13 @@
 #[cfg(not(target_family = "wasm"))]
 mod process;
 
-use std::ffi::{OsStr, OsString};
+#[cfg(any(not(target_family = "wasm"), test))]
+use std::ffi::OsStr;
+use std::ffi::OsString;
 use std::fmt;
-use std::path::{Path, PathBuf};
+#[cfg(any(not(target_family = "wasm"), test))]
+use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use tokio::sync::oneshot;
@@ -128,6 +132,7 @@ pub struct Done {
 
 /// Why a setting is no command to run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(not(target_family = "wasm"), test))]
 pub enum BadCommand {
     /// It could not be split into words (a quote left open), or is no command at all.
     Unreadable,
@@ -136,6 +141,7 @@ pub enum BadCommand {
 }
 
 /// `~/x` as a path in `home`; anything else as it is.
+#[cfg(any(not(target_family = "wasm"), test))]
 pub fn expand_home(text: &str, home: Option<&OsStr>) -> PathBuf {
     match (text.strip_prefix("~/"), home) {
         (Some(rest), Some(home)) => Path::new(home).join(rest),

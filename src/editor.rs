@@ -12,6 +12,7 @@
 mod run;
 
 use std::fmt;
+#[cfg(any(not(target_family = "wasm"), test))]
 use std::io;
 
 #[cfg(test)]
@@ -91,6 +92,7 @@ impl fmt::Debug for Outcome {
 /// What to do with the editor's result. A failure leaves the draft alone; so does a
 /// file that says what the draft said. A file that ended up empty replaces a draft
 /// that had text: deleting everything is a thing to want.
+#[cfg(any(not(target_family = "wasm"), test))]
 fn decide(before: &str, ran: io::Result<bool>, left: io::Result<Vec<u8>>) -> Outcome {
     match ran {
         Err(_) => return Outcome::Failed(Failure::Launch),
@@ -111,6 +113,7 @@ fn decide(before: &str, ran: io::Result<bool>, left: io::Result<Vec<u8>>) -> Out
 /// Unix line endings, no byte order mark, and no blank space at the end (editors end a
 /// file with a newline, which is not part of the message). Control characters are left
 /// to the composer, which drops them as it takes the text in.
+#[cfg(any(not(target_family = "wasm"), test))]
 fn normalise(text: &str) -> String {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     text.replace("\r\n", "\n")

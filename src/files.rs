@@ -66,6 +66,7 @@ use std::path::Path;
 pub use home::{display, resolve_dir};
 pub use write::{NewFile, write_new};
 
+#[cfg(any(not(target_family = "wasm"), test))]
 use crate::text::sanitize_line;
 
 /// Asked about once before a download this large starts.
@@ -73,6 +74,7 @@ pub const LARGE_FILE: u64 = 100 * 1000 * 1000;
 
 /// A file name that is safe to create inside the download folder. The name comes from
 /// whoever sent the file, so it may carry a path, control characters or a leading dot.
+#[cfg(any(not(target_family = "wasm"), test))]
 pub fn safe_name(name: &str) -> String {
     let cleaned = sanitize_line(name);
     let last = cleaned

@@ -70,6 +70,7 @@ impl JoinError {
     const PANICKED: Self = Self { panicked: true };
 
     /// It was aborted, or dropped before it ended.
+    #[cfg(any(not(target_family = "wasm"), test))]
     pub fn is_cancelled(&self) -> bool {
         !self.panicked
     }

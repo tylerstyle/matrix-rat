@@ -1,13 +1,18 @@
 //! Pictures in the app: fetching what the timeline shows, and the viewer.
 
+#[cfg(not(target_family = "wasm"))]
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use super::*;
+#[cfg(not(target_family = "wasm"))]
 use crate::images::{EncodeDone, Graphics, ImageStore};
 
 impl App {
     /// Sets up pictures for the real terminal. The receiver delivers viewer pictures
     /// that were prepared on another thread; pass them to [`App::on_image_encoded`].
+    /// The terminal's alone: the browser has no thread to encode on, and draws no
+    /// pictures into cells yet.
+    #[cfg(not(target_family = "wasm"))]
     pub(crate) fn start_images(&mut self, graphics: Graphics) -> UnboundedReceiver<EncodeDone> {
         let (sender, receiver) = unbounded_channel();
         self.images = ImageStore::new(graphics);
@@ -15,6 +20,7 @@ impl App {
         receiver
     }
 
+    #[cfg(not(target_family = "wasm"))]
     pub(crate) fn on_image_encoded(&mut self, done: EncodeDone) {
         self.images.on_encoded(done);
         self.dirty = true;

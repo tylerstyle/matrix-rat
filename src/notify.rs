@@ -9,25 +9,34 @@
 #[cfg(not(target_family = "wasm"))]
 mod send;
 
+#[cfg(any(not(target_family = "wasm"), test))]
 use std::io::Cursor;
 
+#[cfg(any(not(target_family = "wasm"), test))]
 use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
 use ratatui::style::Color;
 use serde::Deserialize;
 
 use crate::images::Pixels;
 use crate::matrix::Notice;
+#[cfg(any(not(target_family = "wasm"), test))]
 use crate::text::truncate;
 use crate::theme::{Role, Theme};
 
 #[cfg(not(target_family = "wasm"))]
 pub use send::{session_bus, set_app_icon, show, show_reminder};
 
+#[cfg(any(not(target_family = "wasm"), test))]
 pub const TILE_SIZE: u32 = 96;
+#[cfg(any(not(target_family = "wasm"), test))]
 const GLYPH_COLS: u32 = 5;
+#[cfg(any(not(target_family = "wasm"), test))]
 const GLYPH_ROWS: u32 = 7;
+#[cfg(any(not(target_family = "wasm"), test))]
 const GLYPH_SCALE: u32 = 10;
+#[cfg(any(not(target_family = "wasm"), test))]
 const GLYPH_ORIGIN_X: u32 = (TILE_SIZE - GLYPH_COLS * GLYPH_SCALE) / 2;
+#[cfg(any(not(target_family = "wasm"), test))]
 const GLYPH_ORIGIN_Y: u32 = (TILE_SIZE - GLYPH_ROWS * GLYPH_SCALE) / 2;
 
 /// Which icon desktop notifications name as the program's own. (A room's picture, where
@@ -69,6 +78,7 @@ impl NotifyMode {
 }
 
 /// Title and text as shown: "sender in room" for rooms, the person for direct chats.
+#[cfg(any(not(target_family = "wasm"), test))]
 pub fn title_and_text(notice: &Notice, preview: bool) -> (String, String) {
     // Without preview nothing of the conversation is shown: not the text, not who
     // wrote, not where.
@@ -90,6 +100,7 @@ pub fn title_and_text(notice: &Notice, preview: bool) -> (String, String) {
 
 /// Title and text of a reminder's notification (see `crate::saved`). The notice
 /// carries the message's sender and text only where they may be shown.
+#[cfg(any(not(target_family = "wasm"), test))]
 pub fn reminder_title_and_text(due: &DueReminder, preview: bool) -> (String, String) {
     let notice = &due.notice;
     // One for several names none of them, with or without preview.
@@ -171,6 +182,7 @@ pub fn tile_icon(theme: &Theme, room_name: &str) -> NotifyIcon {
 }
 
 /// Renders a crisp `96x96` colored letter tile using a built-in `5x7` bitmap font.
+#[cfg(any(not(target_family = "wasm"), test))]
 pub fn render_tile_image(ch: char, bg: [u8; 3], fg: [u8; 3]) -> DynamicImage {
     let rows = glyph_rows(ch);
     let bg_px = Rgb(bg);
@@ -195,6 +207,7 @@ pub fn render_tile_image(ch: char, bg: [u8; 3], fg: [u8; 3]) -> DynamicImage {
 /// What a click on a notification means: each notification carries its own, so that
 /// a click goes where that notification pointed, whatever was shown after it.
 #[derive(Clone, PartialEq, Eq)]
+#[cfg(any(not(target_family = "wasm"), test))]
 pub struct Click {
     /// The room to open. Empty for the notification of several reminders, which
     /// opens the list of saved messages.
@@ -204,12 +217,14 @@ pub struct Click {
 }
 
 /// Hand-written: no room and no message in logs.
+#[cfg(any(not(target_family = "wasm"), test))]
 impl std::fmt::Debug for Click {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Click(to a message: {})", self.event.is_some())
     }
 }
 
+#[cfg(any(not(target_family = "wasm"), test))]
 impl From<&str> for Click {
     fn from(room_id: &str) -> Self {
         Self {
@@ -238,8 +253,10 @@ impl std::fmt::Debug for DueReminder {
 }
 
 /// Where the clicks on notifications go: to the event loop.
+#[cfg(any(not(target_family = "wasm"), test))]
 pub type Clicks = tokio::sync::mpsc::UnboundedSender<Click>;
 
+#[cfg(any(not(target_family = "wasm"), test))]
 pub(crate) fn icon_cache_key(icon: &NotifyIcon) -> Option<Vec<u8>> {
     match icon {
         NotifyIcon::Generic => None,
@@ -260,6 +277,7 @@ pub(crate) fn icon_cache_key(icon: &NotifyIcon) -> Option<Vec<u8>> {
     }
 }
 
+#[cfg(any(not(target_family = "wasm"), test))]
 pub(crate) fn encode_icon_png(icon: &NotifyIcon) -> Result<Vec<u8>, image::ImageError> {
     let mut bytes = Vec::new();
     match icon {
@@ -275,6 +293,7 @@ pub(crate) fn encode_icon_png(icon: &NotifyIcon) -> Result<Vec<u8>, image::Image
     Ok(bytes)
 }
 
+#[cfg(any(not(target_family = "wasm"), test))]
 pub(crate) fn cache_filename(key: &[u8]) -> String {
     let mut hash: u128 = 0x6c62272e07bb014262b821756295c58d;
     for &b in key {
@@ -360,6 +379,7 @@ fn contrast_ratio(a: [u8; 3], b: [u8; 3]) -> f32 {
     (hi + 0.05) / (lo + 0.05)
 }
 
+#[cfg(any(not(target_family = "wasm"), test))]
 fn glyph_rows(ch: char) -> [u8; 7] {
     match ch {
         'A' => [
@@ -477,6 +497,7 @@ fn glyph_rows(ch: char) -> [u8; 7] {
 }
 
 /// Notification servers read the text as simple markup.
+#[cfg(any(not(target_family = "wasm"), test))]
 fn escape_markup(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -485,6 +506,7 @@ fn escape_markup(text: &str) -> String {
 
 /// OSC 99 (kitty's protocol, with title and text) or the older OSC 9 (one line).
 /// The text is from other people: nothing that could end the sequence may be in it.
+#[cfg(any(not(target_family = "wasm"), test))]
 fn terminal_sequence(title: &str, text: &str, kitty: bool, id: u32) -> String {
     let clean = |s: &str| -> String {
         crate::text::sanitize_line(s)

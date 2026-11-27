@@ -71,6 +71,13 @@ pub struct ActiveSession {
     pub target: ReauthTarget,
 }
 
+#[cfg_attr(
+    target_family = "wasm",
+    expect(
+        dead_code,
+        reason = "the browser restores no session before phase 2: only NoSession is made"
+    )
+)]
 pub enum RestoreOutcome {
     /// No `session.json` exists yet.
     NoSession,

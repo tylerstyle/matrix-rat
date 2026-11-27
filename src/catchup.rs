@@ -21,10 +21,12 @@ mod process;
 
 use std::fmt;
 use std::path::PathBuf;
+#[cfg(any(not(target_family = "wasm"), test))]
 use std::time::Duration;
 
 use tokio::sync::oneshot;
 
+#[cfg(any(not(target_family = "wasm"), test))]
 use crate::text::sanitize;
 
 #[cfg(test)]
@@ -33,11 +35,15 @@ pub use process::choose;
 pub use process::{choose_here, run};
 
 /// How long the command may take.
+#[cfg(any(not(target_family = "wasm"), test))]
 pub const TIME_LIMIT: Duration = Duration::from_secs(180);
 /// The most the command may say, in bytes; beyond that it is stopped.
+#[cfg(any(not(target_family = "wasm"), test))]
 pub const OUTPUT_MAX: usize = 64 * 1024;
 /// The most of a summary that is shown, in characters and in lines.
+#[cfg(any(not(target_family = "wasm"), test))]
 pub const SHOWN_CHARS: usize = 8000;
+#[cfg(any(not(target_family = "wasm"), test))]
 pub const SHOWN_LINES: usize = 200;
 
 /// The user's command for summaries, ready to start.
@@ -183,6 +189,7 @@ pub struct Done {
 /// What a command said, as text that is safe to show: no control characters, no
 /// more than [`SHOWN_LINES`] lines and [`SHOWN_CHARS`] characters (a last line says
 /// when it was cut). `None` if nothing is left.
+#[cfg(any(not(target_family = "wasm"), test))]
 pub fn clean(output: &[u8]) -> Option<String> {
     let text = sanitize(&String::from_utf8_lossy(output));
     let text = text.trim();

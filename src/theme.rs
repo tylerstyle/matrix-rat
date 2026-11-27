@@ -46,6 +46,7 @@ const BUILTIN: &[(&str, &str)] = &[
 pub const DEFAULT_THEME: &str = "rat-dark";
 
 /// Templates for theme generators, by the name used on the command line.
+#[cfg(any(not(target_family = "wasm"), test))]
 pub const TEMPLATES: &[(&str, &str)] = &[
     ("noctalia", include_str!("../contrib/themes/noctalia.toml")),
     ("matugen", include_str!("../contrib/themes/noctalia.toml")),
@@ -740,11 +741,13 @@ pub enum ColorScheme {
 
 /// True when the user asked programs not to use colour: `NO_COLOR` set to anything but
 /// nothing (https://no-color.org).
+#[cfg(any(not(target_family = "wasm"), test))]
 pub fn no_color_wanted() -> bool {
     std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty())
 }
 
 /// True when the terminal advertises 24-bit colour.
+#[cfg(any(not(target_family = "wasm"), test))]
 pub fn truecolor_supported() -> bool {
     std::env::var("COLORTERM").is_ok_and(|v| v.contains("truecolor") || v.contains("24bit"))
 }

@@ -8,8 +8,10 @@ mod system;
 
 use std::path::PathBuf;
 
+#[cfg(any(not(target_family = "wasm"), test))]
 use anyhow::{Result, bail};
 
+#[cfg(any(not(target_family = "wasm"), test))]
 const APP: &str = "matrix-rat";
 
 #[derive(Clone)]
@@ -94,6 +96,7 @@ impl Paths {
 }
 
 /// Profiles become directory names, so keep them to a safe character set.
+#[cfg(any(not(target_family = "wasm"), test))]
 fn validate_profile(profile: &str) -> Result<()> {
     let ok = !profile.is_empty()
         && profile.len() <= 64

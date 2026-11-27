@@ -24,7 +24,9 @@ use crate::model::MediaRef;
 
 #[cfg(not(target_family = "wasm"))]
 pub(crate) use detect::{in_multiplexer, placeholders_broken};
-pub use store::{EncodeDone, Encoded, ImageStore, ViewerContent};
+#[cfg(not(target_family = "wasm"))]
+pub use store::EncodeDone;
+pub use store::{Encoded, ImageStore, ViewerContent};
 
 /// The largest picture drawn between messages, in cells.
 pub const MAX_COLS: u16 = 40;

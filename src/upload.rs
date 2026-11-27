@@ -47,12 +47,19 @@ mod disk {
     }
 }
 
+#[cfg(any(not(target_family = "wasm"), test))]
 use std::io::Cursor;
-use std::path::{Path, PathBuf};
+#[cfg(any(not(target_family = "wasm"), test))]
+use std::path::Path;
+use std::path::PathBuf;
 
+#[cfg(any(not(target_family = "wasm"), test))]
 use image::{DynamicImage, ImageDecoder, ImageReader, Limits};
 
-use crate::images::{MAX_DECODE_ALLOC, MAX_DECODE_SIDE, human_size};
+use crate::images::human_size;
+#[cfg(any(not(target_family = "wasm"), test))]
+use crate::images::{MAX_DECODE_ALLOC, MAX_DECODE_SIDE};
+#[cfg(any(not(target_family = "wasm"), test))]
 use crate::text::sanitize_line;
 
 pub use disk::{check, command_files, complete, dropped_files, prepare, prepare_as};
@@ -61,6 +68,7 @@ pub use disk::{check, command_files, complete, dropped_files, prepare, prepare_a
 /// passes through memory.
 pub const FALLBACK_LIMIT: u64 = crate::files::LARGE_FILE;
 /// The box a picture's small version fits into, as other Matrix apps make them.
+#[cfg(any(not(target_family = "wasm"), test))]
 const THUMBNAIL: (u32, u32) = (800, 600);
 
 /// A file the user picked, as shown in the composer before it is sent.
@@ -79,6 +87,7 @@ impl std::fmt::Debug for Chosen {
     }
 }
 
+#[cfg(any(not(target_family = "wasm"), test))]
 fn display_name(path: &Path) -> String {
     let name = path
         .file_name()
@@ -91,6 +100,7 @@ fn display_name(path: &Path) -> String {
     }
 }
 
+#[cfg(any(not(target_family = "wasm"), test))]
 fn unreadable(name: &str, err: &std::io::Error) -> String {
     use std::io::ErrorKind::{NotFound, PermissionDenied};
     #[expect(clippy::wildcard_enum_match_arm, reason = "foreign std::io::ErrorKind")]
@@ -122,6 +132,7 @@ pub fn too_large(name: &str, size: u64, limit: Option<u64>) -> Option<String> {
 
 /// Splits like a shell would: quotes group, a backslash takes the next character
 /// literally. `None` for an unfinished quote.
+#[cfg(any(not(target_family = "wasm"), test))]
 fn shell_words(text: &str) -> Option<Vec<String>> {
     let mut words = Vec::new();
     let mut word = String::new();
@@ -238,6 +249,7 @@ pub struct Thumbnail {
 
 /// `None` for anything this app cannot read as a picture; it is then sent as a file
 /// of its type like any other.
+#[cfg(any(not(target_family = "wasm"), test))]
 fn picture(bytes: &[u8], format: image::ImageFormat) -> Option<Picture> {
     use image::metadata::Orientation::{Rotate90, Rotate90FlipH, Rotate270, Rotate270FlipH};
     // The same bounds as for pictures that are shown: beyond them a picture is sent
@@ -310,6 +322,7 @@ fn picture(bytes: &[u8], format: image::ImageFormat) -> Option<Picture> {
 }
 
 /// Types by the end of the file name, in alphabetical order (it is searched by halving).
+#[cfg(any(not(target_family = "wasm"), test))]
 const BY_EXTENSION: &[(&str, &str)] = &[
     ("7z", "application/x-7z-compressed"),
     ("aac", "audio/aac"),
@@ -377,6 +390,7 @@ const BY_EXTENSION: &[(&str, &str)] = &[
 
 /// The type of a file that is not a picture this app can read: by its name, else by
 /// whether it looks like text.
+#[cfg(any(not(target_family = "wasm"), test))]
 fn mime_type(name: &str, bytes: &[u8]) -> &'static str {
     let extension = Path::new(name)
         .extension()

@@ -29,6 +29,13 @@ use crate::text::{first_line, sanitize_line, truncate};
 
 /// Replies in threads are shown in their thread only, so they must not count as
 /// unread messages of the room either.
+#[cfg_attr(
+    target_family = "wasm",
+    expect(
+        dead_code,
+        reason = "the browser builds its client in phase 2, with this"
+    )
+)]
 pub const SUPPORT: ThreadingSupport = ThreadingSupport::Enabled {
     with_subscriptions: false,
 };

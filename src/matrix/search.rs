@@ -4,13 +4,18 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::Path;
 
+#[cfg(any(not(target_family = "wasm"), test))]
 use chrono::{DateTime, Local};
 #[cfg(not(target_family = "wasm"))]
 use futures::StreamExt;
+#[cfg(any(not(target_family = "wasm"), test))]
+use matrix_sdk::RoomState;
 use matrix_sdk::deserialized_responses::TimelineEvent;
 #[cfg(not(target_family = "wasm"))]
 use matrix_sdk::event_cache::RedecryptorReport;
 use matrix_sdk::event_cache::RoomEventCache;
+#[cfg(any(not(target_family = "wasm"), test))]
+use matrix_sdk::ruma::OwnedEventId;
 use matrix_sdk::ruma::events::relation::RelationType;
 use matrix_sdk::ruma::events::room::encrypted::OriginalSyncRoomEncryptedEvent;
 use matrix_sdk::ruma::events::room::message::{
@@ -19,19 +24,25 @@ use matrix_sdk::ruma::events::room::message::{
 use matrix_sdk::ruma::events::{
     AnySyncMessageLikeEvent, AnySyncTimelineEvent, OriginalSyncMessageLikeEvent,
 };
-use matrix_sdk::ruma::{EventId, OwnedEventId, OwnedRoomId, OwnedUserId, RoomId, UserId};
-use matrix_sdk::{Client, Room, RoomState};
+use matrix_sdk::ruma::{EventId, OwnedRoomId, OwnedUserId, RoomId, UserId};
+use matrix_sdk::{Client, Room};
 use matrix_sdk_base::event_cache::store::EventCacheStoreLockState;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::watch;
 use unicode_segmentation::UnicodeSegmentation;
 
+use super::MatrixEvent;
+#[cfg(any(not(target_family = "wasm"), test))]
+use super::convert;
 use super::left::LeftRooms;
-use super::safety::{IgnoredSet, is_ignored_in};
-use super::{MatrixEvent, convert};
+use super::safety::IgnoredSet;
+#[cfg(any(not(target_family = "wasm"), test))]
+use super::safety::is_ignored_in;
 use crate::rt::{self, JoinHandle};
 
+#[cfg(any(not(target_family = "wasm"), test))]
 const SEARCH_BATCH_SIZE: usize = 16;
+#[cfg(any(not(target_family = "wasm"), test))]
 const MAX_SEARCH_RESULTS: usize = 200;
 const MAX_SNIPPET_CHARS: usize = 400;
 
@@ -428,6 +439,7 @@ async fn run_search(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(not(target_family = "wasm"), test))]
 async fn resolve_hit(
     client: &Client,
     ignored: &watch::Receiver<IgnoredSet>,
@@ -498,6 +510,7 @@ async fn resolve_hit(
     })
 }
 
+#[cfg(any(not(target_family = "wasm"), test))]
 fn replacement_target(event: &TimelineEvent) -> Option<OwnedEventId> {
     let Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(msg))) =
         event.raw().deserialize()
@@ -511,6 +524,7 @@ fn replacement_target(event: &TimelineEvent) -> Option<OwnedEventId> {
     }
 }
 
+#[cfg(any(not(target_family = "wasm"), test))]
 fn extract_thread_root(event: &TimelineEvent) -> Option<String> {
     let Ok(AnySyncTimelineEvent::MessageLike(msg)) = event.raw().deserialize() else {
         return None;
@@ -525,6 +539,7 @@ fn extract_thread_root(event: &TimelineEvent) -> Option<String> {
     thread_root_from_raw(event.raw().json().get())
 }
 
+#[cfg(any(not(target_family = "wasm"), test))]
 fn thread_root_from_raw(raw_json: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(raw_json).ok()?;
     let rel = value.get("content")?.get("m.relates_to")?;
@@ -669,6 +684,7 @@ pub(super) fn bundled_replacement(
     }
 }
 
+#[cfg(any(not(target_family = "wasm"), test))]
 async fn cached_room_name(room: &Room, cache: &mut HashMap<OwnedRoomId, String>) -> String {
     let id = room.room_id().to_owned();
     if let Some(name) = cache.get(&id) {
@@ -720,6 +736,7 @@ pub(super) async fn member_name(room: &Room, user_id: &UserId) -> String {
 
 /// Strips Tantivy query-parser syntax punctuation so partial quotes, parentheses, or URL
 /// colons still work as plain-term queries when the strict parser rejects them.
+#[cfg(any(not(target_family = "wasm"), test))]
 pub(crate) fn sanitize_query(query: &str) -> String {
     let mut out = String::with_capacity(query.len());
     let mut prev_space = true;

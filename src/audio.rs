@@ -312,6 +312,7 @@ impl TempAudio {
 
 /// The ending of a file of the stated type: one of a fixed few, `audio` for anything
 /// else. The players look at what is in the file, not at its name.
+#[cfg(any(not(target_family = "wasm"), test))]
 fn extension(mime: Option<&str>) -> &'static str {
     let essence = mime
         .and_then(|mime| mime.split(';').next())

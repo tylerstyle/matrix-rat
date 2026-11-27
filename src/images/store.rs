@@ -57,6 +57,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 const RETRY_FIRST: Duration = Duration::from_secs(60);
 const RETRY_MAX: Duration = Duration::from_secs(30 * 60);
 /// Above this many pixels a kitty transmission is compressed, if the terminal can.
+#[cfg(any(not(target_family = "wasm"), test))]
 const COMPRESS_ABOVE: u32 = 512 * 512;
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -310,6 +311,13 @@ pub enum ViewerContent<'a> {
 }
 
 /// A viewer encoding finished on another thread.
+#[cfg_attr(
+    target_family = "wasm",
+    expect(
+        dead_code,
+        reason = "the browser has no thread to encode on (App::start_images is the terminal's)"
+    )
+)]
 pub struct EncodeDone {
     key: String,
     size: (u16, u16),
@@ -469,6 +477,7 @@ impl ImageStore {
     }
 
     /// Viewer encodings are then done on a thread and delivered through `sender`.
+    #[cfg(any(not(target_family = "wasm"), test))]
     pub fn set_encoder(&mut self, sender: UnboundedSender<EncodeDone>) {
         self.encoder = Some(sender);
     }
@@ -1368,6 +1377,7 @@ impl ImageStore {
     }
 
     /// An encoding for the viewer arrived from its thread.
+    #[cfg(any(not(target_family = "wasm"), test))]
     pub fn on_encoded(&mut self, done: EncodeDone) {
         match self.viewer.as_mut() {
             Some(viewer) if viewer.info.key == done.key && viewer.encoding == Some(done.size) => {
