@@ -8,7 +8,8 @@ use crate::matrix::{
     VerifyStage, VerifyUpdate,
 };
 use crate::modal::{Modal, RecoveryForm};
-use crate::verify::{Button, PopupKind, VerifyPopup, stuck};
+use crate::time::Instant;
+use crate::verify::{Button, PopupKind, VerifyPopup, keys_missing, stuck};
 
 impl App {
     /// The verification popup is showing the running verification.
@@ -49,6 +50,10 @@ impl App {
         let security = self.verify.security.unwrap_or_default();
         match (security.identity, security.device) {
             (Identity::Missing, _) => self.open_modal(Modal::Verify(VerifyPopup::set_up())),
+            // Verified, but the signing keys did not come: the ways to get them.
+            _ if keys_missing(&security) => {
+                self.open_modal(Modal::Verify(VerifyPopup::keys_missing()));
+            }
             (_, DeviceTrust::Verified) => self.open_modal(Modal::Verify(VerifyPopup::status())),
             // Nothing can vouch for this device: explain instead of asking nobody.
             _ if stuck(&security) => self.open_modal(Modal::Verify(VerifyPopup::status())),
@@ -102,9 +107,7 @@ impl App {
                 command
             }
             Button::Close => {
-                if self.verify.active().is_none() {
-                    self.verify.flow = None;
-                }
+                self.forget_finished_flow();
                 self.close_verify_popup();
                 None
             }
@@ -116,6 +119,19 @@ impl App {
                 None
             }
             Button::SetUp => self.submit_set_up(),
+            // This device lacks the signing keys: a new verification brings them.
+            Button::VerifyAgain => {
+                self.forget_finished_flow();
+                self.close_verify_popup();
+                self.verify.dismissed = None;
+                Some(MatrixCmd::Verification(VerifyCmd::Request))
+            }
+            // So does the recovery key.
+            Button::RecoveryKey => {
+                self.forget_finished_flow();
+                self.open_modal(Modal::Recovery(RecoveryForm::default()));
+                None
+            }
         };
         if let Some(command) = send {
             self.send_matrix(command);
@@ -139,6 +155,13 @@ impl App {
         popup.password_error = None;
         self.verify.setting_up = true;
         Some(MatrixCmd::Verification(VerifyCmd::SetUp { password }))
+    }
+
+    /// The popup leaves a verification that is over: it is not shown again.
+    fn forget_finished_flow(&mut self) {
+        if self.verify.active().is_none() {
+            self.verify.flow = None;
+        }
     }
 
     fn close_verify_popup(&mut self) {
@@ -213,8 +236,9 @@ impl App {
     }
 
     /// Called a few times a second: opens a request that waited for the user to stop
-    /// typing.
+    /// typing, and redraws once when the signing keys have not come in time.
     pub(super) fn verify_tick(&mut self) {
+        self.keys_tick(Instant::now());
         if !self.verify.deferred {
             return;
         }
@@ -224,6 +248,26 @@ impl App {
             self.verify.deferred = false;
             self.open_modal(Modal::Verify(VerifyPopup::flow()));
             self.dirty = true;
+        }
+    }
+
+    /// When the grace time after this device's verification is over and the signing
+    /// keys are still missing, the status line and the Done screen say so: they are
+    /// redrawn now, with nothing else happening. Once per verification.
+    fn keys_tick(&mut self, now: Instant) {
+        if self.verify.keys_warned
+            || self.verify.done_at.is_none()
+            || !self.verify.keys_missing(now)
+        {
+            return;
+        }
+        self.verify.keys_warned = true;
+        self.dirty = true;
+        if let Some(Modal::Verify(popup)) = &mut self.modal
+            && popup.kind == PopupKind::Flow
+        {
+            // The Done screen gets buttons: a moment before they count.
+            popup.rearm();
         }
     }
 
@@ -252,6 +296,14 @@ impl App {
         {
             self.modal = None;
         }
+        // The keys came: what is left to show is the status.
+        if !keys_missing(&security)
+            && let Some(Modal::Verify(popup)) = &mut self.modal
+            && popup.kind == PopupKind::KeysMissing
+        {
+            popup.kind = PopupKind::Status;
+            popup.rearm();
+        }
     }
 
     pub(super) fn on_verification(&mut self, update: VerifyUpdate) {
@@ -263,6 +315,15 @@ impl App {
         }
         self.verify.newest = update.flow;
         let same_flow = self.verify.flow.as_ref().map(|f| f.flow) == Some(update.flow);
+        if !same_flow {
+            self.verify.done_at = None;
+            self.verify.keys_warned = false;
+        }
+        if update.stage == VerifyStage::Done && update.own && update.this_device {
+            // Its other device sends the signing keys now; give them a moment.
+            self.verify.done_at = Some(Instant::now());
+            self.verify.keys_warned = false;
+        }
         let stage_changed = !same_flow
             || self.verify.flow.as_ref().is_some_and(|f| {
                 std::mem::discriminant(&f.stage) != std::mem::discriminant(&update.stage)
@@ -357,7 +418,7 @@ mod tests {
     use super::*;
     use crate::matrix::{MatrixEvent, MatrixHandle, SasEmoji};
     use crate::ui;
-    use crate::verify::{GUARD, TYPING_PAUSE};
+    use crate::verify::{GUARD, KEYS_GRACE, TYPING_PAUSE};
 
     fn key(code: KeyCode) -> InputEvent {
         InputEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
@@ -427,6 +488,7 @@ mod tests {
             peer: "Phone (ABCDEFGH)".into(),
             own: true,
             this_device: true,
+            peer_verified: true,
             stage,
         })
     }
@@ -454,6 +516,22 @@ mod tests {
             other_devices: true,
             recovery: RecoveryStatus::NeedsKey,
             ..Security::default()
+        }
+    }
+
+    /// Verified, but the signing keys did not come.
+    fn without_keys() -> Security {
+        Security {
+            device: DeviceTrust::Verified,
+            signing_keys: false,
+            ..unverified()
+        }
+    }
+
+    fn popup_kind(app: &App) -> Option<PopupKind> {
+        match &app.modal {
+            Some(Modal::Verify(popup)) => Some(popup.kind),
+            _ => None,
         }
     }
 
@@ -942,5 +1020,201 @@ mod tests {
         }
         assert_eq!(set_up_popup(&app).password.as_deref(), Some("hunter99"));
         assert!(!format!("{:?}", app.modal).contains("hunter99"));
+    }
+    #[test]
+    fn missing_keys_offer_verifying_again_or_the_recovery_key() {
+        let (mut app, mut terminal, mut commands) = connected();
+        app.on_matrix(MatrixEvent::Security(without_keys()));
+        assert_eq!(
+            app.setting_value(crate::modal::Setting::Encryption),
+            "verified, but without the signing keys, Enter to fix"
+        );
+        // The status line says so, and a click on it opens the ways out.
+        let screen = redraw(&mut app, &mut terminal);
+        let (col, row) = find(&screen, "keys missing");
+        app.on_event(click(col + 2, row));
+        assert_eq!(popup_kind(&app), Some(PopupKind::KeysMissing));
+        let screen = redraw(&mut app, &mut terminal);
+        find(&screen, "did not get your signing keys");
+        find(&screen, "lacks the signing keys");
+        find(&screen, "Enter recovery key");
+        assert!(drain(&mut commands).is_empty());
+        // Enter alone closes: saying yes takes a choice.
+        wait_guard(&mut app);
+        app.on_event(key(KeyCode::Enter));
+        assert!(app.modal.is_none());
+        assert!(drain(&mut commands).is_empty());
+
+        // Verify again: a new verification of this device.
+        app.perform(crate::action::Action::StartVerification);
+        let screen = redraw(&mut app, &mut terminal);
+        let (col, row) = find(&screen, "Verify again");
+        app.on_event(click(col + 2, row));
+        assert!(drain(&mut commands).is_empty(), "inside the guard time");
+        wait_guard(&mut app);
+        app.on_event(click(col + 2, row));
+        assert_eq!(drain(&mut commands), ["Verification(Request)"]);
+        assert!(app.modal.is_none());
+
+        // Enter recovery key: the recovery form.
+        app.perform(crate::action::Action::StartVerification);
+        wait_guard(&mut app);
+        app.on_event(key(KeyCode::Left));
+        app.on_event(key(KeyCode::Enter));
+        assert!(matches!(app.modal, Some(Modal::Recovery(_))));
+        assert!(drain(&mut commands).is_empty());
+
+        // The keys come while the popup is open: it shows the status instead.
+        app.modal = None;
+        app.perform(crate::action::Action::StartVerification);
+        assert_eq!(popup_kind(&app), Some(PopupKind::KeysMissing));
+        app.on_matrix(MatrixEvent::Security(Security {
+            signing_keys: true,
+            ..without_keys()
+        }));
+        assert_eq!(popup_kind(&app), Some(PopupKind::Status));
+        let screen = redraw(&mut app, &mut terminal);
+        find(&screen, "this device can verify others");
+        assert!(!screen.contains("keys missing"), "{screen}");
+    }
+
+    /// From an unverified device to the Done screen of its verification, with the
+    /// keys about to come.
+    fn verified_just_now() -> (
+        App,
+        Terminal<TestBackend>,
+        tokio::sync::mpsc::UnboundedReceiver<MatrixCmd>,
+    ) {
+        let (mut app, mut terminal, mut commands) = connected();
+        stop_typing(&mut app);
+        app.on_matrix(MatrixEvent::Security(unverified()));
+        app.perform(crate::action::Action::StartVerification);
+        assert_eq!(drain(&mut commands), ["Verification(Request)"]);
+        app.on_matrix(update(1, VerifyStage::Waiting));
+        app.on_matrix(update(1, compare()));
+        app.on_matrix(update(1, VerifyStage::Done));
+        app.on_matrix(MatrixEvent::Security(without_keys()));
+        assert!(app.verify.done_at.is_some());
+        let screen = redraw(&mut app, &mut terminal);
+        find(&screen, "Your other device sends it the keys");
+        assert!(!screen.contains("keys missing"), "{screen}");
+        assert!(!screen.contains("Verify again"), "{screen}");
+        (app, terminal, commands)
+    }
+
+    /// Lets the grace time for the keys pass.
+    fn grace_over(app: &mut App) {
+        app.verify.done_at = Instant::now().checked_sub(KEYS_GRACE);
+    }
+
+    #[test]
+    fn keys_that_do_not_come_are_mentioned_after_the_grace_time() {
+        let (mut app, mut terminal, mut commands) = verified_just_now();
+        // Within the grace time: nothing to redraw.
+        app.dirty = false;
+        app.verify_tick();
+        assert!(!app.dirty);
+        // Over: redrawn once, with no key pressed and nothing from the server.
+        grace_over(&mut app);
+        app.verify_tick();
+        assert!(app.dirty);
+        app.dirty = false;
+        app.verify_tick();
+        assert!(!app.dirty);
+        let screen = redraw(&mut app, &mut terminal);
+        find(&screen, "The signing keys did not come");
+        find(&screen, "keys missing");
+        // The buttons are new: a moment before they count. (The button, not the line
+        // above it, which says "Verify again, or …".)
+        let (col, row) = find(&screen, "Verify again ");
+        app.on_event(click(col + 2, row));
+        assert!(drain(&mut commands).is_empty());
+        wait_guard(&mut app);
+        app.on_event(click(col + 2, row));
+        assert_eq!(drain(&mut commands), ["Verification(Request)"]);
+        assert!(app.modal.is_none());
+        assert!(app.verify.flow.is_none());
+        // The new verification starts over: no grace, no warning until it ends.
+        app.on_matrix(update(2, VerifyStage::Waiting));
+        assert!(app.verify.done_at.is_none());
+        assert!(!app.verify.keys_warned);
+        let screen = redraw(&mut app, &mut terminal);
+        assert!(!screen.contains("keys missing"), "{screen}");
+        app.on_matrix(update(2, VerifyStage::Done));
+        assert!(app.verify.done_at.is_some());
+        // Logging out forgets it.
+        app.reset_session();
+        assert!(app.verify.done_at.is_none());
+        assert!(!app.verify.keys_warned);
+    }
+
+    #[test]
+    fn keys_that_came_in_time_are_not_mentioned() {
+        let (mut app, mut terminal, _commands) = verified_just_now();
+        app.on_matrix(MatrixEvent::Security(Security {
+            signing_keys: true,
+            ..without_keys()
+        }));
+        grace_over(&mut app);
+        app.dirty = false;
+        app.verify_tick();
+        assert!(!app.dirty);
+        let screen = redraw(&mut app, &mut terminal);
+        find(&screen, "Your other device sends it the keys");
+        assert!(!screen.contains("did not come"), "{screen}");
+        assert!(!screen.contains("keys missing"), "{screen}");
+    }
+
+    #[test]
+    fn the_order_of_the_answers_is_asked_for_only_while_it_matters() {
+        let (mut app, mut terminal, _commands) = connected();
+        let order = |app: &mut App, terminal: &mut Terminal<TestBackend>| {
+            let screen = redraw(app, terminal);
+            if screen.contains("here first") {
+                "this one first"
+            } else if screen.contains("first, then here") {
+                "the other one first"
+            } else {
+                "none"
+            }
+        };
+        let compare_with = |this_device, peer_verified| {
+            MatrixEvent::Verification(VerifyUpdate {
+                flow: 1,
+                peer: "Phone (ABCDEFGH)".into(),
+                own: true,
+                this_device,
+                peer_verified,
+                stage: compare(),
+            })
+        };
+        // This device is new: the other one confirms first.
+        app.on_matrix(MatrixEvent::Security(unverified()));
+        app.on_matrix(compare_with(true, true));
+        assert_eq!(order(&mut app, &mut terminal), "the other one first");
+        // It is verified already, only without the keys: the other one trusts it, and
+        // answers whatever the order.
+        app.on_matrix(MatrixEvent::Security(without_keys()));
+        assert_eq!(order(&mut app, &mut terminal), "none");
+        // This device vouches for a new one: this one confirms first.
+        app.on_matrix(MatrixEvent::Security(Security {
+            signing_keys: true,
+            ..without_keys()
+        }));
+        app.on_matrix(compare_with(false, false));
+        assert_eq!(order(&mut app, &mut terminal), "this one first");
+        // ...unless this device trusts it already.
+        app.on_matrix(compare_with(false, true));
+        assert_eq!(order(&mut app, &mut terminal), "none");
+        // Someone else: no such advice.
+        app.on_matrix(MatrixEvent::Verification(VerifyUpdate {
+            flow: 1,
+            peer: "@friend:example.org".into(),
+            own: false,
+            this_device: false,
+            peer_verified: false,
+            stage: compare(),
+        }));
+        assert_eq!(order(&mut app, &mut terminal), "none");
     }
 }

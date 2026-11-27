@@ -8,10 +8,11 @@ use super::hit::{HitId, HitMap, InputTarget};
 use super::modal::{button, centered, field, popup, row};
 use crate::action::Action;
 use crate::app::App;
-use crate::matrix::{SasEmoji, VerifyStage, VerifyUpdate};
+use crate::matrix::{DeviceTrust, SasEmoji, VerifyStage, VerifyUpdate};
 use crate::modal::Modal;
 use crate::text::{width, wrap};
 use crate::theme::{Role, Theme};
+use crate::time::Instant;
 use crate::verify::{Button, Hint, PopupKind, VerifyPopup, VerifyState, describe, stuck};
 
 const WIDTH: u16 = 66;
@@ -49,8 +50,9 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup_state: &mut Veri
     let (title, footer, rows) = match popup_state.kind {
         PopupKind::SetUp => set_up_body(state, popup_state),
         PopupKind::Status => status_body(state),
+        PopupKind::KeysMissing => keys_missing_body(state, popup_state.buttons(state)),
         PopupKind::Flow => match &state.flow {
-            Some(flow) => flow_body(flow),
+            Some(flow) => flow_body(flow, state, popup_state.buttons(state)),
             None => (
                 "Verification".to_owned(),
                 "Esc close",
@@ -157,6 +159,60 @@ fn status_body(state: &VerifyState) -> (String, &'static str, Vec<Row>) {
     ("Encryption".to_owned(), "Enter or Esc close", rows)
 }
 
+/// What the popup offers to get the signing keys, in words: `buttons` are the ones
+/// shown (see `fix_buttons`).
+fn ways_to_the_keys(buttons: &[Button]) -> &'static str {
+    match (
+        buttons.contains(&Button::VerifyAgain),
+        buttons.contains(&Button::RecoveryKey),
+    ) {
+        (true, true) => {
+            "Verify it again with one of your other devices: this time the keys come \
+             along. Or enter your recovery key."
+        }
+        (true, false) => {
+            "Verify it again with one of your other devices: this time the keys come along."
+        }
+        (false, true) => "Enter your recovery key: it brings the keys along.",
+        (false, false) => {
+            "Log in on a device that has your keys, and start a verification of this \
+             session from there."
+        }
+    }
+}
+
+fn keys_missing_body(state: &VerifyState, buttons: &[Button]) -> (String, &'static str, Vec<Row>) {
+    let security = state.security.unwrap_or_default();
+    let mut rows = vec![
+        Row::Text(
+            "This device is verified, but it did not get your signing keys. It cannot \
+             verify your other devices or other people, and older encrypted messages may \
+             stay locked."
+                .to_owned(),
+            Role::Text,
+        ),
+        Row::Blank,
+        Row::Text(ways_to_the_keys(buttons).to_owned(), Role::Text),
+    ];
+    if buttons.contains(&Button::VerifyAgain) {
+        rows.push(Row::Text(
+            "Or start a verification of this session on your other device.".to_owned(),
+            Role::Muted,
+        ));
+    }
+    rows.push(Row::Blank);
+    rows.extend(
+        describe(&security)
+            .into_iter()
+            .map(|(label, value)| Row::Text(format!("{label:<15}{value}"), Role::Text)),
+    );
+    (
+        "Encryption".to_owned(),
+        "Tab move · Enter choose · Esc close",
+        rows,
+    )
+}
+
 fn set_up_body(state: &VerifyState, popup: &VerifyPopup) -> (String, &'static str, Vec<Row>) {
     let mut rows = vec![
         Row::Text(
@@ -193,7 +249,11 @@ fn set_up_body(state: &VerifyState, popup: &VerifyPopup) -> (String, &'static st
     )
 }
 
-fn flow_body(flow: &VerifyUpdate) -> (String, &'static str, Vec<Row>) {
+fn flow_body(
+    flow: &VerifyUpdate,
+    state: &VerifyState,
+    buttons: &[Button],
+) -> (String, &'static str, Vec<Row>) {
     let peer = &flow.peer;
     // How to name the other side in a sentence.
     let other = if flow.own {
@@ -246,6 +306,23 @@ fn flow_body(flow: &VerifyUpdate) -> (String, &'static str, Vec<Row>) {
             }
             rows.push(Row::Blank);
             rows.push(muted("Do they match, in the same order?"));
+            // Between two devices of the user, the one being verified should confirm
+            // second: if it confirms first, its requests for the signing keys may
+            // overtake its last step, and the other one refuses them for good (a narrow
+            // race in matrix-sdk 0.20). That matters only while the other one does not
+            // trust it yet.
+            let unverified_here = state
+                .security
+                .is_none_or(|security| security.device != DeviceTrust::Verified);
+            if flow.own && flow.this_device && unverified_here {
+                rows.push(text(format!(
+                    "If so, press “They match” on your device “{peer}” first, then here."
+                )));
+            } else if flow.own && !flow.this_device && !flow.peer_verified {
+                rows.push(text(format!(
+                    "If so, press “They match” here first, then on your device “{peer}”."
+                )));
+            }
             rows
         }
         VerifyStage::Confirmed => vec![text(format!("Waiting for {other} to confirm…"))],
@@ -265,15 +342,31 @@ fn flow_body(flow: &VerifyUpdate) -> (String, &'static str, Vec<Row>) {
                     "Their devices are trusted from now on.",
                 ),
             };
-            vec![
-                Row::Text(headline, Role::StatusOk),
-                Row::Blank,
-                muted(detail),
-            ]
+            let detail = if state.keys_warning(Instant::now()) {
+                // The keys did not come after all: what to do instead.
+                let ways = match (
+                    buttons.contains(&Button::VerifyAgain),
+                    buttons.contains(&Button::RecoveryKey),
+                ) {
+                    (true, true) => "Verify again, or enter your recovery key.",
+                    (true, false) => "Verify again.",
+                    (false, true) => "Enter your recovery key.",
+                    (false, false) => "Start a verification of this session on your other device.",
+                };
+                Row::Text(
+                    format!("⚠ The signing keys did not come. {ways}"),
+                    Role::Error,
+                )
+            } else {
+                muted(detail)
+            };
+            vec![Row::Text(headline, Role::StatusOk), Row::Blank, detail]
         }
         VerifyStage::Cancelled { reason } => vec![Row::Text(format!("✕ {reason}"), Role::Error)],
     };
-    let footer = if flow.stage.is_final() {
+    let footer = if flow.stage.is_final() && buttons.len() > 1 {
+        "Tab move · Enter choose · Esc close"
+    } else if flow.stage.is_final() {
         "Enter or Esc close"
     } else if flow.stage == VerifyStage::Requested {
         "Tab move · Enter choose · Esc decline"
@@ -335,7 +428,8 @@ fn emoji_grid(
 }
 
 /// Adds the encryption hint to the status line, if there is one: a request waiting
-/// behind another popup, an unverified device, or an account without cross-signing.
+/// behind another popup, an unverified device, a verified one without the signing
+/// keys, or an account without cross-signing.
 /// `area` is the free part of the status line.
 pub fn status_hint(
     state: &VerifyState,
@@ -353,7 +447,8 @@ pub fn status_hint(
         }))
     );
     // Mark, its colour, what is wrong, what a click does, and a short form of both.
-    let (mark, mark_role, text, verb, short, action) = match state.hint(popup_open) {
+    let (mark, mark_role, text, verb, short, action) = match state.hint(popup_open, Instant::now())
+    {
         None => return,
         Some(Hint::Pending { requested: true }) => (
             "◆",
@@ -377,6 +472,14 @@ pub fn status_hint(
             "unverified device",
             "verify",
             "verify device",
+            Action::StartVerification,
+        ),
+        Some(Hint::KeysMissing) => (
+            "⚠",
+            Role::Error,
+            "keys missing",
+            "fix",
+            "fix keys",
             Action::StartVerification,
         ),
         Some(Hint::NotSetUp) => (
@@ -431,6 +534,7 @@ mod tests {
             peer: "Element Desktop (QWERTYUIOP)".into(),
             own: true,
             this_device: true,
+            peer_verified: true,
             stage,
         })
     }
@@ -449,6 +553,26 @@ mod tests {
         insta::assert_snapshot!("verify_status_hint", render(&mut app, 100, 8));
         app.on_matrix(update(VerifyStage::Requested));
         insta::assert_snapshot!("verify_requested", render(&mut app, 100, 24));
+        app.on_matrix(update(compare_stage()));
+        insta::assert_snapshot!("verify_compare", render(&mut app, 100, 24));
+        insta::assert_snapshot!("verify_compare_narrow", render(&mut app, 44, 24));
+        // Too short to show all seven: no answers offered, only Cancel.
+        insta::assert_snapshot!("verify_compare_too_small", render(&mut app, 100, 14));
+        // The device that vouches: it is to confirm first.
+        app.on_matrix(MatrixEvent::Verification(VerifyUpdate {
+            flow: 1,
+            peer: "Element Desktop (QWERTYUIOP)".into(),
+            own: true,
+            this_device: false,
+            peer_verified: false,
+            stage: compare_stage(),
+        }));
+        insta::assert_snapshot!("verify_compare_other_device", render(&mut app, 100, 24));
+        app.on_matrix(update(VerifyStage::Done));
+        insta::assert_snapshot!("verify_done", render(&mut app, 100, 24));
+    }
+
+    fn compare_stage() -> VerifyStage {
         // From the real table: the widest names, and emoji with a variation selector.
         let emoji = [
             ("🐶", "Dog"),
@@ -459,7 +583,7 @@ mod tests {
             ("🔒", "Lock"),
             ("📌", "Pin"),
         ];
-        app.on_matrix(update(VerifyStage::Compare {
+        VerifyStage::Compare {
             emoji: emoji
                 .iter()
                 .map(|(symbol, name)| SasEmoji {
@@ -468,13 +592,38 @@ mod tests {
                 })
                 .collect(),
             decimals: (1, 2, 3),
-        }));
-        insta::assert_snapshot!("verify_compare", render(&mut app, 100, 24));
-        insta::assert_snapshot!("verify_compare_narrow", render(&mut app, 44, 24));
-        // Too short to show all seven: no answers offered, only Cancel.
-        insta::assert_snapshot!("verify_compare_too_small", render(&mut app, 100, 14));
+        }
+    }
+
+    /// Verified, but without the signing keys.
+    fn without_keys() -> Security {
+        Security {
+            device: DeviceTrust::Verified,
+            identity: Identity::Present,
+            signing_keys: false,
+            other_devices: true,
+            recovery: RecoveryStatus::NeedsKey,
+            ..Security::default()
+        }
+    }
+
+    #[test]
+    fn missing_keys() {
+        use crate::modal::Modal;
+        use crate::verify::VerifyPopup;
+        let mut app = App::demo();
+        app.user_id = Some("@me:example.org".into());
+        app.on_matrix(MatrixEvent::Security(without_keys()));
+        insta::assert_snapshot!("verify_keys_missing_hint", render(&mut app, 100, 8));
+        app.modal = Some(Modal::Verify(VerifyPopup::keys_missing()));
+        insta::assert_snapshot!("verify_keys_missing", render(&mut app, 100, 24));
+        // The Done screen of this device's verification, once the keys are overdue.
+        app.modal = None;
+        app.on_matrix(update(VerifyStage::Requested));
         app.on_matrix(update(VerifyStage::Done));
-        insta::assert_snapshot!("verify_done", render(&mut app, 100, 24));
+        app.verify.keys_warned = true;
+        app.verify.done_at = crate::time::Instant::now().checked_sub(crate::verify::KEYS_GRACE);
+        insta::assert_snapshot!("verify_done_keys_missing", render(&mut app, 100, 24));
     }
 
     #[test]

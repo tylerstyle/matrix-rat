@@ -18,6 +18,11 @@ pub const GUARD: Duration = Duration::from_millis(700);
 /// paused this long, instead of taking over the keyboard mid-sentence.
 pub const TYPING_PAUSE: Duration = Duration::from_secs(2);
 
+/// After this device's verification ends, its other device sends the signing keys it
+/// lacks; that normally takes seconds. Only when they have not come this long after
+/// does the app say they are missing.
+pub const KEYS_GRACE: Duration = Duration::from_secs(30);
+
 #[derive(Debug, Default)]
 pub struct VerifyState {
     /// `None` until the worker reports (and always in demo mode).
@@ -34,6 +39,11 @@ pub struct VerifyState {
     pub last_key: Option<Instant>,
     /// A request came in while the user was typing; its popup opens at the next pause.
     pub deferred: bool,
+    /// When a verification of this device last reached Done. A new verification clears
+    /// it. Until [`KEYS_GRACE`] after it, missing signing keys are not mentioned.
+    pub done_at: Option<Instant>,
+    /// The screen was redrawn once for the end of that grace time.
+    pub keys_warned: bool,
 }
 
 /// What the status line suggests, if anything.
@@ -44,6 +54,8 @@ pub enum Hint {
         requested: bool,
     },
     Unverified,
+    /// This device is verified but lacks the signing keys.
+    KeysMissing,
     /// The account has no cross-signing identity yet.
     NotSetUp,
 }
@@ -54,7 +66,7 @@ impl VerifyState {
         self.flow.as_ref().filter(|f| !f.stage.is_final())
     }
 
-    pub fn hint(&self, popup_open: bool) -> Option<Hint> {
+    pub fn hint(&self, popup_open: bool, now: Instant) -> Option<Hint> {
         if let Some(flow) = self.active()
             && !popup_open
         {
@@ -66,8 +78,31 @@ impl VerifyState {
         match (security.identity, security.device) {
             (Identity::Missing, _) => Some(Hint::NotSetUp),
             (Identity::Present, DeviceTrust::Unverified) => Some(Hint::Unverified),
+            _ if self.keys_missing(now) => Some(Hint::KeysMissing),
             _ => None,
         }
+    }
+
+    /// This device lacks the signing keys, and it is time to say so: no verification
+    /// runs, and the last one of this device ended more than [`KEYS_GRACE`] ago.
+    pub fn keys_missing(&self, now: Instant) -> bool {
+        self.security.as_ref().is_some_and(keys_missing)
+            && self.active().is_none()
+            && !self
+                .done_at
+                .is_some_and(|at| now.saturating_duration_since(at) < KEYS_GRACE)
+    }
+
+    /// The finished verification of this device is on screen (or would be), and the
+    /// signing keys have not come after all: its Done screen says so and offers the
+    /// ways out. Only from the tick that noticed ([`keys_warned`](Self::keys_warned)),
+    /// which also starts the buttons' guard time again.
+    pub fn keys_warning(&self, now: Instant) -> bool {
+        self.flow
+            .as_ref()
+            .is_some_and(|f| f.stage == VerifyStage::Done && f.own && f.this_device)
+            && self.keys_warned
+            && self.keys_missing(now)
     }
 
     /// The user is typing (pressed a key a moment ago).
@@ -85,6 +120,30 @@ pub fn stuck(security: &Security) -> bool {
         && security.recovery != RecoveryStatus::NeedsKey
 }
 
+/// This device is verified, but it did not get the signing keys (matrix-sdk 0.20 can
+/// lose them when this device confirms first, and the other device may never send
+/// them), so it cannot verify others.
+pub fn keys_missing(security: &Security) -> bool {
+    security.identity == Identity::Present
+        && security.device == DeviceTrust::Verified
+        && !security.signing_keys
+}
+
+/// The ways out of [`keys_missing`] that this device offers: verifying again with
+/// another device, and the recovery key. Close comes last.
+fn fix_buttons(security: &Security) -> &'static [Button] {
+    use Button as B;
+    match (
+        security.other_devices,
+        security.recovery == RecoveryStatus::NeedsKey,
+    ) {
+        (true, true) => &[B::VerifyAgain, B::RecoveryKey, B::Close],
+        (true, false) => &[B::VerifyAgain, B::Close],
+        (false, true) => &[B::RecoveryKey, B::Close],
+        (false, false) => &[B::Close],
+    }
+}
+
 /// The value the settings menu shows on its encryption row.
 pub fn setting_text(security: Option<Security>) -> &'static str {
     let Some(security) = security else {
@@ -92,6 +151,7 @@ pub fn setting_text(security: Option<Security>) -> &'static str {
     };
     match (security.identity, security.device) {
         (Identity::Missing, _) => "not set up, Enter to set up",
+        _ if keys_missing(&security) => "verified, but without the signing keys, Enter to fix",
         (_, DeviceTrust::Verified) => "this device is verified",
         (Identity::Present, DeviceTrust::Unverified) if stuck(&security) => {
             "not verified, Enter for details"
@@ -110,6 +170,9 @@ pub fn describe(security: &Security) -> [(&'static str, &'static str); 4] {
     };
     let identity = match security.identity {
         Identity::Present if security.signing_keys => "set up, and this device can verify others",
+        Identity::Present if keys_missing(security) => {
+            "set up, but this device lacks the signing keys"
+        }
         Identity::Present => "set up",
         Identity::Missing => "not set up",
         Identity::Unknown => "checking…",
@@ -152,6 +215,10 @@ pub enum Button {
     SetUp,
     /// Send our unanswered request again.
     Retry,
+    /// Verify this device once more, to get the signing keys it lacks.
+    VerifyAgain,
+    /// Enter the recovery key, for the same.
+    RecoveryKey,
 }
 
 impl Button {
@@ -167,6 +234,8 @@ impl Button {
             Self::Show => " Show ",
             Self::SetUp => " Set up ",
             Self::Retry => " Ask again ",
+            Self::VerifyAgain => " Verify again ",
+            Self::RecoveryKey => " Enter recovery key ",
         }
     }
 
@@ -175,12 +244,18 @@ impl Button {
     pub fn affirmative(self) -> bool {
         matches!(
             self,
-            Self::Accept | Self::Start | Self::Match | Self::SetUp | Self::Retry
+            Self::Accept
+                | Self::Start
+                | Self::Match
+                | Self::SetUp
+                | Self::Retry
+                | Self::VerifyAgain
+                | Self::RecoveryKey
         )
     }
 }
 
-/// Which of three things the popup shows.
+/// Which of four things the popup shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PopupKind {
     /// The running verification (`VerifyState::flow`).
@@ -189,6 +264,8 @@ pub enum PopupKind {
     SetUp,
     /// The encryption status, when there is nothing to verify (or no way to).
     Status,
+    /// This device is verified but lacks the signing keys: the ways to get them.
+    KeysMissing,
 }
 
 #[derive(Clone)]
@@ -248,6 +325,10 @@ impl VerifyPopup {
         Self::new(PopupKind::Status)
     }
 
+    pub fn keys_missing() -> Self {
+        Self::new(PopupKind::KeysMissing)
+    }
+
     /// The buttons changed: start the guard time again and forget the focus.
     pub fn rearm(&mut self) {
         self.armed_at = Instant::now();
@@ -266,6 +347,10 @@ impl VerifyPopup {
             PopupKind::SetUp if state.setting_up => &[],
             PopupKind::SetUp => &[B::SetUp, B::Close],
             PopupKind::Status => &[B::Close],
+            PopupKind::KeysMissing => fix_buttons(&state.security.unwrap_or_default()),
+            PopupKind::Flow if state.keys_warning(Instant::now()) => {
+                fix_buttons(&state.security.unwrap_or_default())
+            }
             PopupKind::Flow => match state.flow.as_ref().map(|f| &f.stage) {
                 None => &[B::Close],
                 Some(VerifyStage::Requested) => &[B::Accept, B::Decline],
@@ -343,6 +428,7 @@ mod tests {
                 peer: "phone".into(),
                 own: true,
                 this_device: true,
+                peer_verified: true,
                 stage,
             }),
             ..VerifyState::default()
@@ -412,9 +498,10 @@ mod tests {
 
     #[test]
     fn hints_and_setting_text() {
+        let now = Instant::now();
         let mut state = VerifyState::default();
         // Nothing known yet (or demo mode): no hint.
-        assert_eq!(state.hint(false), None);
+        assert_eq!(state.hint(false, now), None);
         assert_eq!(setting_text(None), "unknown");
         let mut security = Security {
             identity: Identity::Present,
@@ -424,7 +511,7 @@ mod tests {
             ..Security::default()
         };
         state.security = Some(security);
-        assert_eq!(state.hint(false), Some(Hint::Unverified));
+        assert_eq!(state.hint(false, now), Some(Hint::Unverified));
         assert_eq!(
             setting_text(Some(security)),
             "not verified, Enter to verify"
@@ -437,17 +524,177 @@ mod tests {
             "not verified, Enter for details"
         );
         security.device = DeviceTrust::Verified;
+        security.signing_keys = true;
         state.security = Some(security);
-        assert_eq!(state.hint(false), None);
+        assert_eq!(state.hint(false, now), None);
         assert_eq!(setting_text(Some(security)), "this device is verified");
         security.identity = Identity::Missing;
         security.device = DeviceTrust::Unverified;
         state.security = Some(security);
-        assert_eq!(state.hint(false), Some(Hint::NotSetUp));
+        assert_eq!(state.hint(false, now), Some(Hint::NotSetUp));
         assert_eq!(setting_text(Some(security)), "not set up, Enter to set up");
         // A request waiting behind another popup comes first, unless its popup is open.
         state.flow = flow(VerifyStage::Requested).flow;
-        assert_eq!(state.hint(false), Some(Hint::Pending { requested: true }));
-        assert_eq!(state.hint(true), Some(Hint::NotSetUp));
+        assert_eq!(
+            state.hint(false, now),
+            Some(Hint::Pending { requested: true })
+        );
+        assert_eq!(state.hint(true, now), Some(Hint::NotSetUp));
+    }
+
+    fn without_keys() -> Security {
+        Security {
+            identity: Identity::Present,
+            device: DeviceTrust::Verified,
+            signing_keys: false,
+            other_devices: true,
+            recovery: RecoveryStatus::NeedsKey,
+            ..Security::default()
+        }
+    }
+
+    #[test]
+    fn missing_keys_are_mentioned_only_when_no_verification_can_still_bring_them() {
+        let now = Instant::now();
+        let mut state = VerifyState {
+            security: Some(without_keys()),
+            ..VerifyState::default()
+        };
+        assert!(keys_missing(&without_keys()));
+        assert!(state.keys_missing(now));
+        assert_eq!(state.hint(false, now), Some(Hint::KeysMissing));
+        // Not while a verification runs: it may be the one that brings them.
+        state.flow = flow(VerifyStage::Ready).flow;
+        assert!(!state.keys_missing(now));
+        assert_eq!(state.hint(true, now), None);
+        assert_eq!(
+            state.hint(false, now),
+            Some(Hint::Pending { requested: false })
+        );
+        // Nor in the grace time after this device's verification ended.
+        state.flow = flow(VerifyStage::Done).flow;
+        state.done_at = Some(now);
+        assert!(!state.keys_missing(now));
+        assert_eq!(state.hint(false, now), None);
+        assert!(!state.keys_missing(now + KEYS_GRACE / 2));
+        assert!(state.keys_missing(now + KEYS_GRACE));
+        assert_eq!(state.hint(false, now + KEYS_GRACE), Some(Hint::KeysMissing));
+        // The Done screen says so only once the tick has noticed.
+        assert!(!state.keys_warning(now + KEYS_GRACE));
+        state.keys_warned = true;
+        assert!(state.keys_warning(now + KEYS_GRACE));
+        // Once they came, nothing to say.
+        let mut security = without_keys();
+        security.signing_keys = true;
+        state.security = Some(security);
+        assert!(!state.keys_missing(now + KEYS_GRACE));
+        assert!(!state.keys_warning(now + KEYS_GRACE));
+        assert_eq!(state.hint(false, now + KEYS_GRACE), None);
+        // Only a verified device of an account with cross-signing can lack them.
+        for security in [
+            Security {
+                device: DeviceTrust::Unverified,
+                ..without_keys()
+            },
+            Security {
+                identity: Identity::Missing,
+                ..without_keys()
+            },
+            Security {
+                identity: Identity::Unknown,
+                ..without_keys()
+            },
+        ] {
+            assert!(!keys_missing(&security), "{security:?}");
+        }
+    }
+
+    #[test]
+    fn missing_keys_in_the_settings_and_the_status() {
+        let security = without_keys();
+        assert_eq!(
+            setting_text(Some(security)),
+            "verified, but without the signing keys, Enter to fix"
+        );
+        let rows = describe(&security);
+        assert_eq!(rows[0], ("This device", "verified"));
+        assert_eq!(
+            rows[1],
+            (
+                "Cross-signing",
+                "set up, but this device lacks the signing keys"
+            )
+        );
+        assert_eq!(
+            rows[2],
+            ("Recovery", "set up, but this device needs the recovery key")
+        );
+        // An unverified device without them is just unverified.
+        let unverified = Security {
+            device: DeviceTrust::Unverified,
+            ..security
+        };
+        assert_eq!(describe(&unverified)[1], ("Cross-signing", "set up"));
+    }
+
+    #[test]
+    fn the_ways_to_the_keys_follow_what_this_device_has() {
+        use Button as B;
+        let mut state = VerifyState {
+            security: Some(without_keys()),
+            ..VerifyState::default()
+        };
+        let popup = VerifyPopup::keys_missing();
+        let cases = [
+            (
+                true,
+                RecoveryStatus::NeedsKey,
+                &[B::VerifyAgain, B::RecoveryKey, B::Close][..],
+            ),
+            (
+                true,
+                RecoveryStatus::NotSetUp,
+                &[B::VerifyAgain, B::Close][..],
+            ),
+            (
+                false,
+                RecoveryStatus::NeedsKey,
+                &[B::RecoveryKey, B::Close][..],
+            ),
+            (false, RecoveryStatus::NotSetUp, &[B::Close][..]),
+        ];
+        for (other_devices, recovery, buttons) in cases {
+            state.security = Some(Security {
+                other_devices,
+                recovery,
+                ..without_keys()
+            });
+            assert_eq!(popup.buttons(&state), buttons);
+            // Saying yes takes a choice: the default is Close, and so is Esc.
+            assert_eq!(popup.focused(&state), Some(B::Close));
+            assert_eq!(popup.escape(&state), B::Close);
+        }
+        assert!(B::VerifyAgain.affirmative() && B::RecoveryKey.affirmative());
+
+        // The Done screen of this device's verification, once the keys are overdue,
+        // offers the same.
+        state.security = Some(without_keys());
+        state.flow = flow(VerifyStage::Done).flow;
+        state.keys_warned = true;
+        let done = VerifyPopup::flow();
+        assert_eq!(
+            done.buttons(&state),
+            [B::VerifyAgain, B::RecoveryKey, B::Close]
+        );
+        state.keys_warned = false;
+        state.done_at = Some(Instant::now());
+        assert_eq!(done.buttons(&state), [B::Close]);
+        // Not the Done screen of another device's verification.
+        state.done_at = None;
+        state.keys_warned = true;
+        if let Some(flow) = &mut state.flow {
+            flow.this_device = false;
+        }
+        assert_eq!(done.buttons(&state), [B::Close]);
     }
 }

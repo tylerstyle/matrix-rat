@@ -1,0 +1,28 @@
+---
+source: src/ui/verify.rs
+expression: "render(&mut app, 100, 24)"
+---
+"╭ 1 Rooms ────────── + ╮╭ 2 #rust ─────────────────────────────────────────────────────────────────╮"
+"│ Filter rooms…        ││  Yes — startup is instant now. Room previews come straight from disk.   ││"
+"│ ○ Unread  ○ People   ││   👍 2   🎉 1                                                           ││" Hidden by multi-width symbols: [(29, " "), (36, " ")]
+"│ Favourites     ╭ Verify your other device ──────────────────────────────────────╮eal for large  ││"
+"│▌R  rust        │                                                                │verything from ││"
+"│ M  matrix-rat  │ Compare with what your device “Element Desktop (QWERTYUIOP)”   │               ┃│"
+"│ People         │ shows:                                                         │───────────────┃│"
+"│ B  bob         │                                                                │               ┃│"
+"│ C  carol       │             🐶          ☂           🎧          🦋             │               ┃│" Hidden by multi-width symbols: [(32, " "), (56, " "), (68, " ")]
+"│ Rooms          │            Dog       Umbrella   Headphones  Butterfly          │               ┃│"
+"│ D  design      │                                                                │               ┃│"
+"│ N  nixos       │                   ☎           🔒          📌                   │?              ┃│" Hidden by multi-width symbols: [(50, " "), (62, " ")]
+"│ O  off-topic   │               Telephone      Lock        Pin                   │               ┃│"
+"│                │                                                                │               ┃│"
+"│                │ Do they match, in the same order?                              │               ┃│"
+"│                │ If so, press “They match” here first, then on your device “    │               ┃│"
+"│                │ Element Desktop (QWERTYUIOP)”.                                 │               ┃│"
+"│                │                                                                │               ┃│"
+"│                │  They match    They don't match                                │               ┃│"
+"│                │                                                                │────────────────╯"
+"│                ╰────────────────────────── Tab move · Enter choose · Esc cancel ╯──────── M  me ─╮"
+"│                      ││ Type a message…                                                    📎 🙂 │" Hidden by multi-width symbols: [(94, " "), (97, " ")]
+"╰──────────────────────╯╰──────────────────────────────────────────────────────────────────────────╯"
+" ● demo data  ⚠ unverified device — verify  Enter send            F1 help  F2 settings  F3 rat-dark "

@@ -89,7 +89,8 @@ pub enum BackupStatus {
 pub struct Security {
     pub device: DeviceTrust,
     pub identity: Identity,
-    /// This device holds the private cross-signing keys, so it can verify others.
+    /// This device holds the private self-signing and user-signing keys, so it can
+    /// verify others. (The master key is not needed for that.)
     pub signing_keys: bool,
     /// Another of the user's devices is cross-signed, so there is something to verify
     /// this one with.
@@ -187,8 +188,11 @@ pub struct VerifyUpdate {
     /// The other side is another device of this account.
     pub own: bool,
     /// This device is the one that gets verified: it was not verified yet when the
-    /// verification began. Otherwise it vouches for the other side.
+    /// verification began, or it lacked the signing keys. Otherwise it vouches for the
+    /// other side.
     pub this_device: bool,
+    /// This device trusts the other side's device already (as last seen).
+    pub peer_verified: bool,
     pub stage: VerifyStage,
 }
 
@@ -199,6 +203,7 @@ impl std::fmt::Debug for VerifyUpdate {
             .field("flow", &self.flow)
             .field("own", &self.own)
             .field("this_device", &self.this_device)
+            .field("peer_verified", &self.peer_verified)
             .field("stage", &self.stage)
             .finish_non_exhaustive()
     }
@@ -840,6 +845,7 @@ impl Verifier {
             target,
             own,
             this_device,
+            peer_verified: false,
             last: None,
         };
         let client = self.client.clone();
@@ -954,19 +960,45 @@ async fn refresh_own_keys(client: &Client) {
     }
 }
 
+/// This device holds the private self-signing and user-signing keys: what it needs to
+/// verify the account's other devices and other people. The master key is left out:
+/// some clients keep it to themselves.
+async fn has_signing_keys(client: &Client) -> bool {
+    client
+        .encryption()
+        .cross_signing_status()
+        .await
+        .is_some_and(|status| status.has_self_signing && status.has_user_signing)
+}
+
 /// After this device was verified: the other device uploads its signature for this
-/// one a moment after the verification ends. Look until it is there.
+/// one a moment after the verification ends, and sends the signing keys this one
+/// lacks. Look until both are there.
+///
+/// Only the signature can be fetched (`/keys/query`), and only while it is missing:
+/// the keys come by themselves, and the handler for them asks for a new status
+/// already; looking here as well costs the server nothing.
 async fn await_own_signature(client: &Client, refresh: &Notify) {
-    for delay in [0, 1, 2, 4, 8] {
+    let mut signed = false;
+    for delay in [0, 1, 2, 4, 8, 16] {
         rt::sleep(Duration::from_secs(delay)).await;
-        if matches!(
+        signed = matches!(
             client.encryption().get_own_device().await,
             Ok(Some(device)) if device.is_cross_signed_by_owner()
-        ) {
-            break;
+        );
+        if signed && has_signing_keys(client).await {
+            return;
         }
-        refresh_own_keys(client).await;
+        if !signed && delay <= 8 {
+            refresh_own_keys(client).await;
+        }
         refresh.notify_one();
+    }
+    if signed {
+        // The race of matrix-sdk 0.20 (our requests for the secrets overtook our done,
+        // and the other device refused them), or the other device never sent them; the
+        // status says so, and the app offers the way out.
+        tracing::info!("this device is verified, but its signing keys did not come");
     }
 }
 
@@ -987,6 +1019,8 @@ struct Flow {
     target: Target,
     own: bool,
     this_device: bool,
+    /// This device trusts the other side's device already.
+    peer_verified: bool,
     /// The stage last sent to the UI.
     last: Option<VerifyStage>,
 }
@@ -1024,6 +1058,7 @@ impl Flow {
             peer: self.peer.clone(),
             own: self.own,
             this_device: self.this_device,
+            peer_verified: self.peer_verified,
             stage: stage.clone(),
         }));
         self.last = Some(stage);
@@ -1090,11 +1125,13 @@ impl Flow {
             self.own = false;
             self.peer = sanitize_line(request.other_user_id().as_str());
         }
+        // A device that is verified but lacks the signing keys gets them with a new
+        // verification: it is the one being verified then, too.
         self.this_device = request.is_self_verification()
-            && !matches!(
+            && !(matches!(
                 client.encryption().get_own_device().await,
                 Ok(Some(device)) if device.is_cross_signed_by_owner()
-            );
+            ) && has_signing_keys(&client).await);
         while let Ended::Replaced(new) = self.follow(&client, &request, &mut answers).await {
             request = new;
         }
@@ -1115,13 +1152,13 @@ impl Flow {
         pin_mut!(changes);
         let mut sas: Option<SasVerification> = None;
         let mut sas_changes: Option<SasStream> = None;
-        self.on_request(request, request.state(), &mut sas, &mut sas_changes)
+        self.on_request(client, request, request.state(), &mut sas, &mut sas_changes)
             .await;
 
         while !self.done() {
             tokio::select! {
                 state = changes.next() => match state {
-                    Some(state) => self.on_request(request, state, &mut sas, &mut sas_changes).await,
+                    Some(state) => self.on_request(client, request, state, &mut sas, &mut sas_changes).await,
                     None => break,
                 },
                 Some(state) = async {
@@ -1131,7 +1168,7 @@ impl Flow {
                     }
                 } => {
                     if let Some(current) = sas.clone() {
-                        self.on_sas(&current, state).await;
+                        self.on_sas(client, &current, state).await;
                     }
                 }
                 answer = answers.recv() => match answer {
@@ -1179,6 +1216,7 @@ impl Flow {
 
     async fn on_request(
         &mut self,
+        client: &Client,
         request: &VerificationRequest,
         state: VerificationRequestState,
         sas: &mut Option<SasVerification>,
@@ -1223,7 +1261,7 @@ impl Flow {
                     *sas_changes = Some(Box::pin(new.changes()));
                     *sas = Some(new.clone());
                     let state = new.state();
-                    self.on_sas(&new, state).await;
+                    self.on_sas(client, &new, state).await;
                 } else {
                     // Only emoji comparison is offered, so this does not happen.
                     let _ = request.cancel().await;
@@ -1240,13 +1278,19 @@ impl Flow {
         }
     }
 
-    async fn on_sas(&mut self, sas: &SasVerification, state: SasState) {
+    async fn on_sas(&mut self, client: &Client, sas: &SasVerification, state: SasState) {
         let other = sas.other_device();
         self.set_peer(
             sas.other_user_id(),
             sas.own_user_id(),
             other.display_name(),
             other.device_id(),
+        );
+        // The device as this one's store knows it now: the comparison's copy is a
+        // snapshot from its start.
+        self.peer_verified = matches!(
+            client.encryption().get_device(sas.other_user_id(), other.device_id()).await,
+            Ok(Some(device)) if device.is_verified()
         );
         match state {
             SasState::Created { .. } | SasState::Accepted { .. } => {
@@ -1275,7 +1319,8 @@ impl Flow {
                     .unwrap_or_default(),
                 decimals,
             }),
-            SasState::Confirmed => self.show(VerifyStage::Confirmed),
+            // Shown once our confirmation is out (see `answer`), not as it is made.
+            SasState::Confirmed => {}
             SasState::Done { .. } => self.show(VerifyStage::Done),
             SasState::Cancelled(info) => self.show(VerifyStage::Cancelled {
                 reason: cancel_reason(&info),
@@ -1300,7 +1345,16 @@ impl Flow {
                 .map(|_| ())
                 .map_err(|e| ("start the emoji comparison", e)),
             (Answer::Start, Some(_)) => Ok(()),
-            (Answer::Match, Some(sas)) => sas.confirm().await.map_err(|e| ("confirm", e)),
+            (Answer::Match, Some(sas)) => {
+                let result = sas.confirm().await.map_err(|e| ("confirm", e));
+                // Our confirmation has reached the server; now the other side's MAC
+                // (if it has not confirmed yet) and its done are awaited. Only a flow
+                // without a request is done as it confirms second; Done follows then.
+                if result.is_ok() && !self.done() && !sas.is_done() && !sas.is_cancelled() {
+                    self.show(VerifyStage::Confirmed);
+                }
+                result
+            }
             (Answer::Mismatch, Some(sas)) => sas.mismatch().await.map_err(|e| ("cancel", e)),
             (Answer::Match | Answer::Mismatch, None) => Ok(()),
             // Handled by `follow`.
@@ -1571,10 +1625,7 @@ async fn security(client: &Client, user_id: &UserId, checks: &mut IdentityChecks
             VerificationState::Unknown => DeviceTrust::Unknown,
         },
     };
-    let signing_keys = encryption
-        .cross_signing_status()
-        .await
-        .is_some_and(|status| status.is_complete());
+    let signing_keys = has_signing_keys(client).await;
     let identity = match encryption.get_user_identity(user_id).await {
         // Made here but maybe never uploaded: only the server can tell. (Once this
         // device is signed by it, it is on the server.)
@@ -2172,37 +2223,153 @@ pub(super) mod tests {
         }
     }
 
+    /// Verified, with the private signing keys: B as it should end up.
+    fn with_keys(security: &Security) -> bool {
+        security.device == DeviceTrust::Verified && security.signing_keys
+    }
+
+    /// Which device of a [`Pair`] presses "They match" first.
+    ///
+    /// The flows start from a request, so the device that confirms second is not done
+    /// as it confirms: it sends its MAC and its done, and is done only on the other
+    /// side's done (`matrix-sdk-crypto` `inner_sas.rs:303-308`). It is on being done
+    /// that B, the device being verified, stores its requests for the signing keys, and
+    /// A answers them only once it trusts B, which it does on B's done.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Order {
+        /// B first; A once B says Confirmed. B then gets A's MAC and done close
+        /// together, often in one sync, and sends its own done and its requests for the
+        /// keys at once, side by side (the sync sends up to 20 requests at a time). A
+        /// request that reaches A before B's done is refused, for good. A narrow
+        /// window: it did not open in 40 runs, but nothing closes it.
+        NewFirst,
+        /// A first; B a moment later, as a person would, by when A's MAC has reached
+        /// it. B's MAC and done are then on their way before B can be done, and A
+        /// trusts B before B's requests for the keys exist: the safe order.
+        OldFirst,
+    }
+
+    /// One side of a verification, driven the way the UI does: it accepts what comes
+    /// in and notes the comparison; [`Side::confirm`] presses "They match".
+    #[derive(Default)]
+    struct Side {
+        /// The verification whose emoji are shown.
+        compare: Option<u64>,
+        emoji: Vec<SasEmoji>,
+        answered: bool,
+        /// Our confirmation is out, and the other side's is not in yet.
+        confirmed: bool,
+        done: bool,
+    }
+
+    impl Side {
+        fn see(&mut self, name: &str, handle: &MatrixHandle, event: &MatrixEvent) {
+            let update = match event {
+                MatrixEvent::Verification(update) => update,
+                MatrixEvent::Error(err) | MatrixEvent::ActionFailed(err) => {
+                    panic!("{name}: {err}")
+                }
+                _ => return,
+            };
+            eprintln!(
+                "{name}: flow {} with {}: {:?}",
+                update.flow, update.peer, update.stage
+            );
+            assert!(update.own, "a verification with someone else");
+            match &update.stage {
+                VerifyStage::Requested => {
+                    handle.send(MatrixCmd::Verification(VerifyCmd::Answer {
+                        flow: update.flow,
+                        answer: Answer::Accept,
+                    }));
+                }
+                VerifyStage::Compare { emoji, .. } => {
+                    self.compare = Some(update.flow);
+                    self.emoji = emoji.clone();
+                }
+                VerifyStage::Confirmed => self.confirmed = true,
+                VerifyStage::Done => self.done = true,
+                VerifyStage::Cancelled { reason } => {
+                    panic!("{name}: verification cancelled: {reason}")
+                }
+                _ => {}
+            }
+        }
+
+        /// Presses "They match", once the emoji are shown.
+        fn confirm(&mut self, handle: &MatrixHandle) {
+            if let Some(flow) = self.compare
+                && !self.answered
+            {
+                self.answered = true;
+                handle.send(MatrixCmd::Verification(VerifyCmd::Answer {
+                    flow,
+                    answer: Answer::Match,
+                }));
+            }
+        }
+    }
+
     impl Pair {
-        /// Both sides answer and confirm until both are done; B must end up verified
-        /// with the keys passed over. Returns the emoji both showed.
-        async fn finish(&mut self) -> Vec<SasEmoji> {
-            let (mut a_emoji, mut b_emoji) = (Vec::new(), Vec::new());
-            let (mut a_done, mut b_done) = (false, false);
+        /// Both sides answer and confirm, in `order`, until both are done. Returns the
+        /// emoji both showed, and B's last status seen.
+        async fn compare(&mut self, order: Order) -> (Vec<SasEmoji>, Option<Security>) {
+            let (mut a, mut b) = (Side::default(), Side::default());
             // B gets signed by A and receives the private keys, without a restart. That
             // news comes once (the status is sent when it changes), and nothing holds it
             // back until this loop has seen A's Done: it is looked for from the start,
             // so it cannot go by unseen.
-            let with_keys = |s: &Security| s.device == DeviceTrust::Verified && s.signing_keys;
-            let mut b_keys = false;
+            let mut b_status = None;
+            // When the second side presses "They match": see `Order`.
+            let delay = match order {
+                Order::NewFirst => Duration::ZERO,
+                Order::OldFirst => Duration::from_secs(2),
+            };
+            let mut second_at: Option<tokio::time::Instant> = None;
             let run = async {
-                while !(a_done && b_done) {
+                while !(a.done && b.done) {
+                    // Once the time has come, the second side's own news drives it.
+                    let wake = second_at.filter(|at| *at > tokio::time::Instant::now());
                     tokio::select! {
-                        Some(event) = self.a_events.recv() => step(&self.a, event, &mut a_emoji, &mut a_done),
+                        Some(event) = self.a_events.recv() => a.see("A", &self.a, &event),
                         Some(event) = self.b_events.recv() => {
                             if let MatrixEvent::Security(s) = &event {
-                                b_keys = with_keys(s);
+                                b_status = Some(*s);
                             }
-                            step(&self.b, event, &mut b_emoji, &mut b_done);
+                            b.see("B", &self.b, &event);
                         }
+                        () = async {
+                            match wake {
+                                Some(at) => tokio::time::sleep_until(at).await,
+                                None => pending().await,
+                            }
+                        } => {}
+                    }
+                    let ((first, first_handle), (second, second_handle)) = match order {
+                        Order::NewFirst => ((&mut b, &self.b), (&mut a, &self.a)),
+                        Order::OldFirst => ((&mut a, &self.a), (&mut b, &self.b)),
+                    };
+                    first.confirm(first_handle);
+                    if first.confirmed && second_at.is_none() {
+                        second_at = Some(tokio::time::Instant::now() + delay);
+                    }
+                    if second_at.is_some_and(|at| tokio::time::Instant::now() >= at) {
+                        second.confirm(second_handle);
                     }
                 }
             };
             tokio::time::timeout(Duration::from_secs(90), run)
                 .await
                 .expect("timed out during the verification");
-            assert_eq!(a_emoji.len(), 7);
-            assert_eq!(a_emoji, b_emoji, "both devices must show the same emoji");
-            if !b_keys {
+            assert_eq!(a.emoji.len(), 7);
+            assert_eq!(a.emoji, b.emoji, "both devices must show the same emoji");
+            (a.emoji, b_status)
+        }
+
+        /// [`Pair::compare`], and B must end up verified with the keys passed over.
+        async fn finish(&mut self, order: Order) -> Vec<SasEmoji> {
+            let (emoji, b_status) = self.compare(order).await;
+            if !b_status.as_ref().is_some_and(with_keys) {
                 wait_for(
                     &mut self.b_events,
                     "B verified with the keys",
@@ -2210,7 +2377,40 @@ pub(super) mod tests {
                 )
                 .await;
             }
-            a_emoji
+            emoji
+        }
+
+        /// After the comparison: whether B gets the keys within `window` of being
+        /// verified. `last` is B's status as last seen.
+        async fn b_keys_within(&mut self, mut last: Option<Security>, window: Duration) -> bool {
+            loop {
+                if last.as_ref().is_some_and(with_keys) {
+                    return true;
+                }
+                let verified = last.is_some_and(|s| s.device == DeviceTrust::Verified);
+                let wait = if verified {
+                    window
+                } else {
+                    Duration::from_secs(60)
+                };
+                let next = tokio::time::timeout(wait, async {
+                    loop {
+                        match self.b_events.recv().await.expect("worker stopped") {
+                            MatrixEvent::Security(s) => return s,
+                            MatrixEvent::Error(err) | MatrixEvent::ActionFailed(err) => {
+                                panic!("B: {err}")
+                            }
+                            _ => {}
+                        }
+                    }
+                })
+                .await;
+                match next {
+                    Ok(status) => last = Some(status),
+                    Err(_) if verified => return false,
+                    Err(_) => panic!("B was never verified"),
+                }
+            }
         }
 
         async fn shut_down(self) {
@@ -2254,7 +2454,7 @@ pub(super) mod tests {
         trace();
         let mut pair = pair("ratverify").await;
         pair.b.send(MatrixCmd::Verification(VerifyCmd::Request));
-        pair.finish().await;
+        pair.finish(Order::OldFirst).await;
         pair.shut_down().await;
     }
 
@@ -2284,7 +2484,7 @@ pub(super) mod tests {
             .send(MatrixCmd::Verification(VerifyCmd::RequestDevice {
                 device_id: other.unwrap(),
             }));
-        pair.finish().await;
+        pair.finish(Order::OldFirst).await;
         // Asked afresh (the updates so far went by during the verification).
         pair.a.send(MatrixCmd::Devices(DevicesCmd::Watch(Some(1))));
         wait_for(&mut pair.a_events, "both sessions verified", |e| {
@@ -2337,13 +2537,222 @@ pub(super) mod tests {
             answer: Answer::Accept,
         }));
         // From here on as usual; B must never see its request cancelled.
-        pair.finish().await;
+        pair.finish(Order::OldFirst).await;
         pair.shut_down().await;
     }
 
+    /// The order with the window, new device first, between two matrix-rat devices
+    /// (see `Order::NewFirst`). It cannot be made to hit: B gets the keys all the same,
+    /// nearly always. When it hits, B stays verified without them; a few seconds tell
+    /// (the app's `KEYS_GRACE` is for people, not for this), and verifying again fixes
+    /// it. The test says which case it was, and never fails for the race itself.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs a local homeserver"]
+    async fn new_device_first_ends_with_the_keys() {
+        trace();
+        let mut pair = pair("ratnewfirst").await;
+        pair.b.send(MatrixCmd::Verification(VerifyCmd::Request));
+        let (_, b_status) = pair.compare(Order::NewFirst).await;
+        if pair.b_keys_within(b_status, Duration::from_secs(8)).await {
+            eprintln!("new device first: B got the signing keys (the race did not hit)");
+        } else {
+            eprintln!(
+                "new device first: B is verified without the signing keys (the race hit); \
+                 verifying again"
+            );
+            pair.b.send(MatrixCmd::Verification(VerifyCmd::Request));
+            pair.finish(Order::OldFirst).await;
+        }
+        pair.shut_down().await;
+    }
+
+    /// A plain SDK client (A) and a matrix-rat worker (B) on one new account, B verified
+    /// without the signing keys: the state the race leaves, but every time.
+    struct Unkeyed {
+        root: std::path::PathBuf,
+        a: Client,
+        a_sync: JoinHandle<()>,
+        /// A's recovery key, if it set up recovery.
+        recovery_key: Option<String>,
+        b: MatrixHandle,
+        b_events: UnboundedReceiver<MatrixEvent>,
+    }
+
+    /// A sets up cross-signing (and recovery, if asked), B logs in, and A signs B's
+    /// device by hand (`Device::verify`), with no verification and so no keys sent.
+    async fn unkeyed(prefix: &str, recovery: bool) -> Unkeyed {
+        let (name, password) = new_account(prefix).await;
+        let root = std::env::temp_dir().join(format!("matrix-rat-{name}"));
+        let (a, a_sync) = plain_login(&name, &password).await;
+        let recovery_key = if recovery {
+            Some(
+                a.encryption()
+                    .recovery()
+                    .enable()
+                    .await
+                    .expect("recovery on A"),
+            )
+        } else {
+            None
+        };
+        let (b, mut b_events) = spawn(worker_paths(&root, "b"));
+        b.send(MatrixCmd::LoginPassword {
+            homeserver: homeserver(),
+            username: name,
+            password: password.into(),
+        });
+        wait_for(&mut b_events, "B unverified with A present", |e| {
+            matches!(e, MatrixEvent::Security(s)
+                if s.identity == Identity::Present
+                    && s.device == DeviceTrust::Unverified
+                    && s.other_devices)
+        })
+        .await;
+        let user_id = a.user_id().unwrap().to_owned();
+        let own = a.device_id().unwrap().to_owned();
+        let device = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let devices = a.encryption().get_user_devices(&user_id).await.unwrap();
+                if let Some(device) = devices.devices().find(|d| d.device_id() != own) {
+                    return device;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        })
+        .await
+        .expect("A never saw B");
+        device.verify().await.expect("A signs B");
+        let mut status = None;
+        wait_for(&mut b_events, "B verified", |e| {
+            if let MatrixEvent::Security(s) = e
+                && s.device == DeviceTrust::Verified
+            {
+                status = Some(*s);
+            }
+            status.is_some()
+        })
+        .await;
+        let status = status.unwrap();
+        assert!(crate::verify::keys_missing(&status), "{status:?}");
+        Unkeyed {
+            root,
+            a,
+            a_sync,
+            recovery_key,
+            b,
+            b_events,
+        }
+    }
+
+    impl Unkeyed {
+        async fn shut_down(mut self) {
+            self.b.send(MatrixCmd::Shutdown);
+            while self.b_events.recv().await.is_some() {}
+            self.a_sync.abort();
+            let _ = std::fs::remove_dir_all(self.root);
+        }
+    }
+
+    /// The way out with another device: B, verified without the signing keys, asks
+    /// for a verification again, and gets them. B confirms first, the order with the
+    /// window (`Order::NewFirst`), on purpose: A trusts B already, so it answers B's
+    /// requests whatever the order.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs a local homeserver"]
+    async fn verified_without_keys_verify_again() {
+        trace();
+        let mut unkeyed = unkeyed("ratagain", false).await;
+        let b_confirmed = Arc::new(Notify::new());
+        let answering = tokio::spawn(answer_one_request(
+            unkeyed.a.clone(),
+            Some(b_confirmed.clone()),
+            None,
+        ));
+        unkeyed.b.send(MatrixCmd::Verification(VerifyCmd::Request));
+        let mut keys = false;
+        let run = async {
+            loop {
+                let update = match unkeyed.b_events.recv().await.expect("worker stopped") {
+                    MatrixEvent::Security(s) => {
+                        keys = with_keys(&s);
+                        continue;
+                    }
+                    MatrixEvent::Error(err) | MatrixEvent::ActionFailed(err) => panic!("{err}"),
+                    MatrixEvent::Verification(update) => update,
+                    _ => continue,
+                };
+                eprintln!("B: flow {} {:?}", update.flow, update.stage);
+                // It is this device that is verified (again).
+                assert!(update.own && update.this_device, "{update:?}");
+                match update.stage {
+                    VerifyStage::Compare { .. } => {
+                        unkeyed.b.send(MatrixCmd::Verification(VerifyCmd::Answer {
+                            flow: update.flow,
+                            answer: Answer::Match,
+                        }));
+                    }
+                    VerifyStage::Confirmed => b_confirmed.notify_one(),
+                    VerifyStage::Done => return,
+                    VerifyStage::Cancelled { reason } => panic!("cancelled: {reason}"),
+                    _ => {}
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(90), run)
+            .await
+            .expect("timed out during the verification");
+        tokio::time::timeout(Duration::from_secs(10), answering)
+            .await
+            .expect("A did not finish")
+            .expect("A failed");
+        if !keys {
+            wait_for(
+                &mut unkeyed.b_events,
+                "B with the signing keys",
+                |e| matches!(e, MatrixEvent::Security(s) if with_keys(s)),
+            )
+            .await;
+        }
+        unkeyed.shut_down().await;
+    }
+
+    /// The way out with the recovery key: it brings the signing keys and the backup key.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs a local homeserver"]
+    async fn verified_without_keys_recovery_key() {
+        trace();
+        let mut unkeyed = unkeyed("ratrecover", true).await;
+        let key = unkeyed.recovery_key.take().expect("a recovery key");
+        unkeyed.b.send(MatrixCmd::Recover { key: key.into() });
+        let (mut recovered, mut keys, mut backup) = (false, false, false);
+        wait_for(
+            &mut unkeyed.b_events,
+            "B recovered, with the signing keys and the backup",
+            |e| {
+                match e {
+                    MatrixEvent::RecoverResult(Ok(())) => recovered = true,
+                    MatrixEvent::RecoverResult(Err(err)) => panic!("recovery failed: {err}"),
+                    MatrixEvent::Security(s) => {
+                        keys = with_keys(s);
+                        backup = s.backup == BackupStatus::Enabled;
+                    }
+                    _ => {}
+                }
+                recovered && keys && backup
+            },
+        )
+        .await;
+        unkeyed.shut_down().await;
+    }
+
     /// The other device as a plain SDK client (like Element would be): answers one
-    /// verification request and confirms the emoji.
-    async fn answer_one_request(client: Client) {
+    /// verification request and confirms the emoji: once `go` is notified, if given.
+    /// Notifies `confirmed` once its confirmation is out.
+    async fn answer_one_request(
+        client: Client,
+        go: Option<Arc<Notify>>,
+        confirmed: Option<Arc<Notify>>,
+    ) {
         let (tx, mut rx) = unbounded_channel();
         client.add_event_handler(move |ev: ToDeviceKeyVerificationRequestEvent| {
             let tx = tx.clone();
@@ -2371,9 +2780,19 @@ pub(super) mod tests {
         let sas_changes = sas.changes();
         pin_mut!(sas_changes);
         sas.accept().await.expect("accept the comparison");
+        let mut answered = false;
         loop {
             match sas.state() {
-                SasState::KeysExchanged { .. } => sas.confirm().await.expect("confirm"),
+                SasState::KeysExchanged { .. } if !answered => {
+                    if let Some(go) = &go {
+                        go.notified().await;
+                    }
+                    sas.confirm().await.expect("confirm");
+                    answered = true;
+                    if let Some(confirmed) = &confirmed {
+                        confirmed.notify_one();
+                    }
+                }
                 SasState::Done { .. } => return,
                 SasState::Cancelled(info) => panic!("cancelled: {}", info.reason()),
                 _ => {}
@@ -2457,7 +2876,13 @@ pub(super) mod tests {
             let a = a.clone();
             async move { a.sync(SyncSettings::default()).await }
         });
-        let answering = tokio::spawn(answer_one_request(a.clone()));
+        // A confirms first, B a moment later: the safe order, `Order::OldFirst`.
+        let a_confirmed = Arc::new(Notify::new());
+        let answering = tokio::spawn(answer_one_request(
+            a.clone(),
+            None,
+            Some(a_confirmed.clone()),
+        ));
 
         // Device B: matrix-rat. The message is there but cannot be read.
         let root = std::env::temp_dir().join(format!("matrix-rat-history-{stamp}"));
@@ -2521,6 +2946,12 @@ pub(super) mod tests {
         let run = async {
             while !done {
                 let event = events.recv().await.expect("worker stopped");
+                if matches!(&event, MatrixEvent::Verification(update)
+                    if matches!(update.stage, VerifyStage::Compare { .. }))
+                {
+                    a_confirmed.notified().await;
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
                 step(&b, event, &mut emoji, &mut done);
             }
         };
@@ -2564,8 +2995,14 @@ pub(super) mod tests {
     /// A plain SDK client (like Element) on a new account, with cross-signing, syncing
     /// in the background.
     async fn plain_client(prefix: &str) -> (Client, JoinHandle<()>) {
-        use matrix_sdk::config::SyncSettings;
         let (name, password) = new_account(prefix).await;
+        plain_login(&name, &password).await
+    }
+
+    /// A plain SDK client logged in to the account, which it sets up cross-signing for,
+    /// syncing in the background.
+    async fn plain_login(name: &str, password: &str) -> (Client, JoinHandle<()>) {
+        use matrix_sdk::config::SyncSettings;
         let client = Client::builder()
             .homeserver_url(homeserver())
             .build()
@@ -2573,7 +3010,7 @@ pub(super) mod tests {
             .expect("client");
         client
             .matrix_auth()
-            .login_username(&name, &password)
+            .login_username(name, password)
             .send()
             .await
             .expect("login");
@@ -2582,7 +3019,7 @@ pub(super) mod tests {
             .await
             .expect("sync");
         assert_eq!(
-            set_up_cross_signing(&client, Some(password.into())).await,
+            set_up_cross_signing(&client, Some(password.to_owned().into())).await,
             SetUpOutcome::Done
         );
         let syncing = tokio::spawn({
