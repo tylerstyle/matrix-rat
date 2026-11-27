@@ -14,7 +14,7 @@ use matrix_sdk::ruma::events::room::message::{
     RoomMessageEventContent, RoomMessageEventContentWithoutRelation,
 };
 use matrix_sdk::ruma::{EventId, OwnedEventId, OwnedTransactionId, OwnedUserId, RoomId, UserId};
-use matrix_sdk::{Client, Room, RoomMemberships};
+use matrix_sdk::{Client, Room, RoomMemberships, SendOutsideWasm};
 use matrix_sdk_ui::eyeball_im::{Vector, VectorDiff};
 use matrix_sdk_ui::timeline::{
     MsgLikeKind, RoomExt, Timeline, TimelineDetails, TimelineEventFocusThreadMode,
@@ -272,13 +272,13 @@ impl Timelines {
     }
 
     /// Starts `work` among [`Self::actions`], letting go of those that are done.
-    fn spawn_action(&mut self, work: impl Future<Output = ()> + Send + 'static) {
+    fn spawn_action(&mut self, work: impl Future<Output = ()> + SendOutsideWasm + 'static) {
         while self.actions.try_join_next().is_some() {}
         self.actions.spawn(work);
     }
 
     /// Starts `work` among [`Self::lookups`], letting go of those that are done.
-    fn spawn_lookup(&mut self, work: impl Future<Output = ()> + Send + 'static) {
+    fn spawn_lookup(&mut self, work: impl Future<Output = ()> + SendOutsideWasm + 'static) {
         while self.lookups.try_join_next().is_some() {}
         self.lookups.spawn(work);
     }
@@ -557,7 +557,7 @@ impl Timelines {
     /// Runs `work` in the background and reports a failure to the user.
     fn spawn<F>(&mut self, what: &'static str, work: F)
     where
-        F: Future<Output = Result<()>> + Send + 'static,
+        F: Future<Output = Result<()>> + SendOutsideWasm + 'static,
     {
         let events = self.events.clone();
         self.spawn_action(async move {
@@ -572,7 +572,7 @@ impl Timelines {
     async fn with_timeline<F, Fut>(&mut self, room_id: &str, what: &'static str, work: F)
     where
         F: FnOnce(Arc<Timeline>) -> Fut,
-        Fut: Future<Output = Result<()>> + Send + 'static,
+        Fut: Future<Output = Result<()>> + SendOutsideWasm + 'static,
     {
         match self.timeline(room_id).await {
             Ok(timeline) => self.spawn(what, work(timeline)),
@@ -610,7 +610,7 @@ impl Timelines {
     async fn with_active_timeline<F, Fut>(&mut self, room_id: &str, what: &'static str, work: F)
     where
         F: FnOnce(Arc<Timeline>) -> Fut,
-        Fut: Future<Output = Result<()>> + Send + 'static,
+        Fut: Future<Output = Result<()>> + SendOutsideWasm + 'static,
     {
         match self.active_timeline(room_id).await {
             Ok((timeline, _)) => self.spawn(what, work(timeline)),

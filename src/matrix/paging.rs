@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures::{FutureExt, pin_mut};
+use matrix_sdk::SendOutsideWasm;
 use matrix_sdk_ui::timeline::{Error as TimelineError, Timeline};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -33,7 +34,7 @@ impl Paging {
     /// Loads the page with `load`, and sends the UI the answer it gives.
     pub(super) fn spawn(
         events: UnboundedSender<MatrixEvent>,
-        load: impl Future<Output = MatrixEvent> + Send + 'static,
+        load: impl Future<Output = MatrixEvent> + SendOutsideWasm + 'static,
     ) -> Self {
         let answered = Arc::new(AtomicBool::new(false));
         let done = answered.clone();

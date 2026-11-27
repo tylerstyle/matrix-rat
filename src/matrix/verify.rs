@@ -12,7 +12,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::{Stream, StreamExt, pin_mut};
-use matrix_sdk::Client;
 use matrix_sdk::config::RequestConfig;
 use matrix_sdk::encryption::VerificationState;
 use matrix_sdk::encryption::backups::BackupState;
@@ -41,6 +40,7 @@ use matrix_sdk::ruma::to_device::DeviceIdOrAllDevices;
 use matrix_sdk::ruma::{
     DeviceId, MilliSecondsSinceUnixEpoch, OwnedDeviceId, OwnedUserId, TransactionId, UserId,
 };
+use matrix_sdk::{Client, SendOutsideWasm};
 use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
@@ -666,7 +666,7 @@ impl Verifier {
     }
 
     /// Runs `work` for this session only.
-    fn spawn(&mut self, work: impl Future<Output = ()> + Send + 'static) {
+    fn spawn(&mut self, work: impl Future<Output = ()> + SendOutsideWasm + 'static) {
         // Forget the ones that are done.
         while self.tasks.try_join_next().is_some() {}
         self.tasks.spawn(work);
@@ -970,7 +970,12 @@ async fn await_own_signature(client: &Client, refresh: &Notify) {
     }
 }
 
+/// `Sas::changes`, boxed: `Send` on native, as the verification's task must be, and not in
+/// the browser, where the stream is not `Send` (as matrix-sdk's own `BoxFuture`).
+#[cfg(not(target_family = "wasm"))]
 type SasStream = Pin<Box<dyn Stream<Item = SasState> + Send>>;
+#[cfg(target_family = "wasm")]
+type SasStream = Pin<Box<dyn Stream<Item = SasState>>>;
 
 /// One verification, from request to result. Runs on its own task.
 struct Flow {

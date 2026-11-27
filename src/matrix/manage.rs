@@ -25,7 +25,9 @@ use matrix_sdk::ruma::{
     Int, OwnedRoomAliasId, OwnedRoomOrAliasId, OwnedServerName, OwnedUserId, RoomAliasId, RoomId,
     RoomOrAliasId, ServerName, UInt, UserId,
 };
-use matrix_sdk::{Client, NotificationSettingsError, Room, RoomMemberships, RoomState};
+use matrix_sdk::{
+    Client, NotificationSettingsError, Room, RoomMemberships, RoomState, SendOutsideWasm,
+};
 use tokio::sync::{Notify, mpsc::UnboundedSender, watch};
 
 use super::MatrixEvent;
@@ -919,7 +921,10 @@ impl Manager {
     }
 
     /// Starts `work` among [`Self::tasks`], letting go of those that are done.
-    fn spawn_task(&mut self, work: impl std::future::Future<Output = ()> + Send + 'static) {
+    fn spawn_task(
+        &mut self,
+        work: impl std::future::Future<Output = ()> + SendOutsideWasm + 'static,
+    ) {
         while self.tasks.try_join_next().is_some() {}
         self.tasks.spawn(work);
     }
@@ -1461,8 +1466,8 @@ impl Manager {
 
     fn spawn_setting<F, Fut>(&mut self, room_id: String, change: Change, work: F)
     where
-        F: FnOnce(Client, Room) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = Result<(), String>> + Send,
+        F: FnOnce(Client, Room) -> Fut + SendOutsideWasm + 'static,
+        Fut: std::future::Future<Output = Result<(), String>> + SendOutsideWasm,
     {
         let client = self.client.clone();
         let events = self.events.clone();
@@ -1485,8 +1490,8 @@ impl Manager {
 
     fn spawn_tag<F, Fut>(&mut self, room_id: String, what: &'static str, change: Change, work: F)
     where
-        F: FnOnce(Room) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = matrix_sdk::Result<()>> + Send,
+        F: FnOnce(Room) -> Fut + SendOutsideWasm + 'static,
+        Fut: std::future::Future<Output = matrix_sdk::Result<()>> + SendOutsideWasm,
     {
         let client = self.client.clone();
         let events = self.events.clone();
@@ -1511,8 +1516,8 @@ impl Manager {
         change: Change,
         work: F,
     ) where
-        F: FnOnce(Room, OwnedUserId) -> Fut + Send + 'static,
-        Fut: std::future::Future<Output = matrix_sdk::Result<()>> + Send,
+        F: FnOnce(Room, OwnedUserId) -> Fut + SendOutsideWasm + 'static,
+        Fut: std::future::Future<Output = matrix_sdk::Result<()>> + SendOutsideWasm,
     {
         let client = self.client.clone();
         let events = self.events.clone();
