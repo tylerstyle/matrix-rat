@@ -1033,6 +1033,57 @@ mod tests {
         .expect("timed out waiting for Timeline message")
     }
 
+    /// The message `id` once it is deleted and `done` accepts how; on a time-out, what
+    /// was seen of it last.
+    async fn wait_deleted(
+        events: &mut UnboundedReceiver<MatrixEvent>,
+        room_id: &str,
+        id: &str,
+        done: impl Fn(&crate::model::Deletion) -> bool,
+    ) -> Message {
+        use crate::model::{DeletedBy, Deletion};
+        let mut last: Option<Option<Deletion>> = None;
+        let found = tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                match events.recv().await.expect("worker stopped") {
+                    MatrixEvent::Timeline {
+                        room_id: rid,
+                        messages,
+                        ..
+                    } if rid == room_id => {
+                        let Some(message) = messages.iter().find(|m| m.event_id() == Some(id))
+                        else {
+                            continue;
+                        };
+                        if message.deleted.as_ref().is_some_and(&done) {
+                            return message.clone();
+                        }
+                        last = Some(message.deleted.clone());
+                    }
+                    MatrixEvent::Error(err) => panic!("{err}"),
+                    _ => {}
+                }
+            }
+        })
+        .await;
+        found.unwrap_or_else(|_| {
+            // Test data only: written out whole.
+            let seen = match last {
+                None => "never seen".to_owned(),
+                Some(None) => "not deleted".to_owned(),
+                Some(Some(Deletion { reason, by })) => {
+                    let by = match by {
+                        DeletedBy::Sender => "the sender".to_owned(),
+                        DeletedBy::Us => "us".to_owned(),
+                        DeletedBy::Other { user_id, name } => format!("{name:?} ({user_id})"),
+                    };
+                    format!("reason {reason:?}, by {by}")
+                }
+            };
+            panic!("timed out waiting for the deletion; seen last: {seen}")
+        })
+    }
+
     async fn invite_and_join_bob(
         alice: &MatrixHandle,
         alice_events: &mut UnboundedReceiver<MatrixEvent>,
@@ -1740,11 +1791,6 @@ mod tests {
                     .cloned()
             })
             .await;
-            let deletion_of = |msgs: &[Message], id: &str| {
-                msgs.iter()
-                    .find(|m| m.event_id() == Some(id) && m.kind == MsgKind::Redacted)
-                    .and_then(|m| m.deleted.clone())
-            };
 
             // Alice, the room's admin, deletes bob's message with a reason.
             h_a.send(MatrixCmd::Redact {
@@ -1752,12 +1798,7 @@ mod tests {
                 item: ItemRef::Event(spam.clone()),
                 reason: Some("spam link".into()),
             });
-            let ours = wait_timeline_msg(&mut ev_a, &room_id, |msgs| {
-                msgs.iter()
-                    .find(|m| m.event_id() == Some(spam.as_str()) && m.deleted.is_some())
-                    .cloned()
-            })
-            .await;
+            let ours = wait_deleted(&mut ev_a, &room_id, &spam, |_| true).await;
             assert_eq!(
                 ours.deleted,
                 Some(Deletion {
@@ -1768,12 +1809,8 @@ mod tests {
             assert_eq!(ours.deleted_line(), "Deleted by you: spam link");
             // Bob sees who deleted it, by name, and why. The reason may come a moment
             // before the name.
-            let seen = wait_timeline_msg(&mut ev_b, &room_id, |msgs| {
-                let deletion = deletion_of(msgs, &spam)?;
+            let seen = wait_deleted(&mut ev_b, &room_id, &spam, |deletion| {
                 matches!(&deletion.by, DeletedBy::Other { name, .. } if !name.starts_with('@'))
-                    .then(|| msgs.iter().find(|m| m.event_id() == Some(spam.as_str())))
-                    .flatten()
-                    .cloned()
             })
             .await;
             let Some(Deletion {
@@ -1786,7 +1823,10 @@ mod tests {
             assert_eq!(reason.as_deref(), Some("spam link"));
             assert_eq!(user_id, &alice_id);
             assert!(!name.is_empty() && name != &alice_id);
-            assert_eq!(seen.body, "Message deleted");
+            assert_eq!(
+                (seen.kind, seen.body.as_str()),
+                (MsgKind::Redacted, "Message deleted")
+            );
             assert_eq!(seen.deleted_line(), format!("Deleted by {name}: spam link"));
 
             // Bob deletes his own message with a reason: alice sees no one named.
@@ -1795,15 +1835,8 @@ mod tests {
                 item: ItemRef::Event(wrong_room.clone()),
                 reason: Some("sent to the wrong room".into()),
             });
-            let seen = wait_timeline_msg(&mut ev_a, &room_id, |msgs| {
-                let deletion = deletion_of(msgs, &wrong_room)?;
-                (deletion.reason.is_some())
-                    .then(|| {
-                        msgs.iter()
-                            .find(|m| m.event_id() == Some(wrong_room.as_str()))
-                    })
-                    .flatten()
-                    .cloned()
+            let seen = wait_deleted(&mut ev_a, &room_id, &wrong_room, |deletion| {
+                deletion.reason.is_some()
             })
             .await;
             assert_eq!(
