@@ -174,8 +174,8 @@ yet; each piece is written and reviewed as in §4.
 **Decided by the user on 2026-11-27:** the two fixes to released code on `main` (a name for one
 room before sync; the SDK's panic while loading older messages) ship with 1.1.0, no 1.0.4.
 Order: phase 1 of the web app is finished (steps 6 and 7) and `web-seams` merged into `main`
-first, then all of 1.1.0 is built on top. 1.1.0 starts with matrix-sdk 0.20, then notify 9 and
-the dot. Building starts once all is talked through (2026-11-27).
+first, then all of 1.1.0 is built on top. 1.1.0 starts with matrix-sdk 0.20, then notify 9 (accepted) and
+the dot. `--mobile` is dropped (§6.4). Building starts once all is talked through (2026-11-27).
 
 - **matrix-sdk 0.20** (published 2026-11-25; the user: "Yes, integrate the new sdk!"), first:
   about 19 breaking changes in matrix-sdk and more in matrix-sdk-ui. It fixes the race that
@@ -189,27 +189,6 @@ the dot. Building starts once all is talked through (2026-11-27).
   matched (`src/logsafe.rs`) and how events and watching the same path again behave
   (`src/watch.rs`); its guide is `docs/UPGRADING_V8_TO_V9.md` in notify-rs/notify. With its own
   review and the theme watcher tried by hand.
-- **Planning first: using it over ssh from a phone** (under discussion since 2026-11-27: the
-  user finds it moot next to the web app on phones, "That makes the --mobile version moot";
-  the narrow layout and every action without Esc, Ctrl or Alt would go to phase 3 instead;
-  not decided yet) (the user, 2026-11-21): "think about ssh
-  problems rising from using onscreen keyboards without proper keys and the shortcuts, that
-  fall because of it. ESC isn't always there. Alt and Ctrl also. Brainstorm, how this could be
-  done when connecting from mobile. Maybe an option to pass for mobile friendly keybinds and
-  even ui elements (although that might be unnecessary, because it is very good already).
-  Like `matrix-rat --mobile`." A brainstorm and a proposal for the user come before any code.
-  What there is to build on: key presets (`default`, `vim` in `src/keymap.rs`) and `[keys]`
-  overrides; clicks on nearly everything; right-click menus; the command palette (`Ctrl-P`),
-  which reaches every action. Esc closes popups and leaves modes (16 places in the README's
-  key tables); most other shortcuts are `Ctrl-` or `Alt-`. The user's client today is iSH on
-  iOS (a Linux emulator with `ssh` inside; a row of extra keys); they would like a better one,
-  perhaps on libghostty. Candidates found on 2026-11-22: gterm (free on the App Store, its key
-  bar has Esc, Ctrl, Alt, Tab and arrows, Ed25519 keys) and VVTerm (App Store, Ghostty-based,
-  the most active of them), with Echo, Spectty and Geistty in the awesome-libghostty list. To
-  find out first: what each client's keys send; whether a tap and a long press reach the app
-  as a click and a right-click; whether it shows full colour; which actions have no way in
-  without Esc, Ctrl or Alt. Since the same profile is used from the desktop too, a per-start
-  switch (`--mobile`) may suit better than a setting in `config.toml`.
 - **Several messages of one person in a row, told apart** (the user, 2026-11-23): "a separator
   in the chat view, when someone posts multiple messages. As it is now, they look as if written
   as one and are hard to visually separate. … A line break, a line. Make suggestions." Today a
@@ -251,7 +230,7 @@ backend, and installable on iOS and Android as a home-screen app (a PWA).
 - **ratzilla's gaps for phones** (0.3.1): only `keydown` and mouse events, so no paste, touch
   or input-method typing; its issue #192 (input dead after a resize; the phone keyboard
   resizes the page). Ratatui's contribution rules accept AI-assisted PRs with disclosure.
-- **Phones:** a narrow layout (shared with the ssh `--mobile` work of 1.1.0), an HTML key bar
+- **Phones:** a narrow layout, an HTML key bar
   (Esc, Tab, Ctrl, Alt, arrows, palette), the composer as a native text field (autocorrect,
   dictation, any language), tap = click, long press = right-click, swipe = scroll; installed
   from Safari (Add to Home Screen) or Chrome (Install app); offline start by a service worker
@@ -270,7 +249,9 @@ backend, and installable on iOS and Android as a home-screen app (a PWA).
   download, how fast on a phone, does matrix.org's OAuth accept the Pages address); 1 the
   interfaces; 2 the web app; 3 the phone version; 4 later: real pictures, voice, push, app
   stores. **Versions** (the user, 2026-11-27): 1.2.0 is phase 2, the web app usable in
-  browsers and on phones at least as the test build is; 1.3.0 is phase 3, the phone version.
+  browsers and on phones at least as the test build is; 1.3.0 is phase 3, the phone version. The phone-friendly keys come with 1.2.0
+  already (the user): the key bar (Esc, Tab, Ctrl, Alt, arrows, palette) and every action
+  reachable without Esc, Ctrl or Alt.
 - **Phase 0 on the user's iPhone** (2026-11-27): OAuth login to matrix.org works in Safari
   and in the home-screen app (which needs its own login: iOS keeps its storage apart from
   Safari's, and it is a device of its own); sending works; still logged in after the app was
@@ -324,6 +305,11 @@ backend, and installable on iOS and Android as a home-screen app (a PWA).
 
 ### 6.4 Not wanted or not pursued
 
+- **`--mobile`, a mode for ssh from a phone** (planned for 1.1.0 on 2026-11-21, dropped by the
+  user on 2026-11-27: "Drop --mobile"): the web app on phones serves that better, talking to the
+  homeserver directly; its key bar and every action without Esc, Ctrl or Alt come with 1.2.0,
+  the narrow layout with 1.3.0. The client survey of 2026-11-22 (iSH, gterm, VVTerm) is in
+  this file's history.
 - **By the user's decision** (2026-11-20 unless dated otherwise): a plugin system; sticker
   packs beyond the picker that exists; an image generator; a lock screen; popping out a
   chat; several accounts in one window (one window per `--profile` instead); feeds, Home
