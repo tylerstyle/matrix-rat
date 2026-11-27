@@ -2,7 +2,7 @@
 name = "matrix-rat"
 version = "1.0.3"
 edition = "2024"
-rust-version = "1.96"
+rust-version = "1.99"
 license = "Apache-2.0"
 description = "A mouse-friendly, themeable Matrix client for the terminal"
 repository = "https://github.com/tylerstyle/matrix-rat"

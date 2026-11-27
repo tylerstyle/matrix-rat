@@ -65,7 +65,7 @@ pinned exactly (every minor release breaks APIs); `ratatui` 0.30 on `crossterm` 
 for code colours; `nucleo-matcher` for fuzzy search; `toml` and `toml_edit` for the config
 (comments survive a write-back); `zbus` and `notify-rust` for the desktop; `notify` for watching
 theme files; `insta` for snapshots.
-Rust 1.96 or newer.
+Rust 1.99 or newer.
 
 **The two halves.**
 
