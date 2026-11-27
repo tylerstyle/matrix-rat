@@ -3151,6 +3151,22 @@ mod tests {
             }
         };
 
+        // Our joining is in our view before the other says anything: else it can reach our
+        // timeline after their messages, and count as one of the last lines asked for. It
+        // is the one joining after our invitation, whatever the names are.
+        until(&handle, &mut events, 900, last(20), |text| {
+            let lines: Vec<&str> = text.text.lines().collect();
+            lines
+                .iter()
+                .position(|line| line.contains(" was invited by "))
+                .is_some_and(|at| {
+                    lines[at + 1..]
+                        .iter()
+                        .any(|line| line.ends_with(" joined)"))
+                })
+        })
+        .await;
+
         // 1. More than asked for (and than a fresh timeline holds); all of them read.
         let said: Vec<String> = (0..ASKED + 25)
             .map(|n| format!("said-{run}-{n:02}"))
