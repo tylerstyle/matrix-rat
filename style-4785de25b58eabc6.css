@@ -1,0 +1,98 @@
+/* The page around ratzilla's grid, in matrix-rat's rat-dark colours (themes/rat-dark.toml).
+   A file of its own, not a <style> element: the content security policy allows
+   stylesheets only from the page's own origin. */
+html {
+  height: 100%;
+  background: #16161d;
+}
+/* The page covers the visual viewport (the part that is visible), whose height and top
+   the app writes into --vv-height and --vv-top (src/web.rs, fit_to_viewport): iOS opens
+   its keyboard over the page and shrinks only the visual viewport, so the page would
+   otherwise reach under the keyboard or be pushed up out of sight. Fixed, so the top
+   can follow the visual viewport where iOS moves it. 100dvh until the app runs. */
+body {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: var(--vv-top, 0px);
+  height: var(--vv-height, 100dvh);
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  background: #16161d;
+  color: #dcd7ba;
+  font-family: ui-monospace, "DejaVu Sans Mono", Menlo, Consolas, monospace;
+  font-size: 15px;
+}
+/* ratzilla's grid: one <pre> per row, one <span> per cell. */
+#term {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  cursor: default;
+  -webkit-user-select: none;
+  user-select: none;
+}
+#term pre { margin: 0; font: inherit; }
+/* A fixed height (the field and the button are 44 px whatever their text): ratzilla
+   measures #term only when told the size changed, so the line form must not change
+   its height later. */
+#line-form {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 8px;
+  background: #1f1f28;
+}
+/* At most a quarter of the width, so the field keeps most of it on a phone. */
+#line-label {
+  color: #7fb4ca;
+  white-space: nowrap;
+  max-width: 25%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#line {
+  flex: 1;
+  min-width: 0;
+  box-sizing: border-box;
+  height: 44px;
+  /* 16px or more: iOS Safari zooms into smaller fields on focus. */
+  font: 16px ui-monospace, monospace;
+  color: inherit;
+  background: #16161d;
+  border: 1px solid #54546d;
+  border-radius: 4px;
+  padding: 6px;
+}
+/* Submits like Enter. 44 px: the smallest comfortable tap target. */
+#line-send {
+  flex: none;
+  box-sizing: border-box;
+  height: 44px;
+  min-width: 44px;
+  padding: 0 12px;
+  font: bold 16px ui-monospace, monospace;
+  white-space: nowrap;
+  color: #16161d;
+  background: #7fb4ca;
+  border: 0;
+  border-radius: 4px;
+  -webkit-appearance: none;
+  appearance: none;
+  touch-action: manipulation;
+}
+#line-send:disabled {
+  color: #727169;
+  background: #2a2a37;
+}
+/* A fixed height, for the same reason as the line form. */
+#hint {
+  font-size: 11px;
+  line-height: 14px;
+  height: 14px;
+  overflow: hidden;
+  white-space: nowrap;
+  color: #727169;
+  padding: 0 8px 2px;
+}

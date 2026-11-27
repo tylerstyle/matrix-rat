@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!-- First, so it covers everything after it. A meta element because GitHub Pages
+         sends no headers of ours; frame-ancestors, sandbox and reporting cannot be set
+         this way (see README). Scripts: trunk's loader is moved into its own file by
+         tools/post_build.py; 'wasm-unsafe-eval' lets the page compile its wasm.
+         style-src-attr: ratzilla colours every cell with a style attribute. -->
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' https:; img-src 'self' data: blob:; style-src 'self'; style-src-attr 'unsafe-inline'; font-src 'self'; manifest-src 'self'; base-uri 'self'; form-action 'none'; object-src 'none'" />
+    <!-- trunk fills in the public URL (/ locally, /matrix-rat/ on GitHub Pages). Before
+         every relative link below, which it is the base of. -->
+    <base href="/matrix-rat/" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content" />
+    <meta name="robots" content="noindex" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#1f1f28" />
+    <!-- The build: the commit it is made from ("+dirty": with uncommitted changes) and
+         when it was built (UTC). Written by tools/post_build.py (the commit also into the
+         title) and shown on the page; "dev" without them. -->
+    <meta name="build" content="acec2e6" />
+    <meta name="build-time" content="2026-11-27T09:08Z" />
+    <title>matrix-rat (test acec2e6)</title>
+    <!-- Home screen: the manifest and the icons are made by tools/post_build.py from
+         assets/icon.svg and assets/avatar.svg. No service worker (each load is fresh). -->
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png" />
+    <link rel="apple-touch-icon" href="apple-touch-icon.png" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+    <meta name="apple-mobile-web-app-title" content="matrix-rat" />
+    <link rel="stylesheet" href="/matrix-rat/style-4785de25b58eabc6.css" integrity="sha384-j9JaETRPT/dqXkNyRgNLzZBMJVHkuBZdeii57gM79ONd9di7NIfb/8OHX2vm3o08"/>
+    
+<script type="module" src="/matrix-rat/loader-d8f076b041623a2d.js" integrity="sha384-ANZ9PFulMwkffrAMg3rrDqKBw7S8ZakhWNC7JmpyUA7oojVLE3qW2J5B1Jo1W6t4" crossorigin="anonymous"></script>
+  <link rel="modulepreload" href="/matrix-rat/matrix-rat-web-spike-e551e80b13243f99.js" crossorigin="anonymous" integrity="sha384-cuCx/B5TNKdobVPx381phPmF1IFnYGJpNomV77GK56f7So0ZmoaEz2BdAJahgfYi"><link rel="preload" href="/matrix-rat/matrix-rat-web-spike-e551e80b13243f99_bg.wasm" crossorigin="anonymous" integrity="sha384-5YAs/vPRZXvwSYabiD1vye0KltR2EUKDG0NBxsSsRKD6+M/LNVAAivW/Q+K3kXRw" as="fetch" type="application/wasm"></head>
+  <body>
+    <div id="term"></div>
+    <!-- The field and its button start disabled: nothing can be typed while the 9.6 MB
+         of wasm load. The app turns them on (App::set_line) as soon as its screen takes
+         text. The button submits the form as Enter does, so a closed phone keyboard
+         need not be opened again to send; the app names it per step (Send, Next, ...). -->
+    <form id="line-form" autocomplete="off">
+      <label id="line-label" for="line"></label>
+      <input id="line" name="line" type="text" autocomplete="off" autocapitalize="off"
+             spellcheck="true" enterkeyhint="send" disabled />
+      <button id="line-send" type="submit" disabled>Send</button>
+    </form>
+    <div id="hint"></div>
+  </body>
+</html>
