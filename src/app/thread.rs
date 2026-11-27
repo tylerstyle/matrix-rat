@@ -515,6 +515,8 @@ impl App {
                 | MatrixCmd::EditPoll { item, .. }
                 | MatrixCmd::ToggleReaction { item, .. }
                 | MatrixCmd::Redact { item, .. }
+                | MatrixCmd::Retry { item, .. }
+                | MatrixCmd::Discard { item, .. }
                 | MatrixCmd::FetchSource { item, .. } => {
                     matches!(item, ItemRef::Event(id) if id == root)
                 }
@@ -538,7 +540,6 @@ impl App {
                 | MatrixCmd::Pin { .. }
                 | MatrixCmd::FetchPinned { .. }
                 | MatrixCmd::Forward { .. }
-                | MatrixCmd::Retry { .. }
                 | MatrixCmd::Typing { .. }
                 | MatrixCmd::MarkRead { .. }
                 | MatrixCmd::SetUnread { .. }
@@ -606,6 +607,7 @@ impl App {
                 | MatrixCmd::ToggleReaction { .. }
                 | MatrixCmd::Redact { .. }
                 | MatrixCmd::Retry { .. }
+                | MatrixCmd::Discard { .. }
                 | MatrixCmd::RetryDecryption { .. }
                 | MatrixCmd::FetchSource { .. }
                 | MatrixCmd::Paginate { .. }

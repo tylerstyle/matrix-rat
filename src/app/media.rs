@@ -841,6 +841,7 @@ mod tests {
                 key: "mxc://example.org/party".into(),
                 count: 3,
                 own: false,
+                failed: false,
             }],
             ..text(id, "look here")
         }

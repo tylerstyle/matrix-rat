@@ -11,7 +11,7 @@ use ratatui::layout::Rect;
 use crate::action::Action;
 use crate::keymap::{Context, Keymap};
 use crate::manage::Click;
-use crate::model::{ItemRef, Message, MsgKind, ReadBy, Room, RoomKind, SendState};
+use crate::model::{FailedChange, ItemRef, Message, MsgKind, ReadBy, Room, RoomKind, SendState};
 use crate::text::{sanitize_line, truncate, width};
 
 /// What a menu is about. Held by identity, never by position: the thing is looked
@@ -426,8 +426,10 @@ pub fn message_items(message: &Message, facts: MessageFacts, keys: &Keymap) -> V
     let readable = matches!(message.kind, MsgKind::Text | MsgKind::Emote);
     let mut items = Vec::new();
 
-    if facts.connected && message.state == SendState::Failed {
-        // The reply key retries a message that was not sent.
+    // A change of ours to a message on the server that could not be sent.
+    let failed_change = message.failed_change().filter(|_| sent);
+    if facts.connected && message.failed_any() {
+        // The reply key retries what was not sent.
         items.push(Item::action(
             keys,
             "Try sending again",
@@ -435,7 +437,8 @@ pub fn message_items(message: &Message, facts: MessageFacts, keys: &Keymap) -> V
             Action::Reply,
         ));
     }
-    if sent && addressable && !deleted {
+    // The reply key tries again while a change failed.
+    if sent && addressable && !deleted && failed_change.is_none() {
         items.push(Item::action(keys, "Reply", Timeline, Action::Reply));
     }
     if sent && addressable && !facts.in_thread && (message.thread.is_some() || !deleted) {
@@ -620,7 +623,16 @@ pub fn message_items(message: &Message, facts: MessageFacts, keys: &Keymap) -> V
         Timeline,
         Action::MessageDetails,
     ));
-    if message.own && !sent {
+    if let Some(change) = failed_change {
+        // Del throws away what did not go out; a deletion would wait behind it anyway.
+        let label = match change {
+            FailedChange::Edit => "Discard edit",
+            FailedChange::Deletion => "Keep the message",
+            FailedChange::Reaction => "Remove the reaction",
+            FailedChange::Several => "Discard what was not sent",
+        };
+        items.push(Item::action(keys, label, Timeline, Action::Delete));
+    } else if message.own && !sent {
         // Deleting what has not been sent takes it out of the queue.
         items.push(Item::action(keys, "Discard", Timeline, Action::Delete));
     } else if message.own && addressable && !deleted {
@@ -1261,6 +1273,54 @@ mod tests {
             labels(&message_items(&sending, CONNECTED, &keys())),
             ["Copy text", "Message details", "Discard"]
         );
+    }
+
+    /// A change of ours that could not be sent: tried again at the top, and the Del
+    /// entry names what it throws away, in place of the deletions; on someone else's
+    /// message too.
+    #[test]
+    fn failed_changes_can_be_retried_or_discarded() {
+        let facts = MessageFacts {
+            can_redact_other: true,
+            ..CONNECTED
+        };
+        let reaction = |failed| crate::model::Reaction {
+            key: "👍".into(),
+            count: 1,
+            own: true,
+            failed,
+        };
+        let mut edited = text(true);
+        edited.edit_error = Some("not allowed in this room".into());
+        let mut deleted = text(false);
+        deleted.kind = MsgKind::Redacted;
+        deleted.delete_error = Some(String::new());
+        let mut reacted = text(false);
+        reacted.reactions = vec![reaction(true)];
+        let mut both = edited.clone();
+        both.reactions = vec![reaction(true)];
+        for (message, del) in [
+            (&edited, "Discard edit"),
+            (&deleted, "Keep the message"),
+            (&reacted, "Remove the reaction"),
+            (&both, "Discard what was not sent"),
+        ] {
+            let items = message_items(message, facts, &keys());
+            let labels = labels(&items);
+            assert_eq!(labels[0], "Try sending again", "{labels:?}");
+            assert_eq!(items[0].hint, "Enter", "{labels:?}");
+            let entry = items.iter().find(|item| item.label == del).unwrap();
+            assert_eq!(entry.hint, "Del");
+            for gone in ["Reply", "Delete", "Delete…", "Delete with a reason…"] {
+                assert!(!labels.contains(&gone), "{labels:?}");
+            }
+        }
+        // Once it went out: as before.
+        reacted.reactions = vec![reaction(false)];
+        let items = message_items(&reacted, facts, &keys());
+        let labels = labels(&items);
+        assert!(labels.contains(&"Reply") && labels.contains(&"Delete…"));
+        assert!(!labels.contains(&"Try sending again"));
     }
 
     #[test]

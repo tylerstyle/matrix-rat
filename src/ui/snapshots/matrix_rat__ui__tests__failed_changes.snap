@@ -1,0 +1,20 @@
+---
+source: src/ui/mod.rs
+expression: "render(&mut app, 110, 16)"
+---
+"╭ 1 Rooms ────────── + ╮╭ 2 #rust ───────────────────────────────────────────────────────────────────────────╮"
+"│ Filter rooms…        ││                                                                                    │"
+"│ ○ Unread  ○ People   ││                                                                                    │"
+"│ Favourites           ││                                                                                    │"
+"│▌R  rust              ││────────────────────────────────────── Today ────────────────────────────────────── │"
+"│ M  matrix-rat        ││● you  12:00                                                                        │"
+"│ People               ││  Fixed the typo (edited) ✕ edit not sent: not allowed in this room                 │"
+"│ B  bob            2  ││· Message deleted ✕ deletion not sent                                               │"
+"│ C  carol             ││· Ship it                                                                           │"
+"│ Rooms                ││   👍 1 ✕                                                                           │" Hidden by multi-width symbols: [(29, " ")]
+"│ D  design         5  ││· And one more ◌ waiting                                                            │"
+"│ N  nixos             │╰────────────────────────────────────────────────────────────────────────────────────╯"
+"│ O  off-topic     12  │╭ 3 Message ─────────────────────────────────────────────────────────────────────────╮"
+"│                      ││ Type a message…                                                              📎 🙂 │" Hidden by multi-width symbols: [(104, " "), (107, " ")]
+"╰──────────────────────╯╰────────────────────────────────────────────────────────────────────────────────────╯"
+" ● demo data  Enter send  Shift-Enter line break  ↑ select message          F1 help  F2 settings  F3 rat-dark "

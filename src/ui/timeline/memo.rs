@@ -608,6 +608,9 @@ fn hash_message(message: &Message, h: &mut impl Hasher) {
         poll,
         upload,
         send_error,
+        edit_error,
+        delete_error,
+        held,
         shield,
         mentions,
         read_by,
@@ -642,10 +645,17 @@ fn hash_message(message: &Message, h: &mut impl Hasher) {
     subject.hash(h);
     reply_event.hash(h);
     reactions.len().hash(h);
-    for Reaction { key, count, own } in reactions {
+    for Reaction {
+        key,
+        count,
+        own,
+        failed,
+    } in reactions
+    {
         key.hash(h);
         count.hash(h);
         own.hash(h);
+        failed.hash(h);
     }
     match image {
         None => 0u8.hash(h),
@@ -712,6 +722,9 @@ fn hash_message(message: &Message, h: &mut impl Hasher) {
     }
     upload.hash(h);
     send_error.hash(h);
+    edit_error.hash(h);
+    delete_error.hash(h);
+    held.hash(h);
     shield.map(|shield| discriminant(&shield)).hash(h);
     match mentions {
         None => 0u8.hash(h),
@@ -1079,6 +1092,7 @@ mod tests {
             key: key.to_owned(),
             count,
             own: false,
+            failed: false,
         }
     }
 
@@ -1287,6 +1301,17 @@ mod tests {
         assert_eq!(world.step("deleted"), n - 1);
         world.at("a1").saved = true;
         assert_eq!(world.step("saved"), n - 1);
+        // Changes of ours that could not be sent, and a message held up behind them.
+        world.at("a2").edit_error = Some("not allowed in this room".into());
+        assert_eq!(world.step("an edit not sent"), n - 1);
+        world.at("a1").delete_error = Some(String::new());
+        assert_eq!(world.step("a deletion not sent"), n - 1);
+        world.at("c1").reactions[0].failed = true;
+        assert_eq!(world.step("a reaction not sent"), n - 1);
+        world.at("y1").state = SendState::Sending;
+        assert_eq!(world.step("sending again"), n - 1);
+        world.at("y1").held = true;
+        assert_eq!(world.step("held"), n - 1);
     }
 
     #[test]

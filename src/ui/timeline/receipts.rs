@@ -404,6 +404,7 @@ mod tests {
             key: "👍".into(),
             count: 1,
             own: false,
+            failed: false,
         }];
         let marked = lines(&busy, 40);
         let row = marked.last().unwrap();

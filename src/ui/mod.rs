@@ -875,6 +875,55 @@ mod tests {
         insta::assert_snapshot!(render(&mut app, 70, 26));
     }
 
+    /// Changes of ours that could not be sent: an edit, a deletion, a reaction; and a
+    /// message held up behind them.
+    #[test]
+    fn failed_changes() {
+        use crate::model::{DeletedBy, Deletion, Message, MsgKind, Reaction, SendState};
+        let mut app = App::demo();
+        let mine = |body: &str| Message {
+            sender: "you".into(),
+            own: true,
+            time: "12:00".into(),
+            day: "Today".into(),
+            body: body.into(),
+            ..Message::default()
+        };
+        let room = &mut app.rooms[0];
+        room.typing = None;
+        room.messages = vec![
+            Message {
+                edited: true,
+                edit_error: Some("not allowed in this room".into()),
+                ..mine("Fixed the typo")
+            },
+            Message {
+                kind: MsgKind::Redacted,
+                deleted: Some(Deletion {
+                    reason: None,
+                    by: DeletedBy::Sender,
+                }),
+                delete_error: Some(String::new()),
+                ..mine("Message deleted")
+            },
+            Message {
+                reactions: vec![Reaction {
+                    key: "👍".into(),
+                    count: 1,
+                    own: true,
+                    failed: true,
+                }],
+                ..mine("Ship it")
+            },
+            Message {
+                state: SendState::Sending,
+                held: true,
+                ..mine("And one more")
+            },
+        ];
+        insta::assert_snapshot!(render(&mut app, 110, 16));
+    }
+
     /// Deleted messages say why, and who deleted them when it was not the sender: by the
     /// sender, by a moderator with a reason, by a moderator without one, and by us.
     #[test]
@@ -941,6 +990,7 @@ mod tests {
                     key: "👍".into(),
                     count: 2,
                     own: false,
+                    failed: false,
                 }],
                 ..said("bob", "A reaction under this one.")
             },

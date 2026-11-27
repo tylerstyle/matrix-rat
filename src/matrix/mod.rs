@@ -244,8 +244,16 @@ pub enum MatrixCmd {
         event_id: String,
         to_room_id: String,
     },
-    /// Try again to send a message that failed.
+    /// Try again to send whatever of the message failed: the message itself, our edit
+    /// of it, our deletion of it, our reactions to it.
     Retry {
+        room_id: String,
+        item: ItemRef,
+    },
+    /// Throw away what of a sent message could not be sent: our edit of it (its text
+    /// before comes back), our deletion of it (it comes back), our reactions to it. A
+    /// message of ours that failed itself is discarded with [`MatrixCmd::Redact`].
+    Discard {
         room_id: String,
         item: ItemRef,
     },
@@ -574,6 +582,7 @@ impl MatrixCmd {
                 vec![ids.then(|| format!("{from_room_id} -> {to_room_id}"))],
             ),
             Self::Retry { room_id, .. } => ("Retry", vec![id(room_id)]),
+            Self::Discard { room_id, .. } => ("Discard", vec![id(room_id)]),
             Self::Typing { room_id, typing } => {
                 ("Typing", vec![id(room_id), Some(typing.to_string())])
             }
@@ -1760,6 +1769,7 @@ impl Worker {
                 | MatrixCmd::FetchPinned { .. }
                 | MatrixCmd::Forward { .. }
                 | MatrixCmd::Retry { .. }
+                | MatrixCmd::Discard { .. }
                 | MatrixCmd::Typing { .. }
                 | MatrixCmd::MarkRead { .. }
                 | MatrixCmd::SetUnread { .. }
@@ -2309,7 +2319,7 @@ impl Worker {
                         }
                         State::Running if offline => {
                             offline = false;
-                            back_online(&mut history);
+                            back_online(client, &mut history).await;
                         }
                         State::Idle | State::Running | State::Terminated | State::Error(_) => {}
                     }
@@ -2480,9 +2490,13 @@ impl Worker {
 }
 
 /// The sync is through again after it was offline: what waited for the connection goes
-/// on. The search history catches up on what an outage left short.
-fn back_online(history: &mut search_history::SearchHistory) {
+/// on. The search history catches up on what an outage left short. Every room's send
+/// queue is turned on again: a failure the SDK takes as passing (a network error) stops
+/// a room's queue, and what waits in it then goes out by itself; a failure the server
+/// refused waits for the user.
+async fn back_online(client: &matrix_sdk::Client, history: &mut search_history::SearchHistory) {
     history.online();
+    client.send_queue().set_enabled(true).await;
 }
 
 /// What the room list shows under a room's name: who wrote last, and what.

@@ -56,7 +56,8 @@ pub struct DetailsPopup {
     pub event_id: Option<String>,
     encryption: (String, bool),
     /// How far a message of ours got; `None` for other people's.
-    delivery: Option<String>,
+    /// How far the message, and our changes to it, got: one line each.
+    delivery: Vec<String>,
     readers: Vec<String>,
     more_readers: usize,
     pub source: SourceState,
@@ -79,6 +80,47 @@ impl std::fmt::Debug for DetailsPopup {
     }
 }
 
+/// How far `message` got, for a message of ours, and then each change of ours to it
+/// that could not be sent (on anyone's message: a reaction, a deletion as a moderator).
+fn delivery(message: &Message) -> Vec<String> {
+    let mut lines: Vec<String> = message
+        .own
+        .then(|| match message.state {
+            SendState::Sent => "Sent".to_owned(),
+            SendState::Sending => message.sending_label(),
+            SendState::Failed => message.failed_label(),
+        })
+        .into_iter()
+        .collect();
+    let not_sent = |what: &str, why: &str| {
+        let why = sanitize_line(why);
+        if why.is_empty() {
+            format!("{what}: not sent")
+        } else {
+            format!("{what}: not sent: {why}")
+        }
+    };
+    if let Some(why) = &message.edit_error {
+        lines.push(not_sent("Edit", why));
+    }
+    if let Some(why) = &message.delete_error {
+        lines.push(not_sent("Deletion", why));
+    }
+    for reaction in message.reactions.iter().filter(|r| r.failed) {
+        // The key is text the user chose; a custom emoji's is an address.
+        let key = if reaction.key.trim_start().starts_with("mxc://") {
+            "(custom emoji)".to_owned()
+        } else {
+            crate::text::truncate(&sanitize_line(&reaction.key), 20)
+        };
+        lines.push(format!("Reaction {key}: not sent"));
+    }
+    if message.held {
+        lines.push("Waiting for a failed change before it".to_owned());
+    }
+    lines
+}
+
 impl DetailsPopup {
     /// The details of `message`, as far as the timeline knows them. `room_encrypted`
     /// says what becomes of a message of ours that is not sent yet; `show_readers`
@@ -90,11 +132,7 @@ impl DetailsPopup {
             // The demo's messages have made-up ids at most.
             None => None,
         };
-        let delivery = message.own.then(|| match message.state {
-            SendState::Sent => "Sent".to_owned(),
-            SendState::Sending => message.sending_label(),
-            SendState::Failed => message.failed_label(),
-        });
+        let delivery = delivery(message);
         let (readers, more_readers) = if show_readers {
             let names: Vec<String> = message
                 .read_by
@@ -221,8 +259,9 @@ impl DetailsPopup {
                 Tone::Normal
             },
         ));
-        if let Some(delivery) = &self.delivery {
-            out.push(fact("Delivery", delivery.clone(), Tone::Normal));
+        for (n, line) in self.delivery.iter().enumerate() {
+            let label = if n == 0 { "Delivery" } else { "" };
+            out.push(fact(label, line.clone(), Tone::Normal));
         }
         for (n, reader) in self.readers.iter().enumerate() {
             let label = if n == 0 { "Read by" } else { "" };
@@ -461,6 +500,78 @@ mod tests {
         assert_eq!(value(&popup, "Delivery"), "✕ not sent: too large");
         assert_eq!(value(&popup, "Event ID"), "none yet (not on the server)");
         assert_eq!(value(&popup, "Security"), "Encrypted when it is sent");
+    }
+
+    /// Changes of ours that could not be sent are listed under Delivery, on someone
+    /// else's message too; a message held up behind one says so.
+    #[test]
+    fn changes_that_were_not_sent_are_listed() {
+        let lines = |popup: &DetailsPopup| -> Vec<(&'static str, String)> {
+            let facts = popup.facts();
+            let at = facts.iter().position(|fact| fact.label == "Delivery");
+            at.map(|at| {
+                facts[at..]
+                    .iter()
+                    .take_while(|fact| fact.label == "Delivery" || fact.label.is_empty())
+                    .map(|fact| (fact.label, fact.value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+        };
+        let mut theirs = message();
+        theirs.delete_error = Some("not allowed in this room".into());
+        theirs.reactions = vec![
+            crate::model::Reaction {
+                key: "👍\u{1b}[31m".into(),
+                count: 2,
+                own: true,
+                failed: true,
+            },
+            crate::model::Reaction {
+                key: "mxc://example.org/party".into(),
+                count: 1,
+                own: true,
+                failed: true,
+            },
+            crate::model::Reaction {
+                key: "🎉".into(),
+                count: 1,
+                own: true,
+                failed: false,
+            },
+        ];
+        assert_eq!(
+            lines(&DetailsPopup::new(&theirs, false, true, 1)),
+            [
+                (
+                    "Delivery",
+                    "Deletion: not sent: not allowed in this room".to_owned()
+                ),
+                ("", "Reaction 👍[31m: not sent".to_owned()),
+                ("", "Reaction (custom emoji): not sent".to_owned()),
+            ]
+        );
+        let mut own = message();
+        own.own = true;
+        own.edit_error = Some("not allowed in this room".into());
+        assert_eq!(
+            lines(&DetailsPopup::new(&own, false, true, 1)),
+            [
+                ("Delivery", "Sent".to_owned()),
+                ("", "Edit: not sent: not allowed in this room".to_owned()),
+            ]
+        );
+        let mut waiting = message();
+        waiting.own = true;
+        waiting.state = SendState::Sending;
+        waiting.held = true;
+        assert_eq!(
+            lines(&DetailsPopup::new(&waiting, false, true, 1)),
+            [
+                ("Delivery", "◌ sending".to_owned()),
+                ("", "Waiting for a failed change before it".to_owned()),
+            ]
+        );
     }
 
     #[test]

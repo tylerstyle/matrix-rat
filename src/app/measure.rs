@@ -89,6 +89,8 @@ fn parts(m: &Message) -> [(&'static str, usize); 12] {
                 .sum::<usize>()
     });
     let other = m.send_error.as_ref().map_or(0, s)
+        + m.edit_error.as_ref().map_or(0, s)
+        + m.delete_error.as_ref().map_or(0, s)
         + m.thread.as_ref().map_or(0, |thread| {
             thread
                 .latest
@@ -249,6 +251,12 @@ async fn measure_bytes_per_message() {
             std::mem::size_of_val(&m.upload) + std::mem::size_of_val(&m.send_error),
         ),
         (
+            "edit_error + delete_error + held",
+            std::mem::size_of_val(&m.edit_error)
+                + std::mem::size_of_val(&m.delete_error)
+                + std::mem::size_of_val(&m.held),
+        ),
+        (
             "shield + utd",
             std::mem::size_of_val(&m.shield) + std::mem::size_of_val(&m.utd),
         ),
@@ -394,6 +402,7 @@ async fn measure_interface_cost_of_a_change_and_a_frame() {
                 key: "👍".to_owned(),
                 count: 1,
                 own: false,
+                failed: false,
             });
         }
         app.on_matrix(change(&app, changed));
