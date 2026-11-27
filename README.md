@@ -166,7 +166,8 @@ You need an existing Matrix account; matrix-rat does not register new ones.
 2. **Unlock your history:** if you use encryption elsewhere, matrix-rat asks for your
    **recovery key** (or recovery passphrase). Entering it also verifies this device. No key
    at hand? Click "⚠ unverified device — verify" in the status line and compare emoji with
-   another of your devices.
+   another of your devices. Press "They match" on the other device first, then on the
+   new one: the emoji screen reminds you.
 3. **Chat:** pick a room with the mouse or `Ctrl-K`, type, press `Enter`.
 
 `F1` shows every key, `F2` opens the settings, `Ctrl-P` finds any command by name.
@@ -294,7 +295,8 @@ addresses, mark direct chats, or adjust action permissions.
 **Sessions and keys** live in the settings (`F2`) and the command palette (`Ctrl-P`):
 
 - **Sessions** lists where your account is logged in, with a warning for every session
-  that is not verified. `r` renames one, `v` verifies it by emoji comparison, `Del` signs
+  that is not verified. `r` renames one, `v` verifies it by emoji comparison (a verified
+  one too: that is how it gets your signing keys if it lacks them), `Del` signs
   it out (the server asks for your account password; on servers with single sign-on or an
   account service, matrix-rat shows that service's page for it instead), `a` shows the
   addresses the sessions were last seen at.
@@ -807,6 +809,14 @@ There is no command that lists or removes profiles; a profile is its two folders
   verified itself; until then the list repeats what the server says ("says verified"),
   and nothing is shown as good news. A session's name is whatever that session (or
   anyone logged in to the account) set.
+- **"⚠ keys missing — fix"** in the status line: this device is verified, but it did not
+  get your signing keys, so it cannot verify your other devices or other people, and
+  older encrypted messages may stay locked. That can happen, rarely, when the new device
+  said "They match" before the old one (a race in the Matrix library matrix-rat builds
+  on), or when the other device never sent the keys. Click it: verify this device again
+  with another one (this time the keys come along), or enter your recovery key. Starting
+  a verification of this session from the other device works too. matrix-rat waits 30
+  seconds after a verification before it says so: the keys normally come within seconds.
 - **Passwords, passphrases and the recovery key** are wiped from matrix-rat's own
   memory when they have been sent or their field is closed. A paste goes in as it is,
   spaces included; only its first line is taken, and control characters are dropped.

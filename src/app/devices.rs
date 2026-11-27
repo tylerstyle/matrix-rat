@@ -15,7 +15,7 @@ use crate::matrix::{
 };
 use crate::modal::{Modal, RecoveryForm};
 use crate::model::{ItemRef, MsgKind};
-use crate::verify::VerifyPopup;
+use crate::verify::{VerifyPopup, keys_missing};
 
 impl App {
     /// There is an account to ask; says so if not.
@@ -167,7 +167,8 @@ impl App {
     }
 
     /// Starts a verification with one other session of the account, if that makes
-    /// sense: one of the two has to be verified already.
+    /// sense: one of the two has to be verified already. Two verified ones may verify
+    /// each other again: that is how a session that lacks the signing keys gets them.
     fn verify_session(&mut self, device_id: String, current: bool, trust: SessionTrust) {
         if current {
             self.modal = None;
@@ -177,13 +178,18 @@ impl App {
             .verify
             .security
             .is_some_and(|security| security.device == DeviceTrust::Verified);
+        // Vouching for a session takes the self-signing key.
+        let without_keys = self.verify.security.as_ref().is_some_and(keys_missing);
         match (own_verified, trust) {
             (_, SessionTrust::NoKeys) => self
                 .show_toast("That session has no encryption keys, so there is nothing to verify."),
-            (true, SessionTrust::Verified) => self.show_toast("That session is verified already."),
             (false, SessionTrust::Unverified) => self.show_toast(
                 "This device is not verified itself, so it cannot vouch for another. Verify \
                  this device first.",
+            ),
+            (true, SessionTrust::Unverified) if without_keys => self.show_toast(
+                "This device lacks your signing keys, so it cannot vouch for another. Get \
+                 them first: Settings → Encryption.",
             ),
             _ if self.verify.active().is_some() => {
                 self.verify.deferred = false;
@@ -1578,15 +1584,30 @@ mod tests {
         );
         assert!(app.modal.is_none());
 
-        // Both verified: nothing to do.
+        // Both verified: they may verify each other again. That is how a session that
+        // lacks the signing keys gets them.
         let (mut app, _terminal, mut commands) = with_sessions();
         let mut list = sessions();
         list.sessions[1].trust = SessionTrust::Verified;
         app.on_matrix(listed(&app, Ok(list)));
         app.on_event(key(KeyCode::Down));
         app.on_event(key(KeyCode::Char('v')));
-        assert_eq!(toast(&app), "That session is verified already.");
-        assert!(drain(&mut commands).is_empty());
+        let sent = drain(&mut commands);
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [MatrixCmd::Verification(VerifyCmd::RequestDevice { device_id })]
+                    if device_id == "PHONEDEVICE"
+            ),
+            "{sent:?}"
+        );
+        assert!(app.modal.is_none());
+        app.perform(Action::Setting(Setting::Sessions));
+        drain(&mut commands);
+        let mut list = sessions();
+        list.sessions[1].trust = SessionTrust::Verified;
+        app.on_matrix(listed(&app, Ok(list)));
+        app.on_event(key(KeyCode::Down));
         // This device is not verified: a verified one can vouch for it...
         app.on_matrix(MatrixEvent::Security(security(
             DeviceTrust::Unverified,
@@ -1616,6 +1637,34 @@ mod tests {
         assert!(matches!(
             drain(&mut commands).as_slice(),
             [MatrixCmd::Verification(VerifyCmd::Request)]
+        ));
+
+        // Verified, but without the signing keys: it cannot vouch for an unverified
+        // session, and a verified one can give it the keys.
+        let (mut app, _terminal, mut commands) = with_sessions();
+        app.on_matrix(MatrixEvent::Security(Security {
+            signing_keys: false,
+            ..security(
+                DeviceTrust::Verified,
+                BackupStatus::Inactive,
+                RecoveryStatus::NotSetUp,
+            )
+        }));
+        app.on_event(key(KeyCode::Down));
+        app.on_event(key(KeyCode::Char('v')));
+        assert!(
+            toast(&app).contains("lacks your signing keys"),
+            "{}",
+            toast(&app)
+        );
+        assert!(drain(&mut commands).is_empty());
+        let mut list = sessions();
+        list.sessions[1].trust = SessionTrust::Verified;
+        app.on_matrix(listed(&app, Ok(list)));
+        app.on_event(key(KeyCode::Char('v')));
+        assert!(matches!(
+            drain(&mut commands).as_slice(),
+            [MatrixCmd::Verification(VerifyCmd::RequestDevice { .. })]
         ));
     }
 

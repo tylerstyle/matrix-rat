@@ -1742,6 +1742,7 @@ mod tests {
             peer: CAROL.into(),
             own: false,
             this_device: false,
+            peer_verified: false,
             stage: VerifyStage::Waiting,
         }));
         assert!(matches!(app.modal, Some(Modal::Verify(_))));

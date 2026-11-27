@@ -1,0 +1,28 @@
+---
+source: src/ui/verify.rs
+expression: "render(&mut app, 100, 24)"
+---
+"╭ 1 Rooms ────────── + ╮╭ 2 #rust ─────────────────────────────────────────────────────────────────╮"
+"│ Filter rooms…        ││  Yes — startup is instant now. Room previews come straight from disk.   ││"
+"│ ○ Unread  ○ People   ││   👍 2   🎉 1                                                           ││" Hidden by multi-width symbols: [(29, " "), (36, " ")]
+"│ Favourites     ╭ Encryption ────────────────────────────────────────────────────╮eal for large  ││"
+"│▌R  rust        │                                                                │verything from ││"
+"│ M  matrix-rat  │ This device is verified, but it did not get your signing keys. │               ┃│"
+"│ People         │ It cannot verify your other devices or other people, and older │───────────────┃│"
+"│ B  bob         │ encrypted messages may stay locked.                            │               ┃│"
+"│ C  carol       │                                                                │               ┃│"
+"│ Rooms          │ Verify it again with one of your other devices: this time the  │               ┃│"
+"│ D  design      │ keys come along. Or enter your recovery key.                   │               ┃│"
+"│ N  nixos       │ Or start a verification of this session on your other device.  │?              ┃│"
+"│ O  off-topic   │                                                                │               ┃│"
+"│                │ This device    verified                                        │               ┃│"
+"│                │ Cross-signing  set up, but this device lacks the signing keys  │               ┃│"
+"│                │ Recovery       set up, but this device needs the recovery key  │               ┃│"
+"│                │ Key backup     not in use on this device                       │               ┃│"
+"│                │                                                                │               ┃│"
+"│                │  Verify again    Enter recovery key    Close                   │               ┃│"
+"│                │                                                                │────────────────╯"
+"│                ╰─────────────────────────── Tab move · Enter choose · Esc close ╯──────── M  me ─╮"
+"│                      ││ Type a message…                                                    📎 🙂 │" Hidden by multi-width symbols: [(94, " "), (97, " ")]
+"╰──────────────────────╯╰──────────────────────────────────────────────────────────────────────────╯"
+" ● demo data  ⚠ keys missing — fix  Enter send    Ctrl-P palette  F1 help  F2 settings  F3 rat-dark "

@@ -31,6 +31,16 @@ handful of fixes from the SDK, and the SQLite in the release archives is current
   line only: no row more, and it is there without colours (`NO_COLOR`) and in 256 colours
   over ssh as well. Until now such a run read as one long message, parted only where a
   message had reactions.
+- **A device that is verified but lacks your signing keys says so, and offers the way
+  out.** When, comparing emoji between two of your devices, the new one confirms first,
+  matrix-sdk 0.20 can, rarely, leave it verified but without the private signing keys
+  and the backup key: it cannot verify others, and older messages stay locked. The app
+  said "this device is verified" and offered nothing. Now the status line shows "⚠ keys
+  missing — fix" (30 seconds after a verification, as the keys normally come within
+  seconds), the Encryption setting says "verified, but without the signing keys", and
+  both open a popup with **Verify again** (with another device: this time the keys come
+  along) and **Enter recovery key**. The Done screen of a verification offers the same
+  when the keys did not come.
 
 ## Changed
 
@@ -47,6 +57,13 @@ handful of fixes from the SDK, and the SQLite in the release archives is current
   the lines of matrix-sdk and the other libraries, many of which carry room, user or
   device ids or an error as it came, no longer go in. `MATRIX_RAT_LOG` still lets them in
   to look into a problem (see **Good to know** in the README).
+- **"They match", the other device first.** Comparing emoji between two of your devices,
+  each screen says on which device to confirm first, while it matters: the device that
+  vouches for the new one, so that it trusts the new one before that one asks for the
+  keys.
+- **A session that is verified already can be verified again** from the session list
+  (`v`), instead of "That session is verified already": that is how a session that
+  lacks the signing keys gets them from this one.
 - **Theme files are watched more calmly** (notify 9): reading a theme no longer wakes the
   watch, and when the system's queue of file events runs over, the theme is reloaded,
   since any file may have changed.
