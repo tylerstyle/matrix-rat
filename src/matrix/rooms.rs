@@ -1015,6 +1015,14 @@ impl Timelines {
             | MatrixCmd::EndPoll { .. }) => {
                 Box::pin(self.handle_poll_or_sticker(command)).await;
             }
+            // The same for reactions, deletions and what failed to send: the timeline
+            // lookups in them add up.
+            command @ (MatrixCmd::ToggleReaction { .. }
+            | MatrixCmd::Redact { .. }
+            | MatrixCmd::Retry { .. }
+            | MatrixCmd::Discard { .. }) => {
+                Box::pin(self.handle_change(command)).await;
+            }
             MatrixCmd::OpenRoom {
                 room_id,
                 generation,
@@ -1246,76 +1254,6 @@ impl Timelines {
                 })
                 .await;
             }
-            MatrixCmd::ToggleReaction {
-                room_id,
-                item,
-                key,
-                shortcode,
-            } => {
-                let extra = shortcode
-                    .as_deref()
-                    .and_then(super::emotes::reaction_shortcode);
-                let timeline = match self.active_timeline(&room_id).await {
-                    Ok((timeline, _)) => timeline,
-                    Err(err) => return self.fail("Could not react", err),
-                };
-                // Taking a reaction back is not queued: it is sent at once, and on a
-                // failure the SDK puts it back. The toast says which it was.
-                let target = item_id(&item);
-                let what = match &target {
-                    Ok(target) if reacted(&timeline, target, &key).await => {
-                        "Could not remove the reaction"
-                    }
-                    _ => "Could not react",
-                };
-                self.spawn(what, async move {
-                    timeline
-                        .toggle_reaction_with_extra_content(&target?, &key, extra)
-                        .await
-                        .sdk()?;
-                    Ok(())
-                });
-            }
-            MatrixCmd::Redact {
-                room_id,
-                item,
-                reason,
-            } => {
-                let cache = self.pinned_cache.clone();
-                let rid = room_id.clone();
-                let clean_reason = reason
-                    .as_deref()
-                    .map(crate::text::sanitize)
-                    .filter(|s| !crate::text::is_blank(s));
-                self.with_active_timeline(&room_id, "Could not delete", |timeline| async move {
-                    let target = item_id(&item)?;
-                    let failed = matches!(item, ItemRef::Transaction(_))
-                        && find_event(&timeline, &target).await.is_some_and(|event| {
-                            matches!(
-                                event.send_state(),
-                                Some(EventSendState::SendingFailed { .. })
-                            )
-                        });
-                    timeline
-                        .redact(&target, clean_reason.as_deref())
-                        .await
-                        .sdk()?;
-                    if failed {
-                        // A message that failed with an error taken as passing left the
-                        // room's queue stopped: aborting it only wakes the queue, and what
-                        // was held up behind it would wait for ever.
-                        timeline.room().send_queue().set_enabled(true);
-                    }
-                    if let ItemRef::Event(id) = item {
-                        cache
-                            .lock()
-                            .expect("pinned cache poisoned")
-                            .invalidate_room_event(&rid, &id);
-                    }
-                    Ok(())
-                })
-                .await;
-            }
             MatrixCmd::Pin {
                 room_id,
                 event_id,
@@ -1451,41 +1389,6 @@ impl Timelines {
                         result,
                     });
                 });
-            }
-            MatrixCmd::Retry { room_id, item } => {
-                self.with_active_timeline(&room_id, "Could not retry", |timeline| async move {
-                    let wanted = item_id(&item)?;
-                    let mut tried = false;
-                    for target in failed_parts(&timeline, &wanted, true).await {
-                        tried |= timeline.retry_send(&wanted, target).await.sdk()?;
-                    }
-                    if !tried {
-                        bail!(NOTHING_WAITS);
-                    }
-                    // The SDK stops a room's queue after a failure it takes as
-                    // passing, such as a network error (since 0.20.0 no longer after
-                    // the others); nothing would be tried again without this.
-                    timeline.room().send_queue().set_enabled(true);
-                    Ok(())
-                })
-                .await;
-            }
-            MatrixCmd::Discard { room_id, item } => {
-                self.with_active_timeline(&room_id, "Could not discard", |timeline| async move {
-                    let wanted = item_id(&item)?;
-                    let mut dropped = false;
-                    for target in failed_parts(&timeline, &wanted, false).await {
-                        dropped |= timeline.abort_send(&wanted, target).await.sdk()?;
-                    }
-                    // Aborting only wakes the room's queue: after a failure taken as
-                    // passing it is stopped, and what waits behind would stay there.
-                    timeline.room().send_queue().set_enabled(true);
-                    if !dropped {
-                        bail!(NOTHING_WAITS);
-                    }
-                    Ok(())
-                })
-                .await;
             }
             MatrixCmd::RetryDecryption { room_id, event_id } => {
                 let events = self.events.clone();
@@ -1827,6 +1730,123 @@ impl Timelines {
             };
             let _ = events.send(event);
         }));
+    }
+
+    /// Reactions, deletions, and trying again or discarding what could not be sent;
+    /// called from `handle` on the heap (see there).
+    async fn handle_change(&mut self, command: MatrixCmd) {
+        #[expect(
+            clippy::wildcard_enum_match_arm,
+            reason = "only called from handle for reactions, deletions, retries and discards"
+        )]
+        match command {
+            MatrixCmd::ToggleReaction {
+                room_id,
+                item,
+                key,
+                shortcode,
+            } => {
+                let extra = shortcode
+                    .as_deref()
+                    .and_then(super::emotes::reaction_shortcode);
+                let timeline = match self.active_timeline(&room_id).await {
+                    Ok((timeline, _)) => timeline,
+                    Err(err) => return self.fail("Could not react", err),
+                };
+                // Taking a reaction back is not queued: it is sent at once, and on a
+                // failure the SDK puts it back. The toast says which it was.
+                let target = item_id(&item);
+                let what = match &target {
+                    Ok(target) if reacted(&timeline, target, &key).await => {
+                        "Could not remove the reaction"
+                    }
+                    _ => "Could not react",
+                };
+                self.spawn(what, async move {
+                    timeline
+                        .toggle_reaction_with_extra_content(&target?, &key, extra)
+                        .await
+                        .sdk()?;
+                    Ok(())
+                });
+            }
+            MatrixCmd::Redact {
+                room_id,
+                item,
+                reason,
+            } => {
+                let cache = self.pinned_cache.clone();
+                let rid = room_id.clone();
+                let clean_reason = reason
+                    .as_deref()
+                    .map(crate::text::sanitize)
+                    .filter(|s| !crate::text::is_blank(s));
+                self.with_active_timeline(&room_id, "Could not delete", |timeline| async move {
+                    let target = item_id(&item)?;
+                    let failed = matches!(item, ItemRef::Transaction(_))
+                        && find_event(&timeline, &target).await.is_some_and(|event| {
+                            matches!(
+                                event.send_state(),
+                                Some(EventSendState::SendingFailed { .. })
+                            )
+                        });
+                    timeline
+                        .redact(&target, clean_reason.as_deref())
+                        .await
+                        .sdk()?;
+                    if failed {
+                        // A message that failed with an error taken as passing left the
+                        // room's queue stopped: aborting it only wakes the queue, and what
+                        // was held up behind it would wait for ever.
+                        timeline.room().send_queue().set_enabled(true);
+                    }
+                    if let ItemRef::Event(id) = item {
+                        cache
+                            .lock()
+                            .expect("pinned cache poisoned")
+                            .invalidate_room_event(&rid, &id);
+                    }
+                    Ok(())
+                })
+                .await;
+            }
+            MatrixCmd::Retry { room_id, item } => {
+                self.with_active_timeline(&room_id, "Could not retry", |timeline| async move {
+                    let wanted = item_id(&item)?;
+                    let mut tried = false;
+                    for target in failed_parts(&timeline, &wanted, true).await {
+                        tried |= timeline.retry_send(&wanted, target).await.sdk()?;
+                    }
+                    if !tried {
+                        bail!(NOTHING_WAITS);
+                    }
+                    // The SDK stops a room's queue after a failure it takes as
+                    // passing, such as a network error (since 0.20.0 no longer after
+                    // the others); nothing would be tried again without this.
+                    timeline.room().send_queue().set_enabled(true);
+                    Ok(())
+                })
+                .await;
+            }
+            MatrixCmd::Discard { room_id, item } => {
+                self.with_active_timeline(&room_id, "Could not discard", |timeline| async move {
+                    let wanted = item_id(&item)?;
+                    let mut dropped = false;
+                    for target in failed_parts(&timeline, &wanted, false).await {
+                        dropped |= timeline.abort_send(&wanted, target).await.sdk()?;
+                    }
+                    // Aborting only wakes the room's queue: after a failure taken as
+                    // passing it is stopped, and what waits behind would stay there.
+                    timeline.room().send_queue().set_enabled(true);
+                    if !dropped {
+                        bail!(NOTHING_WAITS);
+                    }
+                    Ok(())
+                })
+                .await;
+            }
+            _ => {}
+        }
     }
 
     async fn handle_poll_or_sticker(&mut self, command: MatrixCmd) {
