@@ -10,7 +10,7 @@ use crate::action::Action;
 use crate::app::App;
 use crate::matrix::{DeviceTrust, SasEmoji, VerifyStage, VerifyUpdate};
 use crate::modal::Modal;
-use crate::text::{width, wrap};
+use crate::text::{width, wrap_at_spaces};
 use crate::theme::{Role, Theme};
 use crate::time::Instant;
 use crate::verify::{Button, Hint, PopupKind, VerifyPopup, VerifyState, describe, stuck};
@@ -35,7 +35,7 @@ fn layout(rows: Vec<Row>, theme: &Theme, room: usize) -> (Vec<Line<'static>>, bo
         match row {
             Row::Blank => lines.push(Line::default()),
             Row::Text(text, role) => {
-                for part in wrap(&text, room.max(1)) {
+                for part in wrap_text(&text, room.max(1)) {
                     lines.push(Line::from(Span::styled(part, theme.style(role))));
                 }
             }
@@ -43,6 +43,32 @@ fn layout(rows: Vec<Row>, theme: &Theme, room: usize) -> (Vec<Line<'static>>, bo
         }
     }
     (lines, complete)
+}
+
+/// Wraps one row of text to `room` columns. A row that fits stays as it is (the status
+/// rows line their values up with spaces). Otherwise lines end only at a space, and a
+/// name or label in “quotes” stays on one line where it fits: no line ends with a bare
+/// opening quote, and none starts with a lone full stop.
+fn wrap_text(text: &str, room: usize) -> Vec<String> {
+    if !text.contains('\n') && width(text) <= room {
+        return vec![text.to_owned()];
+    }
+    // Inside quotes, spaces become no-break spaces while the row is wrapped.
+    const GLUE: char = '\u{a0}';
+    let mut glued = String::with_capacity(text.len());
+    let mut quoted = false;
+    for c in text.chars() {
+        match c {
+            '“' => quoted = true,
+            '”' => quoted = false,
+            _ => {}
+        }
+        glued.push(if quoted && c == ' ' { GLUE } else { c });
+    }
+    wrap_at_spaces(&glued, room)
+        .into_iter()
+        .map(|line| line.replace(GLUE, " "))
+        .collect()
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, popup_state: &mut VerifyPopup) {
@@ -624,6 +650,50 @@ mod tests {
         app.verify.keys_warned = true;
         app.verify.done_at = crate::time::Instant::now().checked_sub(crate::verify::KEYS_GRACE);
         insta::assert_snapshot!("verify_done_keys_missing", render(&mut app, 100, 24));
+    }
+
+    #[test]
+    fn rows_wrap_at_spaces_and_keep_quoted_names_together() {
+        use super::wrap_text;
+        // The order line of the Compare screen, as it wrapped before: “ alone at the end.
+        assert_eq!(
+            wrap_text(
+                "If so, press “They match” here first, then on your device “Element Desktop \
+                 (QWERTYUIOP)”.",
+                62
+            ),
+            [
+                "If so, press “They match” here first, then on your device",
+                "“Element Desktop (QWERTYUIOP)”.",
+            ]
+        );
+        // A full stop stays with its word.
+        assert_eq!(
+            wrap_text(
+                "Or start a verification of this session from your device.",
+                56
+            ),
+            [
+                "Or start a verification of this session from your",
+                "device."
+            ]
+        );
+        // A row that fits keeps its spaces; one that does not loses them at the break.
+        assert_eq!(
+            wrap_text("This device    verified", 40),
+            ["This device    verified"]
+        );
+        assert_eq!(
+            wrap_text("Recovery       set up", 10),
+            ["Recovery", "set up"]
+        );
+        // A quoted name wider than the line is split all the same.
+        assert_eq!(
+            wrap_text("on “a very long name”", 8)
+                .concat()
+                .replace(' ', ""),
+            "on“averylongname”"
+        );
     }
 
     #[test]

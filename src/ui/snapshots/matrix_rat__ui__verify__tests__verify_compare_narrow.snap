@@ -5,8 +5,8 @@ expression: "render(&mut app, 44, 24)"
 " ☰ Rooms B ² D ⁵ O ¹²                      " Hidden by multi-width symbols: [(2, " ")]
 "╭╭ Verify this device ────────────────────╮╮"
 "││                                        ││"
-"││ Compare with what your device “Element ││"
-"││ Desktop (QWERTYUIOP)” shows:           ││"
+"││ Compare with what your device          ││"
+"││ “Element Desktop (QWERTYUIOP)” shows:  ││"
 "││                                        ││"
 "││       🐶          ☂           🎧       ││" Hidden by multi-width symbols: [(10, " "), (34, " ")]
 "││      Dog       Umbrella   Headphones   ││"
