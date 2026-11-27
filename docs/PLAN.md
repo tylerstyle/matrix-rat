@@ -270,6 +270,17 @@ backend, and installable on iOS and Android as a home-screen app (a PWA).
     and build time; the web app shows its release number there, so after an update (the
     service worker's "Update available, reload?", confirmed by the user) it is plain which
     version runs.
+  - **Second phone test** (2026-11-27, test build `acec2e6`, iPhone 16 Pro): the Send button
+    works with the keyboard open (it stays open) and closed (it stays closed); turning,
+    zooming and scrolling behave; with a hardware keyboard and an external screen on a
+    Thunderbolt dock it works and looks good. Left over:
+    - Once the chat's text stuck too high after the height changed, until Older or Newer was
+      pressed: the view's scroll position is fitted again on every change of the grid's height.
+    - With the keyboard open, only the field is left on that phone ("You can't design away
+      that iOS flaw", the user). Phase 3: while the keyboard is open, no top bar or room list,
+      only the last 2-3 messages above the field.
+    - A swipe moves the whole page and nothing else: the page stays put (no overscroll), and
+      a swipe in the chat scrolls the messages (swipe = scroll, above).
 
 ### 6.3 Later, after 1.0.0 or by demand
 
