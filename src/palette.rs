@@ -144,6 +144,8 @@ impl std::fmt::Debug for SpaceItem {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MessageCaps {
     pub has_selection: bool,
+    /// The message is the user's own.
+    pub own: bool,
     pub pinned: bool,
     pub can_edit: bool,
     pub can_redact: bool,
@@ -876,6 +878,7 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
         Action::CloseChat,
         Action::PinMessage,
         Action::ForwardMessage,
+        Action::DeleteWithReason,
         Action::UserInfo,
         Action::MessageDetails,
         Action::SaveForLater,
@@ -1032,6 +1035,20 @@ fn collect_actions(ctx: &PaletteContext, out: &mut Vec<Entry>) {
         "Forward message…",
         &["forward", "share message", "send to room"],
         action_enabled(Action::ForwardMessage, ctx),
+        0,
+    );
+    // No key by default: Del deletes one's own message at once, without a reason.
+    let with_reason =
+        keymap::action_spec(Action::DeleteWithReason).map_or("", |spec| spec.description);
+    push_entry(
+        out,
+        Target::Action(Action::DeleteWithReason),
+        Category::Action,
+        with_reason,
+        key_of(Action::DeleteWithReason),
+        with_reason,
+        &["delete", "redact", "remove message", "reason"],
+        action_enabled(Action::DeleteWithReason, ctx),
         0,
     );
     push_entry(
@@ -1249,6 +1266,7 @@ fn include_keymap_action(action: Action) -> ActionInclusion {
         | Action::Edit
         | Action::React
         | Action::Delete
+        | Action::DeleteWithReason
         | Action::Copy
         | Action::CopyCode
         | Action::Open
@@ -1333,6 +1351,8 @@ fn action_enabled(action: Action, ctx: &PaletteContext) -> bool {
         Action::Edit => sel.can_edit,
         Action::React => sel.has_selection,
         Action::Delete => sel.has_selection && sel.can_redact,
+        // Where Delete is offered, on one's own messages: others' ask for a reason anyway.
+        Action::DeleteWithReason => sel.has_selection && sel.can_redact && sel.own,
         Action::PinMessage => sel.can_pin,
         Action::ForwardMessage => sel.can_forward,
         Action::RetryDecryption => sel.undecryptable,
@@ -1606,6 +1626,7 @@ fn action_meta<'a>(
         | Action::Reply
         | Action::Edit
         | Action::React
+        | Action::DeleteWithReason
         | Action::Copy
         | Action::CopyCode
         | Action::OpenExternal
@@ -1691,6 +1712,7 @@ fn action_contextual(action: Action, ctx: &PaletteContext) -> bool {
                 | Action::Edit
                 | Action::React
                 | Action::Delete
+                | Action::DeleteWithReason
                 | Action::Copy
                 | Action::CopyCode
                 | Action::Save
@@ -2586,6 +2608,50 @@ mod tests {
         assert!(top_titles.contains(&"React with an emoji"));
         assert!(top_titles.contains(&"Copy text"));
         assert!(top_titles.contains(&"Open the message's thread"));
+    }
+
+    /// "Delete with a reason…" is there when Delete is, for our own messages only: we
+    /// delete someone else's message with a reason by Delete already.
+    #[test]
+    fn delete_with_a_reason_is_for_our_own_messages() {
+        let enabled = |selection: MessageCaps, action: Action| -> bool {
+            let mut ctx = sample_context();
+            ctx.focus = Pane::Timeline;
+            ctx.selection = selection;
+            let p = Palette::open(ctx);
+            p.entries
+                .iter()
+                .find(|e| e.target == Target::Action(action))
+                .expect("entry present")
+                .enabled
+        };
+        let ours = MessageCaps {
+            has_selection: true,
+            own: true,
+            can_redact: true,
+            ..MessageCaps::default()
+        };
+        assert!(enabled(ours, Action::DeleteWithReason));
+        let theirs = MessageCaps { own: false, ..ours };
+        assert!(enabled(theirs, Action::Delete));
+        assert!(!enabled(theirs, Action::DeleteWithReason));
+        // Not deletable (deleted, unsent, nothing selected): neither.
+        let deleted = MessageCaps {
+            can_redact: false,
+            ..ours
+        };
+        assert!(!enabled(deleted, Action::Delete));
+        assert!(!enabled(deleted, Action::DeleteWithReason));
+        assert!(!enabled(MessageCaps::default(), Action::DeleteWithReason));
+        // Found by what it does.
+        let mut ctx = sample_context();
+        ctx.selection = ours;
+        let mut p = Palette::open(ctx);
+        p.set_query("delete with a reason".into());
+        assert_eq!(
+            p.entry_at(0).map(|e| &e.target),
+            Some(&Target::Action(Action::DeleteWithReason))
+        );
     }
 
     #[test]

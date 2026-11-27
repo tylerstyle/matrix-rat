@@ -626,6 +626,12 @@ pub fn message_items(message: &Message, facts: MessageFacts, keys: &Keymap) -> V
     } else if message.own && addressable && !deleted {
         // A click lands on the wrong row more easily than a finger on Del.
         items.push(Item::action(keys, "Delete", Timeline, Action::Delete).asking());
+        items.push(Item::action(
+            keys,
+            "Delete with a reason…",
+            Timeline,
+            Action::DeleteWithReason,
+        ));
     } else if !message.own && facts.can_redact_other && sent && addressable && !deleted {
         items.push(Item::action(keys, "Delete…", Timeline, Action::Delete));
     }
@@ -1059,11 +1065,45 @@ mod tests {
                 "Copy link to message",
                 "Forward…",
                 "Message details",
-                "Delete"
+                "Delete",
+                "Delete with a reason…"
             ]
         );
         assert_eq!(items[3].run, Some(Run::Do(Action::Edit)));
         assert_eq!(items[8].run, Some(Run::Do(Action::Delete)));
+        // Del deletes at once; this one asks for the reason, so it asks nothing first.
+        assert_eq!(items[9].run, Some(Run::Do(Action::DeleteWithReason)));
+        assert!(items[9].confirm.is_none());
+    }
+
+    /// Deleting with a reason is offered where Delete is: on our own messages that are
+    /// on the server and not deleted yet. Someone else's message is deleted with a
+    /// reason by "Delete…" already.
+    #[test]
+    fn delete_with_a_reason_only_on_our_own_sent_messages() {
+        let with_reason = |message: &Message, facts: MessageFacts| {
+            labels(&message_items(message, facts, &keys())).contains(&"Delete with a reason…")
+        };
+        let moderator = MessageFacts {
+            can_redact_other: true,
+            ..CONNECTED
+        };
+        assert!(with_reason(&text(true), CONNECTED));
+        assert!(!with_reason(&text(false), moderator));
+        assert!(labels(&message_items(&text(false), moderator, &keys())).contains(&"Delete…"));
+        let mut deleted = text(true);
+        deleted.kind = MsgKind::Redacted;
+        assert!(!with_reason(&deleted, moderator));
+        for state in [SendState::Sending, SendState::Failed] {
+            let mut unsent = text(true);
+            unsent.state = state;
+            unsent.item = Some(ItemRef::Transaction("t".into()));
+            assert!(!with_reason(&unsent, CONNECTED));
+        }
+        // Sent, but the server has not said so yet: not addressable.
+        let mut echo = text(true);
+        echo.item = Some(ItemRef::Transaction("t".into()));
+        assert!(!with_reason(&echo, CONNECTED));
     }
 
     #[test]
@@ -1257,7 +1297,8 @@ mod tests {
                 "Copy text",
                 "Forward…",
                 "Message details",
-                "Delete"
+                "Delete",
+                "Delete with a reason…"
             ]
         );
     }
@@ -1492,7 +1533,10 @@ mod tests {
     #[test]
     fn delete_asks_once_before_it_runs() {
         let items = message_items(&text(true), CONNECTED, &keys());
-        let delete = items.len() - 1;
+        let delete = items
+            .iter()
+            .position(|item| item.label == "Delete")
+            .unwrap();
         assert!(items[delete].confirm.is_some());
         // Nothing else asks; discarding what was never sent does not either.
         assert_eq!(
@@ -1527,7 +1571,9 @@ mod tests {
             in_thread: true,
             ..MessageFacts::default()
         };
-        let items = message_items(&short, facts, &bare);
+        let mut items = message_items(&short, facts, &bare);
+        // Without the one entry wider than the question.
+        items.retain(|item| item.run != Some(Run::Do(Action::DeleteWithReason)));
         let narrow = Menu::new(room_target(), "", items, Anchor::at(0, 0)).unwrap();
         let (rect, _) = narrow.place(Rect::new(0, 0, 80, 24)).unwrap();
         assert_eq!(rect.width as usize, width("Again to delete") + 4);

@@ -50,6 +50,8 @@ pub enum Action {
     Edit,
     React,
     Delete,
+    /// Delete the selected message (one's own too) with a reason: asks for it first.
+    DeleteWithReason,
     Copy,
     /// Copy the content of a fenced code block of the selected message (asks which
     /// when there are several).
@@ -238,6 +240,7 @@ impl Action {
             | Action::Edit
             | Action::React
             | Action::Delete
+            | Action::DeleteWithReason
             | Action::Copy
             | Action::CopyCode
             | Action::Open
