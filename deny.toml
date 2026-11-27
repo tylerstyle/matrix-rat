@@ -13,19 +13,12 @@ unmaintained = "all"
 # Each one here is known, cannot be fixed from this side, and says why. An entry goes
 # when its reason does: `cargo deny` warns about one that no longer matches anything.
 ignore = [
-    # SQLite before 3.54.0 can hand out stale memory when it opens a database whose
-    # `-wal` file has another page size. It takes someone who can write into the
-    # profile's private folder (mode 0700), who could read the store there anyway.
-    # The fix needs rusqlite 0.41, which matrix-sdk-sqlite 0.19.1 does not accept:
-    # it comes with the next matrix-sdk. (The Nix build links the system's SQLite.)
-    { id = "RUSTSEC-2026-0459", reason = "bundled SQLite; fixed with the next matrix-sdk, attack needs write access to the private profile folder" },
     # Unmaintained, not vulnerable, and not ours to replace.
-    { id = "RUSTSEC-2026-0319", reason = "anymap2, used by matrix-sdk" },
     { id = "RUSTSEC-2025-0141", reason = "bincode 1, used by syntect; declared complete by its authors" },
-    # Declared unmaintained on 2026-11-17. matrix-sdk-ui and oauth2 (through matrix-sdk) use it
-    # too, so it stays in the tree whatever we do; our own use (local time of a message) can
-    # move to `jiff` or `time` once the SDK has moved.
-    { id = "RUSTSEC-2026-0543", reason = "chrono, used by matrix-sdk-ui, oauth2 and us; no known flaw" },
+    # Declared unmaintained on 2026-11-17. oauth2 (through matrix-sdk) uses it too, so it
+    # stays in the tree whatever we do (matrix-sdk-ui moved to `jiff` with 0.20); our own
+    # use (local time of a message) can move to `jiff`, which the SDK brings now.
+    { id = "RUSTSEC-2026-0543", reason = "chrono, used by oauth2 (through matrix-sdk) and us; no known flaw" },
 ]
 
 [licenses]
