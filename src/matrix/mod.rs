@@ -1,6 +1,7 @@
 //! The Matrix side of the app. Everything that talks to the SDK lives in this module and
 //! runs on its own task; the UI only sees [`MatrixCmd`] and [`MatrixEvent`].
 
+#[cfg(not(target_family = "wasm"))]
 mod agent;
 mod collect;
 mod convert;
@@ -34,6 +35,7 @@ mod threads;
 mod upload;
 mod verify;
 
+#[cfg(not(target_family = "wasm"))]
 pub use agent::{AgentCmd, AgentEvent, MAX_WATCHED as AGENT_MAX_WATCHED};
 pub use collect::{ARCHIVE_EVENTS, Archived, CollectCmd, CollectEvent, LAST_EVENTS, UnreadText};
 pub use devices::{
@@ -470,6 +472,7 @@ pub enum MatrixCmd {
     },
     /// What `matrix-rat serve` asks for: send a text, read a room, watch a room.
     /// Never sent by the app.
+    #[cfg(not(target_family = "wasm"))]
     Agent(AgentCmd),
     /// A stretch of a room's messages as text: an archive of the room written to a
     /// file, or what is unread for a summary.
@@ -682,6 +685,7 @@ impl MatrixCmd {
                 ],
             ),
             // The inner command prints no room and no text.
+            #[cfg(not(target_family = "wasm"))]
             Self::Agent(command) => ("Agent", vec![Some(command.shown(ids))]),
             Self::Collect(command) => ("Collect", vec![Some(command.shown(ids))]),
         };
@@ -1113,6 +1117,7 @@ pub enum MatrixEvent {
         generation: u64,
     },
     /// An answer to a [`MatrixCmd::Agent`], or news of a room that is watched.
+    #[cfg(not(target_family = "wasm"))]
     Agent(AgentEvent),
     /// An answer to a [`MatrixCmd::Collect`], or how far it is.
     Collect(CollectEvent),
@@ -1373,6 +1378,7 @@ impl MatrixEvent {
             Self::Threads(page) => ("Threads", vec![Some(format!("{page:?}"))]),
             Self::ThreadsFailed { generation: g, .. } => ("ThreadsFailed", vec![generation(g)]),
             // The inner event prints no room, no message and no reason.
+            #[cfg(not(target_family = "wasm"))]
             Self::Agent(event) => ("Agent", vec![Some(event.shown(full))]),
             Self::Collect(event) => ("Collect", vec![Some(event.shown(full))]),
         };
@@ -1715,8 +1721,9 @@ impl Worker {
                 | MatrixCmd::DirectoryNextPage { .. }
                 | MatrixCmd::CancelDirectorySearch
                 | MatrixCmd::ListThreads { .. }
-                | MatrixCmd::Agent(_)
                 | MatrixCmd::Collect(_) => continue,
+                #[cfg(not(target_family = "wasm"))]
+                MatrixCmd::Agent(_) => continue,
             };
             let login = async {
                 #[expect(
@@ -1985,6 +1992,7 @@ impl Worker {
             relist.clone(),
         );
         let mut devices = devices::Devices::new(client.clone(), self.events.clone());
+        #[cfg(not(target_family = "wasm"))]
         let mut agent = agent::Agent::new(
             client.clone(),
             self.events.clone(),
@@ -2232,6 +2240,7 @@ impl Worker {
                     Some(MatrixCmd::Manage(command)) => manager.handle(command),
                     Some(MatrixCmd::Devices(command)) => devices.handle(command),
                     Some(MatrixCmd::Keywords(command)) => keywords.handle(command),
+                    #[cfg(not(target_family = "wasm"))]
                     Some(MatrixCmd::Agent(command)) => agent.handle(command),
                     Some(MatrixCmd::Collect(command)) => collector.handle(command),
                     Some(MatrixCmd::SearchMessages { generation, query }) => {
@@ -2301,6 +2310,7 @@ impl Worker {
         manager.stop();
         devices.stop();
         keywords.stop();
+        #[cfg(not(target_family = "wasm"))]
         agent.stop();
         collector.stop();
         emote_mgr.stop();

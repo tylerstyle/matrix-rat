@@ -1730,7 +1730,6 @@ impl Timelines {
             | MatrixCmd::SearchUsers { .. }
             | MatrixCmd::Devices(_)
             | MatrixCmd::Keywords(_)
-            | MatrixCmd::Agent(_)
             | MatrixCmd::Collect(_)
             | MatrixCmd::CancelUserSearch
             | MatrixCmd::SearchDirectory { .. }
@@ -1741,6 +1740,8 @@ impl Timelines {
             | MatrixCmd::SetOwnDisplayName { .. }
             | MatrixCmd::SetOwnAvatar { .. }
             | MatrixCmd::RemoveOwnAvatar => {}
+            #[cfg(not(target_family = "wasm"))]
+            MatrixCmd::Agent(_) => {}
         }
     }
 

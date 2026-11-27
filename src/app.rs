@@ -4118,6 +4118,7 @@ impl App {
             MatrixEvent::Keywords(event) => self.on_keywords_event(event),
             MatrixEvent::Saved(event) => self.on_saved_event(event),
             // Answers for `matrix-rat serve`; the app never asks for them.
+            #[cfg(not(target_family = "wasm"))]
             MatrixEvent::Agent(_) => {}
             MatrixEvent::Collect(event) => self.on_collect(event),
             MatrixEvent::DecryptionRetried {

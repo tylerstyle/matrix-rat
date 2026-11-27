@@ -18,7 +18,6 @@
 //! and calls what [`cli`] makes public; every module stays the crate's own.
 
 mod action;
-mod agent;
 mod app;
 mod archive;
 mod audio;
@@ -34,7 +33,6 @@ mod doctor;
 mod editor;
 mod emoji;
 mod files;
-mod focus;
 mod format;
 mod highlight;
 mod images;
@@ -42,8 +40,6 @@ mod input;
 mod keymap;
 mod keywords;
 mod lineedit;
-mod lock;
-mod logging;
 mod logsafe;
 mod manage;
 mod matrix;
@@ -57,12 +53,10 @@ mod notify;
 mod palette;
 mod paths;
 mod people;
-mod portal;
 mod previews;
 mod probes;
 mod rich;
 mod rt;
-mod runtime;
 mod saved;
 mod shell;
 mod storage;
@@ -75,10 +69,29 @@ mod time;
 mod ui;
 mod upload;
 mod verify;
+
+// The terminal's and the OS's alone: `serve` and its clients, the desktop's portal and
+// window focus, the theme watch and the profile lock, the log file, the program's
+// runtime. The browser build (`cargo check --lib --target wasm32-unknown-unknown`)
+// leaves them out, together with the command line's [`cli`].
+#[cfg(not(target_family = "wasm"))]
+mod agent;
+#[cfg(not(target_family = "wasm"))]
+mod focus;
+#[cfg(not(target_family = "wasm"))]
+mod lock;
+#[cfg(not(target_family = "wasm"))]
+mod logging;
+#[cfg(not(target_family = "wasm"))]
+mod portal;
+#[cfg(not(target_family = "wasm"))]
+mod runtime;
+#[cfg(not(target_family = "wasm"))]
 mod watch;
 
 /// What the command line (`src/main.rs`) uses, under the paths it has inside the crate,
 /// and nothing else of those modules.
+#[cfg(not(target_family = "wasm"))]
 pub mod cli {
     pub mod agent {
         pub mod client {

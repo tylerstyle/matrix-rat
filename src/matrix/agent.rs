@@ -22,8 +22,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use futures::{FutureExt, Stream, StreamExt, pin_mut};
 use matrix_sdk::deserialized_responses::{DeviceLinkProblem, VerificationLevel, VerificationState};
 use matrix_sdk::ruma::events::room::message::{MessageType, RoomMessageEventContent};
-use matrix_sdk::ruma::{EventId, RoomId, UserId};
-use matrix_sdk::{Client, Room, RoomState};
+use matrix_sdk::ruma::{EventId, UserId};
+use matrix_sdk::{Client, Room};
 use matrix_sdk_ui::eyeball_im::{Vector, VectorDiff};
 use matrix_sdk_ui::timeline::{
     MsgLikeKind, RoomExt, Timeline, TimelineFocus, TimelineItem, TimelineItemContent,
@@ -262,7 +262,7 @@ impl Agent {
 
     /// The room a request is for: one the account is in, and nothing else.
     fn room(&self, room_id: &str) -> Result<Room> {
-        joined_room(&self.client, &self.left, room_id)
+        super::left::joined_room(&self.client, &self.left, room_id)
     }
 
     /// The room, unless as much is running already as may run at once.
@@ -344,23 +344,6 @@ impl Agent {
         let watcher = rt::spawn(watch_room(room, room_id.clone(), events, ignored));
         self.watchers.insert(room_id, watcher);
     }
-}
-
-/// The room with this id, if the account is in it (and has not left it in this
-/// session, whatever a late sync answer makes it look like).
-pub(super) fn joined_room(
-    client: &Client,
-    left: &super::left::LeftRooms,
-    room_id: &str,
-) -> Result<Room> {
-    let id = RoomId::parse(room_id).map_err(|_| anyhow!("invalid room id"))?;
-    let room = client
-        .get_room(&id)
-        .ok_or_else(|| anyhow!("this room is not known"))?;
-    if room.state() != RoomState::Joined || left.gone(&room) {
-        bail!("the account is not in this room");
-    }
-    Ok(room)
 }
 
 /// A room's live timeline for looking at: with what was said in threads, and without
@@ -782,6 +765,8 @@ fn warning(shield: Shield) -> &'static str {
 mod tests {
     use std::time::Duration;
 
+    use matrix_sdk::RoomState;
+    use matrix_sdk::ruma::RoomId;
     use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
     use super::*;

@@ -284,6 +284,7 @@ pub enum MouseButton {
 
 /// The terminal's events, read with crossterm, into ours: one to one, nothing dropped
 /// or changed here (`App::on_event` drops key releases, as it always did).
+#[cfg(not(target_family = "wasm"))]
 mod from_crossterm {
     use crossterm::event as ct;
 

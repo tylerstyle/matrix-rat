@@ -327,7 +327,7 @@ impl Collector {
                 dir,
                 room_name,
             } => {
-                let room = super::agent::joined_room(&self.client, &self.left, &room_id);
+                let room = super::left::joined_room(&self.client, &self.left, &room_id);
                 let events = self.events.clone();
                 let ignored = self.ignored.clone();
                 self.running.spawn(async move {
@@ -351,7 +351,7 @@ impl Collector {
     /// Collects the text for a summary that `wanted` says, and answers with
     /// [`CollectEvent::Unread`].
     fn summary_text(&mut self, request: u64, room_id: &str, wanted: Wanted) {
-        let room = super::agent::joined_room(&self.client, &self.left, room_id);
+        let room = super::left::joined_room(&self.client, &self.left, room_id);
         let events = self.events.clone();
         let ignored = self.ignored.clone();
         self.running.spawn(async move {

@@ -584,8 +584,9 @@ impl App {
                 | MatrixCmd::DirectoryNextPage { .. }
                 | MatrixCmd::CancelDirectorySearch
                 | MatrixCmd::ListThreads { .. }
-                | MatrixCmd::Agent(_)
                 | MatrixCmd::Collect(_) => false,
+                #[cfg(not(target_family = "wasm"))]
+                MatrixCmd::Agent(_) => false,
             }
         {
             return command;

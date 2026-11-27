@@ -471,6 +471,23 @@ fn not_in_after_all<'a>(
 /// A stand-in homeserver, for tests of what the worker does with the rooms it knows:
 /// a client that has had one sync answer from it knows the rooms in that answer, and
 /// what it asks later is answered from the same few things.
+/// The room with this id, if the account is in it (and has not left it in this
+/// session, whatever a late sync answer makes it look like).
+pub(super) fn joined_room(
+    client: &Client,
+    left: &LeftRooms,
+    room_id: &str,
+) -> anyhow::Result<Room> {
+    let id = RoomId::parse(room_id).map_err(|_| anyhow::anyhow!("invalid room id"))?;
+    let room = client
+        .get_room(&id)
+        .ok_or_else(|| anyhow::anyhow!("this room is not known"))?;
+    if room.state() != RoomState::Joined || left.gone(&room) {
+        anyhow::bail!("the account is not in this room");
+    }
+    Ok(room)
+}
+
 #[cfg(test)]
 pub(super) mod testing {
     use std::sync::{Arc, Mutex};
