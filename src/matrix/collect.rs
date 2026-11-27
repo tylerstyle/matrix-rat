@@ -42,7 +42,7 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 
 use super::MatrixEvent;
-use super::paging;
+use super::paging::{self, PageError};
 use super::safety::IgnoredSet;
 use crate::collect::{self, Cut, Span};
 use crate::logsafe;
@@ -824,14 +824,20 @@ async fn load(
         |loaded| progress.tell(loaded),
         enough,
         |ask| async move {
-            match tokio::time::timeout(PAGE_TIMEOUT, paging::backwards(timeline, ask)).await {
-                Ok(Ok(reached_start)) => Some(reached_start),
-                Ok(Err(err)) => {
-                    tracing::debug!(why = %logsafe::kind(&err), "collect: could not load older messages");
-                    None
+            // Asked once more when all caches were cleared after a panic: of them. A second
+            // panic does not clear them again (see `paging::backwards`).
+            for _ in 0..2 {
+                match tokio::time::timeout(PAGE_TIMEOUT, paging::backwards(timeline, ask)).await {
+                    Ok(Ok(reached_start)) => return Some(reached_start),
+                    Ok(Err(PageError::Panicked { cleared: true })) => {}
+                    Ok(Err(err)) => {
+                        tracing::debug!(why = %logsafe::kind(&err), "collect: could not load older messages");
+                        return None;
+                    }
+                    Err(_) => return None,
                 }
-                Err(_) => None,
             }
+            None
         },
         times,
     )

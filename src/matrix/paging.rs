@@ -88,21 +88,40 @@ pub(super) async fn backwards(timeline: &Timeline, count: u16) -> Result<bool, P
         reason = "the one place it is called, with its panic caught"
     )]
     let page = timeline.paginate_backwards(count);
-    let answer = unpanicked(page, LOOK_AGAIN).await;
+    // One process holds one account at a time; a logout and a login within the bound
+    // share it, which only delays a clear.
     static LAST_CLEAR: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
-    if matches!(answer, Err(PageError::Panicked))
-        && clear_due(&LAST_CLEAR, std::time::Instant::now())
-    {
-        // The room's events in memory and in the store disagree, and stay so (later pages
-        // panic too, the room's new events are refused by the store): all the caches are
-        // cleared and loaded anew, as the SDK itself does when the ignore list changes
-        // (0.19.1 has no public way to clear one room). Open rooms then page again.
-        let client = timeline.room().client();
-        if let Err(err) = client.event_cache().clear_all_rooms().await {
-            tracing::warn!(why = %logsafe::kind(&err), "could not clear the event cache after a panic");
+    match unpanicked(page, LOOK_AGAIN).await {
+        Err(PageError::Panicked { .. }) => {
+            let cleared = clear_due(&LAST_CLEAR, std::time::Instant::now())
+                && clear_caches(timeline.room().client()).await;
+            Err(PageError::Panicked { cleared })
         }
+        answer => answer,
     }
-    answer
+}
+
+/// Clears all rooms' event caches after a panic: the room's events in memory and in the
+/// store disagree, and stay so (later pages panic too, the room's new events are refused
+/// by the store), so they are cleared and loaded anew, as the SDK itself does when the
+/// ignore list changes (0.19.1 has no public way to clear one room). Open rooms then page
+/// again. Whether they were cleared.
+///
+/// In a task of its own, which the caller waits for: the SDK empties the store first and
+/// then reloads what it holds in memory, and a caller's timeout or abort between the two
+/// would leave them apart for all rooms. A task that is no longer waited for runs to its
+/// end.
+async fn clear_caches(client: matrix_sdk::Client) -> bool {
+    let clear = tokio::spawn(async move {
+        match client.event_cache().clear_all_rooms().await {
+            Ok(()) => true,
+            Err(err) => {
+                tracing::warn!(why = %logsafe::kind(&err), "could not clear the event cache after a panic");
+                false
+            }
+        }
+    });
+    clear.await.unwrap_or(false)
 }
 
 /// The least time between two clears of the event cache after a panic: a page that
@@ -145,11 +164,12 @@ async fn unpanicked(
     match answer {
         Ok(answer) => answer.map_err(PageError::Timeline),
         Err(_) => {
+            let err = PageError::Panicked { cleared: false };
             tracing::warn!(
-                why = %logsafe::kind(&PageError::Panicked),
+                why = %logsafe::kind(&err),
                 "could not load older messages: taken as a failed load"
             );
-            Err(PageError::Panicked)
+            Err(err)
         }
     }
 }
@@ -158,15 +178,19 @@ async fn unpanicked(
 pub(crate) enum PageError {
     /// The timeline said so.
     Timeline(TimelineError),
-    /// The SDK panicked while loading it (see [`backwards`]).
-    Panicked,
+    /// The SDK panicked while loading it (see [`backwards`]). `cleared`: all rooms' event
+    /// caches were cleared after it, so the timeline starts afresh (its reset reaches its
+    /// subscribers on its own) and a page asked for now is of the cleared caches.
+    Panicked { cleared: bool },
 }
 
 impl fmt::Display for PageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Timeline(err) => write!(f, "{err}"),
-            Self::Panicked => f.write_str("the Matrix library failed while loading the page"),
+            Self::Panicked { .. } => {
+                f.write_str("the Matrix library failed while loading the page")
+            }
         }
     }
 }
@@ -176,7 +200,7 @@ impl fmt::Debug for PageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Timeline(err) => write!(f, "Timeline({})", logsafe::kind(err)),
-            Self::Panicked => f.write_str("Panicked"),
+            Self::Panicked { cleared } => write!(f, "Panicked {{ cleared: {cleared} }}"),
         }
     }
 }
@@ -185,7 +209,7 @@ impl std::error::Error for PageError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Timeline(err) => Some(err),
-            Self::Panicked => None,
+            Self::Panicked { .. } => None,
         }
     }
 }
@@ -214,7 +238,10 @@ mod tests {
         let err = unpanicked(page, SOON)
             .await
             .expect_err("the panic is an error");
-        assert!(matches!(err, PageError::Panicked), "{err:?}");
+        assert!(
+            matches!(err, PageError::Panicked { cleared: false }),
+            "{err:?}"
+        );
         assert_eq!(logsafe::kind(&err).to_string(), "SDK panicked");
         // Nothing of the panic's own words.
         let shown = format!("{err} {err:?} {}", logsafe::kind(&err));
@@ -270,7 +297,10 @@ mod tests {
             .await
             .expect("the caller is not left waiting")
             .expect("the caller did not panic");
-        assert!(matches!(answer, Err(PageError::Panicked)), "{answer:?}");
+        assert!(
+            matches!(answer, Err(PageError::Panicked { cleared: false })),
+            "{answer:?}"
+        );
         assert_eq!(
             polls.load(Ordering::SeqCst),
             2,

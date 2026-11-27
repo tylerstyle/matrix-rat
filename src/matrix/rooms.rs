@@ -475,6 +475,10 @@ impl Timelines {
         let paging = Paging::spawn(self.events.clone(), async move {
             let reached_start = match page_back(&timeline, live).await {
                 Ok(reached_start) => reached_start,
+                // All caches were cleared after a panic: the timeline starts afresh, and
+                // its reset reaches the UI on its own, perhaps before this answer, which
+                // must not then say the start of what is loaded anew was reached.
+                Err(PageError::Panicked { cleared: true }) => false,
                 Err(err) => {
                     tracing::warn!(why = %logsafe::kind(&err), "could not load older messages");
                     // Report "done" so the UI does not retry in a loop.

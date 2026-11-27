@@ -164,7 +164,7 @@ fn recognise(err: &(dyn Error + 'static)) -> Option<Why> {
     }
     // A page that failed with the timeline's error says nothing more: its cause, next
     // along the chain, does.
-    if let Some(PageError::Panicked) = find::<PageError>(err) {
+    if let Some(PageError::Panicked { .. }) = find::<PageError>(err) {
         return Some(Why::Word("SDK panicked"));
     }
     if let Some(err) = find::<tokio::task::JoinError>(err) {

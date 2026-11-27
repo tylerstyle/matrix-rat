@@ -33,7 +33,7 @@ use tokio::sync::watch;
 use tokio::task::{JoinHandle, JoinSet};
 
 use super::MatrixEvent;
-use super::paging;
+use super::paging::{self, PageError};
 use super::safety::IgnoredSet;
 use crate::agent::proto::{self, Msg};
 use crate::logsafe;
@@ -428,6 +428,8 @@ async fn read_latest(
         let limit_at = give_up.min(tokio::time::Instant::now() + PAGE_TIMEOUT);
         match tokio::time::timeout_at(limit_at, paging::backwards(&timeline, PAGE)).await {
             Ok(Ok(reached_start)) => done = reached_start,
+            // All caches were cleared after a panic: the next page is of them.
+            Ok(Err(PageError::Panicked { cleared: true })) => {}
             Ok(Err(err)) => {
                 tracing::debug!(why = %logsafe::kind(&err), "agent: could not load older messages");
                 done = true;
@@ -485,6 +487,8 @@ async fn watch_room(
         let page = paging::backwards(&timeline, PAGE);
         let done = match tokio::time::timeout_at(give_up, page).await {
             Ok(Ok(reached_start)) => reached_start,
+            // All caches were cleared after a panic: the next page is of them.
+            Ok(Err(PageError::Panicked { cleared: true })) => false,
             Ok(Err(err)) => {
                 tracing::debug!(why = %logsafe::kind(&err), "agent: could not load a watched room's latest messages");
                 break;
