@@ -45,6 +45,9 @@ pub struct Config {
     pub window_title: bool,
     /// Show under messages who has read up to there.
     pub read_markers: bool,
+    /// Fetch about three months of every room's history in the background, so that
+    /// search across all rooms finds it.
+    pub search_history: bool,
     /// Notifications for new messages: "auto", "desktop", "terminal" or "off".
     pub notifications: crate::notify::NotifyMode,
     /// The program's icon in desktop notifications: "color", "outline" or "generic".
@@ -125,6 +128,7 @@ impl std::fmt::Debug for Config {
             .field("do_not_disturb", &self.do_not_disturb)
             .field("window_title", &self.window_title)
             .field("read_markers", &self.read_markers)
+            .field("search_history", &self.search_history)
             .field("notifications", &self.notifications)
             .field("notification_icon", &self.notification_icon)
             .field("notification_preview", &self.notification_preview)
@@ -267,6 +271,7 @@ impl Default for Config {
             do_not_disturb: false,
             window_title: true,
             read_markers: true,
+            search_history: true,
             notifications: crate::notify::NotifyMode::Auto,
             notification_icon: crate::notify::AppIcon::Color,
             notification_preview: true,
@@ -849,6 +854,11 @@ mod tests {
         assert!(config.read_markers);
         let config: Config = toml::from_str("read_markers = false").unwrap();
         assert!(!config.read_markers);
+        // On unless switched off (the user's choice for 1.1).
+        assert!(config.search_history);
+        let config: Config = toml::from_str("search_history = false").unwrap();
+        assert!(!config.search_history);
+        assert!(toml::from_str::<Config>("search_history = \"3 months\"").is_err());
         assert!(config.esc_closes_chat);
         let config: Config = toml::from_str("esc_closes_chat = false").unwrap();
         assert!(!config.esc_closes_chat);

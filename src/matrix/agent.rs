@@ -1396,7 +1396,7 @@ mod tests {
         use crate::agent::client::{ClientError, Conn};
         use crate::agent::proto::Code;
         use crate::agent::serve::{Limits, Served};
-        use crate::matrix::{MatrixCmd, RoomCategory, SecretStoreMode, spawn_with};
+        use crate::matrix::{MatrixCmd, RoomCategory, SecretStoreMode, WorkerOptions, spawn_with};
 
         let var = |name: &str| std::env::var(name).ok();
         let homeserver =
@@ -1461,7 +1461,8 @@ mod tests {
         // Once, with the worker as the app drives it: log in, and accept the
         // invitation to the person's encrypted room. (`serve` does neither.)
         let name = format!("agent test {stamp}");
-        let (handle, mut events) = spawn_with(paths.clone(), SecretStoreMode::File);
+        let (handle, mut events) =
+            spawn_with(paths.clone(), WorkerOptions::agent(SecretStoreMode::File));
         handle.send(MatrixCmd::LoginPassword {
             homeserver: homeserver.clone(),
             username,

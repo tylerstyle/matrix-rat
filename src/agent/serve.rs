@@ -34,7 +34,7 @@ use super::socket::{self, BindError, SocketFile};
 use crate::logsafe;
 use crate::matrix::{
     AgentCmd, AgentEvent, MatrixCmd, MatrixEvent, MatrixHandle, RoomCategory, RoomSummary,
-    SecretStoreMode,
+    SecretStoreMode, WorkerOptions,
 };
 use crate::paths::Paths;
 
@@ -556,6 +556,7 @@ impl Hub {
             | MatrixEvent::FilesSent(_)
             | MatrixEvent::RoomMembers { .. }
             | MatrixEvent::Manage(_)
+            | MatrixEvent::SearchHistory(_)
             | MatrixEvent::SearchResults { .. }
             | MatrixEvent::Draft { .. }
             | MatrixEvent::IgnoredUsers(_)
@@ -1246,7 +1247,8 @@ impl Served {
         secret_store: SecretStoreMode,
         limits: Limits,
     ) -> Result<Self, StartError> {
-        let (matrix, events) = crate::matrix::spawn_with(paths.clone(), secret_store);
+        let (matrix, events) =
+            crate::matrix::spawn_with(paths.clone(), WorkerOptions::agent(secret_store));
         Self::begin(matrix, events, &paths.agent_socket(), limits).await
     }
 
@@ -1364,7 +1366,10 @@ impl Signals {
 pub async fn run(paths: &Paths, secret_store: SecretStoreMode) -> anyhow::Result<()> {
     let mut signals = Signals::new()?;
     let limits = Limits::default();
-    let (matrix, events) = crate::matrix::spawn_with(paths.clone(), secret_store);
+    // No back-pagination queue, so no search history and no backfills of every room:
+    // `serve` reads, waits and sends in the rooms it is bound to, and never searches.
+    let (matrix, events) =
+        crate::matrix::spawn_with(paths.clone(), WorkerOptions::agent(secret_store));
     let socket = paths.agent_socket();
     let starting = Served::begin(matrix.clone(), events, &socket, limits);
     let started = tokio::select! {

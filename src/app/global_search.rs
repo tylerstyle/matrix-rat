@@ -1975,4 +1975,41 @@ mod tests {
         });
         assert_eq!(app.timeline.selected, Some(2));
     }
+
+    /// The settings row switches the fetch of older messages, writes it down and tells
+    /// the worker, which stops a fetch or starts one.
+    #[test]
+    fn the_search_history_setting_is_saved_and_told_to_the_worker() {
+        use crate::modal::Setting;
+
+        assert!(App::new(&Config::default(), std::env::temp_dir(), None).search_history);
+        let off = Config {
+            search_history: false,
+            ..Config::default()
+        };
+        assert!(!App::new(&off, std::env::temp_dir(), None).search_history);
+
+        let (mut app, mut commands, _handle) = test_app_with_matrix();
+        while commands.try_recv().is_ok() {}
+        let dir = std::env::temp_dir().join(format!("matrix-rat-history-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("config.toml");
+        app.set_config_file(&file);
+        assert_eq!(app.setting_value(Setting::SearchHistory), "3 months");
+        let mut sent = || -> Vec<String> {
+            std::iter::from_fn(|| commands.try_recv().ok())
+                .map(|command| command.describe())
+                .collect()
+        };
+        app.perform(Action::Setting(Setting::SearchHistory));
+        assert!(!app.search_history);
+        assert_eq!(app.setting_value(Setting::SearchHistory), "off");
+        assert!(!Config::load(&file).unwrap().search_history);
+        assert_eq!(sent(), ["SearchHistory(enabled: false)"]);
+        app.perform(Action::Setting(Setting::SearchHistory));
+        assert!(app.search_history);
+        assert!(Config::load(&file).unwrap().search_history);
+        assert_eq!(sent(), ["SearchHistory(enabled: true)"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

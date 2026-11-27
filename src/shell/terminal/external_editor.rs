@@ -93,6 +93,7 @@ fn snapshot_of(event: &MatrixEvent) -> Option<Snapshot<'_>> {
         | MatrixEvent::RoomMembers { .. }
         | MatrixEvent::Manage(_)
         | MatrixEvent::NeedReauth { .. }
+        | MatrixEvent::SearchHistory(_)
         | MatrixEvent::SearchResults { .. }
         | MatrixEvent::Draft { .. }
         | MatrixEvent::IgnoredUsers(_)

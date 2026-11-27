@@ -311,6 +311,10 @@ pub struct App {
     pub(crate) found: doctor::Found,
     /// Show who has read up to where (the `read_markers` setting).
     pub(crate) read_markers: bool,
+    /// Fetch three months of history for search (the `search_history` setting).
+    pub(crate) search_history: bool,
+    /// How far that fetch has got, as the worker said; shown in the search box.
+    pub(crate) history_run: crate::matrix::HistoryRun,
     /// Whether clicks go to the app; the event loop applies changes to the terminal.
     pub(crate) mouse: bool,
     /// Text on its way to the system clipboard; the event loop sends it.
@@ -605,6 +609,7 @@ impl App {
         app.do_not_disturb = config.do_not_disturb;
         app.window_title = config.window_title;
         app.read_markers = config.read_markers;
+        app.search_history = config.search_history;
         app.esc_closes_chat = config.esc_closes_chat;
         app.rooms_bar = config.rooms_bar;
         app.mouse = config.mouse;
@@ -715,6 +720,8 @@ impl App {
             title_written: None,
             found: Default::default(),
             read_markers: true,
+            search_history: true,
+            history_run: crate::matrix::HistoryRun::Off,
             mouse: true,
             pending_copy: None,
             notify_mode: crate::notify::NotifyMode::Off,
@@ -1284,6 +1291,12 @@ impl App {
             Setting::TypingNotices => switch(self.typing_notices),
             Setting::ReadReceipts => switch(self.read_receipts),
             Setting::ReadMarkers => switch(self.read_markers),
+            Setting::SearchHistory => if self.search_history {
+                "3 months"
+            } else {
+                "off"
+            }
+            .to_owned(),
             Setting::Notifications => switch(self.notify_mode != crate::notify::NotifyMode::Off),
             Setting::DoNotDisturb => switch(self.do_not_disturb),
             Setting::WindowTitle => switch(self.window_title),
@@ -1397,6 +1410,14 @@ impl App {
                 self.save_setting("read_markers", self.read_markers);
                 // The rows are laid out afresh.
                 self.timeline_rev += 1;
+            }
+            Setting::SearchHistory => {
+                self.search_history = !self.search_history;
+                self.save_setting("search_history", self.search_history);
+                // Off stops a fetch at once; on starts one unless one finished.
+                self.send_matrix(MatrixCmd::SearchHistory {
+                    enabled: self.search_history,
+                });
             }
             Setting::LinkPreviews => {
                 self.link_previews = self.link_previews.step(if delta < 0 { -1 } else { 1 });
@@ -1778,6 +1799,8 @@ impl App {
         self.pending_jump = None;
         self.rooms_received = false;
         self.search_gen += 1;
+        // The next session's worker says again how far its fetch is.
+        self.history_run = crate::matrix::HistoryRun::Off;
         self.ignored_users.clear();
         bump_search_gen(&mut self.user_search_gen, &mut self.user_search_debounce);
         bump_search_gen(&mut self.dir_search_gen, &mut self.dir_search_debounce);
@@ -3821,6 +3844,7 @@ impl App {
                             | Setting::Profile
                             | Setting::Logout
                             | Setting::ReadMarkers
+                            | Setting::SearchHistory
                             | Setting::ThemeDark
                             | Setting::ThemeLight
                             | Setting::ThemePairing
@@ -4141,6 +4165,9 @@ impl App {
                 done,
                 note,
             } => self.on_search_results(generation, hits, done, note),
+            // Of a session that has ended.
+            MatrixEvent::SearchHistory(_) if self.logged_out => {}
+            MatrixEvent::SearchHistory(run) => self.history_run = run,
             MatrixEvent::IgnoredUsers(users) => self.on_ignored_users_list(users),
             MatrixEvent::EmotePacks { .. } if self.logged_out => {}
             MatrixEvent::EmotePacks { room_id, catalog } => self.on_emote_packs(room_id, catalog),

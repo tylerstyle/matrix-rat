@@ -567,6 +567,7 @@ impl App {
                 | MatrixCmd::ReauthBrowser
                 | MatrixCmd::SearchMessages { .. }
                 | MatrixCmd::CancelSearch
+                | MatrixCmd::SearchHistory { .. }
                 | MatrixCmd::SaveDraft { .. }
                 | MatrixCmd::ForgetDrafts { .. }
                 | MatrixCmd::IgnoreUser { .. }

@@ -1129,6 +1129,91 @@ mod tests {
         insta::assert_snapshot!(render(&mut app, 100, 30));
     }
 
+    /// The search box says how far the fetch of older messages has got.
+    #[test]
+    fn global_search_history() {
+        use crate::matrix::{HistoryRun, MatrixEvent, SearchHit};
+        use crate::modal::Modal;
+
+        let mut app = App::demo();
+        app.perform(Action::SearchEverywhere);
+        app.on_matrix(MatrixEvent::SearchHistory(HistoryRun::Waiting));
+        let shown = render(&mut app, 100, 30);
+        assert!(
+            shown.contains("Searches messages on this device "),
+            "{shown}"
+        );
+        assert!(shown.contains("Fetching older messages…"), "{shown}");
+        let running = HistoryRun::Running {
+            back_to: "28 Aug".into(),
+        };
+        app.on_matrix(MatrixEvent::SearchHistory(running.clone()));
+        insta::assert_snapshot!("global_search_history_running", render(&mut app, 100, 30));
+        app.on_matrix(MatrixEvent::SearchHistory(HistoryRun::Done {
+            back_to: "28 Aug".into(),
+        }));
+        insta::assert_snapshot!("global_search_history_done", render(&mut app, 100, 30));
+        app.on_matrix(MatrixEvent::SearchHistory(HistoryRun::Stopped));
+        let shown = render(&mut app, 100, 30);
+        assert!(
+            shown.contains("Fetching older messages stopped; it goes on at the next start"),
+            "{shown}"
+        );
+
+        // Matches while fetching: the note row says so.
+        app.on_matrix(MatrixEvent::SearchHistory(running));
+        let hit = SearchHit {
+            room_id: "!design:example.org".into(),
+            event_id: "$1".into(),
+            thread_root: None,
+            room_name: "Design".into(),
+            sender: "Nora".into(),
+            date: "Today".into(),
+            snippet: "We should keep the Friday deadline after all".into(),
+        };
+        if let Some(Modal::GlobalSearch(s)) = &mut app.modal {
+            s.query.set("deadline");
+            s.active_query = "deadline".into();
+            s.hits = vec![hit.clone()];
+        }
+        let shown = render(&mut app, 100, 30);
+        assert!(
+            shown.contains("Still fetching older messages: search again later for more"),
+            "{shown}"
+        );
+        // The search's own note asks the user to do something: it wins.
+        if let Some(Modal::GlobalSearch(s)) = &mut app.modal {
+            s.note = Some("Showing the newest 200 matches — refine your search".into());
+        }
+        let shown = render(&mut app, 100, 30);
+        assert!(shown.contains("Showing the newest 200 matches"), "{shown}");
+        assert!(!shown.contains("Still fetching"), "{shown}");
+        // No matches while fetching.
+        if let Some(Modal::GlobalSearch(s)) = &mut app.modal {
+            s.note = None;
+            s.hits.clear();
+        }
+        let shown = render(&mut app, 100, 30);
+        assert!(
+            shown.contains("no matches yet; still fetching older messages"),
+            "{shown}"
+        );
+        // Done: no note, a plain "no matches".
+        app.on_matrix(MatrixEvent::SearchHistory(HistoryRun::Done {
+            back_to: "28 Aug".into(),
+        }));
+        let shown = render(&mut app, 100, 30);
+        assert!(shown.contains("  no matches "), "{shown}");
+        if let Some(Modal::GlobalSearch(s)) = &mut app.modal {
+            s.hits = vec![hit];
+        }
+        let shown = render(&mut app, 100, 30);
+        assert!(!shown.contains("Still fetching"), "{shown}");
+        // Logged out: back to what the box said before.
+        app.reset_session();
+        assert_eq!(app.history_run, HistoryRun::Off);
+    }
+
     #[test]
     fn composer_completions() {
         let mut app = App::demo();

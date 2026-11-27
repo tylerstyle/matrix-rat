@@ -110,12 +110,12 @@ pub(super) mod browser {
     use tokio::sync::mpsc::UnboundedSender;
 
     pub use super::{ActiveSession, ReauthKind, ReauthOutcome, ReauthTarget, RestoreOutcome};
-    use crate::matrix::{MatrixEvent, SecretStoreMode};
+    use crate::matrix::{MatrixEvent, WorkerOptions};
     use crate::paths::Paths;
 
     const NO_LOGIN: &str = "logging in is not available in the browser yet";
 
-    pub async fn restore(_paths: &Paths, _secret_store: SecretStoreMode) -> RestoreOutcome {
+    pub async fn restore(_paths: &Paths, _options: &WorkerOptions) -> RestoreOutcome {
         RestoreOutcome::NoSession
     }
 
@@ -141,7 +141,7 @@ pub(super) mod browser {
         _homeserver: &str,
         _username: &str,
         _password: &str,
-        _secret_store: SecretStoreMode,
+        _options: &WorkerOptions,
     ) -> Result<ActiveSession> {
         bail!(NO_LOGIN)
     }
@@ -152,7 +152,7 @@ pub(super) mod browser {
         _password: &str,
         _existing_passphrase: &str,
         _was_in_keyring: bool,
-        _secret_store: SecretStoreMode,
+        _options: &WorkerOptions,
     ) -> Result<ReauthOutcome> {
         bail!(NO_LOGIN)
     }
@@ -161,7 +161,7 @@ pub(super) mod browser {
         _paths: &Paths,
         _homeserver: &str,
         _events: &UnboundedSender<MatrixEvent>,
-        _secret_store: SecretStoreMode,
+        _options: &WorkerOptions,
     ) -> Result<ActiveSession> {
         bail!(NO_LOGIN)
     }
@@ -172,7 +172,7 @@ pub(super) mod browser {
         _events: &UnboundedSender<MatrixEvent>,
         _existing_passphrase: &str,
         _was_in_keyring: bool,
-        _secret_store: SecretStoreMode,
+        _options: &WorkerOptions,
     ) -> Result<ReauthOutcome> {
         bail!(NO_LOGIN)
     }

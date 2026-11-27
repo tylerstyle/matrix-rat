@@ -302,10 +302,12 @@ fn settings(frame: &mut Frame, app: &mut App, area: Rect, menu: &mut SettingsMen
             | Setting::DoNotDisturb
             | Setting::WindowTitle
             | Setting::ReadMarkers
+            | Setting::SearchHistory
             | Setting::RoomPreviews
             | Setting::KeepNotes
             | Setting::Notifications => {
-                let on = value == "on";
+                // "on", or what is on: "3 months" of search history.
+                let on = value != "off";
                 let role = if on { Role::StatusOk } else { Role::Muted };
                 let dot = if on { "● " } else { "○ " };
                 spans.push(Span::styled(format!("{dot}{value}"), theme.style(role)));

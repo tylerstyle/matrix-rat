@@ -21,12 +21,12 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 use url::Url;
 
-use super::MatrixEvent;
 pub use super::auth::{ActiveSession, ReauthKind, ReauthOutcome, ReauthTarget, RestoreOutcome};
 use super::keyring::{
-    KeyringBackend, KeyringKey, PassphraseFileStore, SecretServiceKeyring, SecretStoreMode,
+    KeyringBackend, KeyringKey, PassphraseFileStore, SecretServiceKeyring,
     prepare_passphrase_for_save, resolve_passphrase,
 };
+use super::{MatrixEvent, WorkerOptions};
 use crate::paths::Paths;
 
 const DEVICE_NAME: &str = "matrix-rat";
@@ -186,7 +186,15 @@ pub(crate) fn sqlite_store_config(
 
 /// For a saved session: uses the known URL and makes no network request, so the app
 /// starts from its local stores even when offline.
-async fn offline_client(paths: &Paths, homeserver: &str, passphrase: &str) -> Result<Client> {
+///
+/// `back_pagination`: with the SDK's back-pagination queue (see
+/// [`WorkerOptions::back_pagination`]), which cannot be added later.
+async fn offline_client(
+    paths: &Paths,
+    homeserver: &str,
+    passphrase: &str,
+    back_pagination: bool,
+) -> Result<Client> {
     Client::builder()
         .homeserver_url(homeserver)
         .sqlite_store_with_config_and_cache_path(
@@ -209,6 +217,7 @@ async fn offline_client(paths: &Paths, homeserver: &str, passphrase: &str) -> Re
         )
         .with_encryption_settings(encryption_settings())
         .with_threading_support(super::threads::SUPPORT)
+        .with_enable_automatic_back_pagination(back_pagination)
         .handle_refresh_tokens()
         .build()
         .await
@@ -375,13 +384,13 @@ pub fn mark_soft_logout(paths: &Paths, active: &ActiveSession) -> Result<()> {
 }
 
 /// Restores the saved session, if there is one.
-pub async fn restore(paths: &Paths, secret_store: SecretStoreMode) -> RestoreOutcome {
-    restore_with(paths, secret_store, &SecretServiceKeyring::new()).await
+pub async fn restore(paths: &Paths, options: &WorkerOptions) -> RestoreOutcome {
+    restore_with(paths, options, &SecretServiceKeyring::new()).await
 }
 
 pub async fn restore_with<K: KeyringBackend>(
     paths: &Paths,
-    secret_store: SecretStoreMode,
+    options: &WorkerOptions,
     keyring: &K,
 ) -> RestoreOutcome {
     let path = paths.session_file();
@@ -412,7 +421,7 @@ pub async fn restore_with<K: KeyringBackend>(
     let mut disk_file = DiskSessionFile(&path);
 
     let resolved = match resolve_passphrase(
-        secret_store,
+        options.secret_store,
         saved.passphrase.as_deref(),
         &key,
         keyring,
@@ -439,7 +448,14 @@ pub async fn restore_with<K: KeyringBackend>(
         };
     }
 
-    let client = match offline_client(paths, &saved.homeserver, &resolved.passphrase).await {
+    let client = match offline_client(
+        paths,
+        &saved.homeserver,
+        &resolved.passphrase,
+        options.back_pagination,
+    )
+    .await
+    {
         Ok(client) => client,
         Err(err) => {
             return RestoreOutcome::Blocked(format!(
@@ -473,7 +489,7 @@ pub async fn restore_with<K: KeyringBackend>(
 async fn commit_fresh_session<K: KeyringBackend>(
     paths: &Paths,
     mem_client: Client,
-    secret_store: SecretStoreMode,
+    options: &WorkerOptions,
     keyring: &K,
 ) -> Result<ActiveSession> {
     let homeserver = mem_client.homeserver().to_string();
@@ -485,7 +501,7 @@ async fn commit_fresh_session<K: KeyringBackend>(
     // Prepare the passphrase before touching any existing store so keyring failures never
     // lose or rotate `<data>/store`.
     let file_passphrase =
-        prepare_passphrase_for_save(secret_store, keyring, &new_key, &new_passphrase)
+        prepare_passphrase_for_save(options.secret_store, keyring, &new_key, &new_passphrase)
             .await
             .map_err(|err| anyhow!("could not store passphrase in keyring: {err}"))?;
     let in_keyring = file_passphrase.is_none();
@@ -504,7 +520,8 @@ async fn commit_fresh_session<K: KeyringBackend>(
     }
 
     let result: Result<ActiveSession> = async {
-        let client = offline_client(paths, &homeserver, &new_passphrase).await?;
+        let client =
+            offline_client(paths, &homeserver, &new_passphrase, options.back_pagination).await?;
         client.restore_session(auth_session).await?;
         let saved = Saved {
             homeserver,
@@ -533,7 +550,7 @@ async fn commit_preserved_reauth<K: KeyringBackend>(
     mem_client: Client,
     existing_passphrase: &str,
     was_in_keyring: bool,
-    secret_store: SecretStoreMode,
+    options: &WorkerOptions,
     keyring: &K,
 ) -> Result<ActiveSession> {
     let homeserver = mem_client.homeserver().to_string();
@@ -542,12 +559,18 @@ async fn commit_preserved_reauth<K: KeyringBackend>(
 
     let key = target.keyring_key(&paths.profile);
     let file_passphrase =
-        prepare_passphrase_for_save(secret_store, keyring, &key, existing_passphrase)
+        prepare_passphrase_for_save(options.secret_store, keyring, &key, existing_passphrase)
             .await
             .map_err(|err| anyhow!("could not store passphrase in keyring: {err}"))?;
     let in_keyring = file_passphrase.is_none();
 
-    let client = offline_client(paths, &homeserver, existing_passphrase).await?;
+    let client = offline_client(
+        paths,
+        &homeserver,
+        existing_passphrase,
+        options.back_pagination,
+    )
+    .await?;
     client.restore_session(auth_session).await?;
     super::search::prune_stale_search_indexes(&client, &paths.search_dir()).await;
     let saved = Saved {
@@ -576,7 +599,7 @@ async fn finish_reauth<K: KeyringBackend>(
     expected: &ReauthTarget,
     existing_passphrase: &str,
     was_in_keyring: bool,
-    secret_store: SecretStoreMode,
+    options: &WorkerOptions,
     keyring: &K,
 ) -> Result<ReauthOutcome> {
     let actual_user = mem_client.user_id().map(|u| u.to_string());
@@ -594,7 +617,7 @@ async fn finish_reauth<K: KeyringBackend>(
                 mem_client,
                 existing_passphrase,
                 was_in_keyring,
-                secret_store,
+                options,
                 keyring,
             )
             .await?;
@@ -605,7 +628,7 @@ async fn finish_reauth<K: KeyringBackend>(
         }
         ReauthDecision::ReplaceStore { reason } => {
             tracing::warn!(%reason, "re-authentication cannot reuse the existing store; starting fresh");
-            let session = commit_fresh_session(paths, mem_client, secret_store, keyring).await?;
+            let session = commit_fresh_session(paths, mem_client, options, keyring).await?;
             Ok(ReauthOutcome {
                 session,
                 kept_device: false,
@@ -619,7 +642,7 @@ pub async fn login_password(
     homeserver: &str,
     username: &str,
     password: &str,
-    secret_store: SecretStoreMode,
+    options: &WorkerOptions,
 ) -> Result<ActiveSession> {
     if homeserver.trim().is_empty() || username.trim().is_empty() || password.is_empty() {
         bail!("homeserver, username and password are all needed");
@@ -633,7 +656,7 @@ pub async fn login_password(
         .send()
         .await
         .map_err(|err| anyhow!("login was refused: {err}"))?;
-    commit_fresh_session(paths, client, secret_store, &SecretServiceKeyring::new()).await
+    commit_fresh_session(paths, client, options, &SecretServiceKeyring::new()).await
 }
 
 pub async fn reauth_password(
@@ -642,7 +665,7 @@ pub async fn reauth_password(
     password: &str,
     existing_passphrase: &str,
     was_in_keyring: bool,
-    secret_store: SecretStoreMode,
+    options: &WorkerOptions,
 ) -> Result<ReauthOutcome> {
     if password.is_empty() {
         bail!("a password is needed");
@@ -663,7 +686,7 @@ pub async fn reauth_password(
         target,
         existing_passphrase,
         was_in_keyring,
-        secret_store,
+        options,
         &SecretServiceKeyring::new(),
     )
     .await
@@ -729,14 +752,14 @@ pub async fn login_browser(
     paths: &Paths,
     homeserver: &str,
     events: &UnboundedSender<MatrixEvent>,
-    secret_store: SecretStoreMode,
+    options: &WorkerOptions,
 ) -> Result<ActiveSession> {
     if homeserver.trim().is_empty() {
         bail!("a homeserver is needed");
     }
     let client = discover_memory_client(homeserver.trim()).await?;
     run_oauth_login(&client, events, None).await?;
-    commit_fresh_session(paths, client, secret_store, &SecretServiceKeyring::new()).await
+    commit_fresh_session(paths, client, options, &SecretServiceKeyring::new()).await
 }
 
 pub async fn reauth_browser(
@@ -745,7 +768,7 @@ pub async fn reauth_browser(
     events: &UnboundedSender<MatrixEvent>,
     existing_passphrase: &str,
     was_in_keyring: bool,
-    secret_store: SecretStoreMode,
+    options: &WorkerOptions,
 ) -> Result<ReauthOutcome> {
     let client = discover_memory_client(&target.homeserver).await?;
     run_oauth_login(&client, events, Some(target)).await?;
@@ -755,7 +778,7 @@ pub async fn reauth_browser(
         target,
         existing_passphrase,
         was_in_keyring,
-        secret_store,
+        options,
         &SecretServiceKeyring::new(),
     )
     .await
@@ -767,6 +790,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
+    use crate::matrix::SecretStoreMode;
     use crate::matrix::keyring::KeyringError;
 
     #[derive(Default)]
@@ -948,7 +972,13 @@ mod tests {
             auto_allowed: true,
             ..TestKeyring::default()
         };
-        match restore_with(&paths, SecretStoreMode::Auto, &keyring).await {
+        match restore_with(
+            &paths,
+            &WorkerOptions::agent(SecretStoreMode::Auto),
+            &keyring,
+        )
+        .await
+        {
             RestoreOutcome::NeedReauth {
                 target: got,
                 passphrase,
@@ -967,7 +997,13 @@ mod tests {
 
         // 2. Next start when keyring is locked MUST NOT wipe session.json or store!
         keyring.locked = true;
-        match restore_with(&paths, SecretStoreMode::Auto, &keyring).await {
+        match restore_with(
+            &paths,
+            &WorkerOptions::agent(SecretStoreMode::Auto),
+            &keyring,
+        )
+        .await
+        {
             RestoreOutcome::Blocked(msg) => {
                 assert!(msg.contains("locked"), "{msg}");
                 assert!(msg.contains("kept intact"), "{msg}");
@@ -1042,7 +1078,7 @@ mod tests {
             "{debug}"
         );
         assert!(!debug.contains("unit-test-secret"));
-        let client = offline_client(&paths, "http://127.0.0.1:1", "unit-test-secret")
+        let client = offline_client(&paths, "http://127.0.0.1:1", "unit-test-secret", false)
             .await
             .unwrap();
         // One process per profile (the profile lock): no lease renewed in SQLite every 50 ms.
@@ -1050,6 +1086,16 @@ mod tests {
             client.cross_process_lock_config(),
             matrix_sdk_base::cross_process_lock::CrossProcessLockConfig::SingleProcess
         ));
+        // `serve`'s client: no back-pagination queue, so no backfill of any room.
+        let cache = crate::matrix::cache::of(&client).expect("an event cache");
+        assert!(cache.back_pagination_queue().is_none());
+        drop(client);
+        // The app's: with the queue, which the search history needs.
+        let client = offline_client(&paths, "http://127.0.0.1:1", "unit-test-secret", true)
+            .await
+            .unwrap();
+        let cache = crate::matrix::cache::of(&client).expect("an event cache");
+        assert!(cache.back_pagination_queue().is_some());
         drop(client);
         let _ = std::fs::remove_dir_all(paths.data_dir.parent().unwrap());
     }

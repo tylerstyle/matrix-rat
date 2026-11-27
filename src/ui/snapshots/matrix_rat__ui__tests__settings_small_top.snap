@@ -18,10 +18,10 @@ expression: top
 "│        │   Typing notices        ● on                               │       ┃│"
 "│        │   Read receipts         ● on                               │       ┃│"
 "│        │   Read markers          ● on                               │       ┃│"
+"│        │   Search history        ● 3 months                         │       ┃│"
 "│        │   Notifications         ○ off                              │       ┃│"
-"│        │   Do not disturb        ○ off                              │       ┃│"
-"│        │   Unread count in title ● on                               │ 🐀    ┃│" Hidden by multi-width symbols: [(73, " ")]
-"│        │   Notification keywords Enter to view                    ▼ │────────╯"
+"│        │   Do not disturb        ○ off                              │ 🐀    ┃│" Hidden by multi-width symbols: [(73, " ")]
+"│        │   Unread count in title ● on                             ▼ │────────╯"
 "│        │ F3 cycles this, or the active dark/light slot when paired; │────────╮"
 "│        │ themes/ files reload live.                                 │  📎 🙂 │" Hidden by multi-width symbols: [(74, " "), (77, " ")]
 "╰────────╰───────────────── ↑↓ select · ←→ change · Enter · Esc close ╯────────╯"

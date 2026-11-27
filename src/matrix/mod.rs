@@ -28,6 +28,7 @@ mod safety;
 mod saved;
 mod sdk_error;
 pub(crate) mod search;
+mod search_history;
 #[cfg(not(target_family = "wasm"))]
 mod session;
 #[cfg(target_family = "wasm")]
@@ -77,6 +78,7 @@ pub use saved::{MAX_FETCH as SAVED_MAX_FETCH, SavedCmd, SavedEvent};
 pub(crate) use sdk_error::CopiedError;
 use sdk_error::SdkResult;
 pub use search::SearchHit;
+pub use search_history::HistoryRun;
 pub use session::{ReauthKind, ReauthTarget};
 pub use source::{EventSource, SOURCE_MAX, SourceKind};
 pub use spaces::{SpaceChild, SpaceDetails, SpaceEdit, SpaceSummary};
@@ -386,6 +388,11 @@ pub enum MatrixCmd {
     },
     /// Cancels any running global message search.
     CancelSearch,
+    /// The `search_history` setting: fetch three months of every room's history for
+    /// search, or stop. Answered with [`MatrixEvent::SearchHistory`] as the fetch goes.
+    SearchHistory {
+        enabled: bool,
+    },
     /// Write the unsent text of a room to the store, to have it back after a restart
     /// (see [`MatrixEvent::Draft`]). Empty text removes what is stored. Inside
     /// [`MatrixCmd::InThread`] it is that thread's draft.
@@ -622,6 +629,9 @@ impl MatrixCmd {
                 vec![Some(format!("generation {generation}"))],
             ),
             Self::CancelSearch => ("CancelSearch", vec![]),
+            Self::SearchHistory { enabled } => {
+                ("SearchHistory", vec![Some(format!("enabled: {enabled}"))])
+            }
             // A draft is message text.
             Self::SaveDraft { room_id, text } => (
                 "SaveDraft",
@@ -1023,6 +1033,9 @@ pub enum MatrixEvent {
         target: ReauthTarget,
         reason: String,
     },
+    /// How far the fetch of older messages for search has got (see
+    /// [`MatrixCmd::SearchHistory`]).
+    SearchHistory(HistoryRun),
     /// Results (partial or complete) from [`MatrixCmd::SearchMessages`].
     SearchResults {
         generation: u64,
@@ -1285,6 +1298,8 @@ impl MatrixEvent {
                 "NeedReauth",
                 vec![full.then(|| format!("{} dev={}", target.user_id, target.device_id))],
             ),
+            // A date and a state: nothing private.
+            Self::SearchHistory(run) => ("SearchHistory", vec![Some(format!("{run:?}"))]),
             Self::SearchResults {
                 generation: g,
                 hits,
@@ -1422,10 +1437,60 @@ impl MatrixHandle {
     }
 }
 
-/// Starts the worker on the current tokio runtime using `SecretStoreMode::Auto`.
+/// What a worker is for, and what that turns on: the app's or `serve`'s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkerOptions {
+    /// Where the store's passphrase is kept.
+    pub secret_store: SecretStoreMode,
+    /// The client gets the SDK's back-pagination queue. Fixed when the client is built:
+    /// with it come the latest-event and read-receipt backfills, and without it the
+    /// search history cannot be fetched.
+    pub back_pagination: bool,
+    /// Fetch three months of history for search (the `search_history` setting). Only
+    /// with `back_pagination`; changed at any time by [`MatrixCmd::SearchHistory`].
+    pub search_history: bool,
+}
+
+impl WorkerOptions {
+    /// The terminal app's: always with the queue, so that the setting turned on later
+    /// in a session still fetches; `search_history` is the setting.
+    pub fn app(secret_store: SecretStoreMode, search_history: bool) -> Self {
+        Self {
+            secret_store,
+            back_pagination: true,
+            search_history,
+        }
+    }
+
+    /// `serve`'s, and most tests': no queue, no search history. A daemon bound to a
+    /// room or two has no use for backfills of every room, nor for a search index.
+    pub fn agent(secret_store: SecretStoreMode) -> Self {
+        Self {
+            secret_store,
+            back_pagination: false,
+            search_history: false,
+        }
+    }
+}
+
+/// Starts the worker on the current tokio runtime using `SecretStoreMode::Auto`, with
+/// `serve`'s options ([`WorkerOptions::agent`]).
 #[allow(dead_code)]
 pub fn spawn(paths: Paths) -> (MatrixHandle, UnboundedReceiver<MatrixEvent>) {
-    spawn_with(paths, SecretStoreMode::Auto)
+    spawn_with(paths, WorkerOptions::agent(SecretStoreMode::Auto))
+}
+
+/// [`spawn`] with the app's options ([`WorkerOptions::app`]), for the tests of what the
+/// app shows.
+#[cfg(test)]
+pub(crate) fn spawn_app(
+    paths: Paths,
+    search_history: bool,
+) -> (MatrixHandle, UnboundedReceiver<MatrixEvent>) {
+    spawn_with(
+        paths,
+        WorkerOptions::app(SecretStoreMode::Auto, search_history),
+    )
 }
 
 /// Unique prefix for a newly built SDK timeline so item ids never repeat across timelines.
@@ -1435,17 +1500,17 @@ pub(super) fn next_timeline_prefix() -> String {
     format!("t{n}-")
 }
 
-/// Starts the worker on the current tokio runtime with the configured `secret_store` policy.
+/// Starts the worker on the current tokio runtime with these options.
 pub fn spawn_with(
     paths: Paths,
-    secret_store: SecretStoreMode,
+    options: WorkerOptions,
 ) -> (MatrixHandle, UnboundedReceiver<MatrixEvent>) {
     let (commands, command_rx) = unbounded_channel();
     let (events, event_rx) = unbounded_channel();
     rt::spawn(async move {
         Worker {
             paths,
-            secret_store,
+            options,
             commands: command_rx,
             events,
         }
@@ -1479,7 +1544,8 @@ enum PendingAuth {
 
 struct Worker {
     paths: Paths,
-    secret_store: SecretStoreMode,
+    /// `search_history` follows [`MatrixCmd::SearchHistory`], in a session and out.
+    options: WorkerOptions,
     commands: UnboundedReceiver<MatrixCmd>,
     events: UnboundedSender<MatrixEvent>,
 }
@@ -1494,7 +1560,7 @@ impl Worker {
         loop {
             let auth = match pending.take() {
                 Some(step) => Some(step),
-                None => match session::restore(&self.paths, self.secret_store).await {
+                None => match session::restore(&self.paths, &self.options).await {
                     session::RestoreOutcome::Restored(active) => {
                         let res = self.run_active_session(active, None, &mut pending).await;
                         if !res {
@@ -1635,6 +1701,9 @@ impl Worker {
                         _ = &mut retry => break,
                         command = self.commands.recv() => match command {
                             Some(MatrixCmd::Shutdown) | None => return false,
+                            Some(MatrixCmd::SearchHistory { enabled }) => {
+                                self.options.search_history = enabled;
+                            }
                             Some(_) => {}
                         },
                     }
@@ -1652,14 +1721,18 @@ impl Worker {
     ) -> Option<(session::ActiveSession, Option<String>)> {
         let Worker {
             paths,
-            secret_store,
+            options,
             commands,
             events,
         } = self;
-        let secret_store = *secret_store;
         loop {
             let request = match commands.recv().await? {
                 MatrixCmd::Shutdown => return None,
+                // The setting holds for the next session.
+                MatrixCmd::SearchHistory { enabled } => {
+                    options.search_history = enabled;
+                    continue;
+                }
                 request @ (MatrixCmd::LoginPassword { .. }
                 | MatrixCmd::LoginBrowser { .. }
                 | MatrixCmd::ReauthPassword { .. }
@@ -1736,6 +1809,8 @@ impl Worker {
                 #[cfg(not(target_family = "wasm"))]
                 MatrixCmd::Agent(_) => continue,
             };
+            // A copy: the setting may change while the login goes on.
+            let login_options = *options;
             let login = async {
                 #[expect(
                     clippy::wildcard_enum_match_arm,
@@ -1752,14 +1827,14 @@ impl Worker {
                             homeserver,
                             username,
                             password,
-                            secret_store,
+                            &login_options,
                         )
                         .await?;
                         Ok((s, None))
                     }
                     MatrixCmd::LoginBrowser { homeserver } => {
-                        let s =
-                            session::login_browser(paths, homeserver, events, secret_store).await?;
+                        let s = session::login_browser(paths, homeserver, events, &login_options)
+                            .await?;
                         Ok((s, None))
                     }
                     MatrixCmd::ReauthPassword { password } => {
@@ -1774,7 +1849,7 @@ impl Worker {
                             password,
                             passphrase,
                             *in_keyring,
-                            secret_store,
+                            &login_options,
                         )
                         .await?;
                         let notice = (!outcome.kept_device).then(|| {
@@ -1794,7 +1869,7 @@ impl Worker {
                             events,
                             passphrase,
                             *in_keyring,
-                            secret_store,
+                            &login_options,
                         )
                         .await?;
                         let notice = (!outcome.kept_device).then(|| {
@@ -1814,6 +1889,9 @@ impl Worker {
                     command = commands.recv() => match command {
                         Some(MatrixCmd::Shutdown) | None => return None,
                         Some(MatrixCmd::CancelLogin) => break None,
+                        Some(MatrixCmd::SearchHistory { enabled }) => {
+                            options.search_history = enabled;
+                        }
                         Some(_) => {}
                     },
                 }
@@ -1907,6 +1985,14 @@ impl Worker {
             safety::UserSearcher::new(client.clone(), self.events.clone(), ignored.clone());
         let mut dir_searcher =
             directory::DirectorySearcher::new(client.clone(), self.events.clone(), left.clone());
+        // Three months of history for search; it starts once the room list is in.
+        let mut history = search_history::SearchHistory::new(
+            client.clone(),
+            self.events.clone(),
+            self.options.search_history,
+        );
+        // The sync said it is offline and has not been through since (see `back_online`).
+        let mut offline = false;
         // The rooms the store has as joined before the sync brings any, to be checked
         // against the server's list once the first sync is in (a room left in an earlier
         // session can look joined, see `left`).
@@ -1938,6 +2024,7 @@ impl Worker {
         if caught_up_at_start {
             caught_up = true;
             start_check.caught_up(client, left);
+            history.caught_up();
             self.emit(MatrixEvent::CaughtUp);
         }
         let recovery = client.encryption().recovery();
@@ -2214,6 +2301,17 @@ impl Worker {
                         }
                         break SessionEnd::Expired;
                     }
+                    match &state {
+                        State::Offline => {
+                            offline = true;
+                            history.offline();
+                        }
+                        State::Running if offline => {
+                            offline = false;
+                            back_online(&mut history);
+                        }
+                        State::Idle | State::Running | State::Terminated | State::Error(_) => {}
+                    }
                     self.emit(MatrixEvent::Sync(sync_status(&state)));
                 }
                 Some(state) = list_state.next(), if !caught_up => {
@@ -2221,9 +2319,11 @@ impl Worker {
                         caught_up = true;
                         start_check.caught_up(client, left);
                         verifier.caught_up();
+                        history.caught_up();
                         self.emit(MatrixEvent::CaughtUp);
                     }
                 }
+                report = history.next() => history.on_report(report),
                 Some(state) = recovery_states.next() => {
                     self.emit(MatrixEvent::Recovery(recovery_status(state)));
                 }
@@ -2277,6 +2377,11 @@ impl Worker {
                         searcher.start(generation, query);
                     }
                     Some(MatrixCmd::CancelSearch) => searcher.cancel(),
+                    Some(MatrixCmd::SearchHistory { enabled }) => {
+                        // Kept for the next session too.
+                        self.options.search_history = enabled;
+                        history.set_enabled(enabled);
+                    }
                     Some(MatrixCmd::IgnoreUser { user_id }) => ignore_tracker.set(user_id, true),
                     Some(MatrixCmd::UnignoreUser { user_id }) => {
                         ignore_tracker.set(user_id, false);
@@ -2345,6 +2450,7 @@ impl Worker {
         collector.stop();
         emote_mgr.stop();
         searcher.cancel();
+        history.stop();
         user_searcher.stop();
         dir_searcher.stop();
         ignore_tracker.stop();
@@ -2370,6 +2476,12 @@ impl Worker {
         }
         Ok(end)
     }
+}
+
+/// The sync is through again after it was offline: what waited for the connection goes
+/// on. The search history catches up on what an outage left short.
+fn back_online(history: &mut search_history::SearchHistory) {
+    history.online();
 }
 
 /// What the room list shows under a room's name: who wrote last, and what.
@@ -2649,6 +2761,21 @@ async fn summarize(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The app always has the back-pagination queue, so that search history turned on
+    /// in the middle of a session fetches; `serve` has neither.
+    #[test]
+    fn the_app_always_has_the_queue_and_serve_never() {
+        for setting in [true, false] {
+            let app = WorkerOptions::app(SecretStoreMode::File, setting);
+            assert!(app.back_pagination);
+            assert_eq!(app.search_history, setting);
+        }
+        let agent = WorkerOptions::agent(SecretStoreMode::Keyring);
+        assert!(!agent.back_pagination);
+        assert!(!agent.search_history);
+        assert_eq!(agent.secret_store, SecretStoreMode::Keyring);
+    }
 
     /// A sync that ended on a token the server no longer takes ends the session as the
     /// session change would (signing in again, or again on this device for a soft
@@ -3065,7 +3192,8 @@ mod tests {
             profile: "it".into(),
         };
         paths.create_dirs().unwrap();
-        let (handle, mut events) = spawn(paths);
+        // With the app's options: the latest-event backfill runs, as for users.
+        let (handle, mut events) = spawn_app(paths, false);
         handle.send(MatrixCmd::LoginPassword {
             homeserver,
             username,
@@ -3563,7 +3691,8 @@ mod tests {
         };
         paths.create_dirs().unwrap();
 
-        let (handle, mut events) = spawn_with(paths.clone(), SecretStoreMode::File);
+        let (handle, mut events) =
+            spawn_with(paths.clone(), WorkerOptions::agent(SecretStoreMode::File));
         assert!(matches!(
             events.recv().await.unwrap(),
             MatrixEvent::NeedLogin { .. }
@@ -3625,7 +3754,8 @@ mod tests {
         let key_before = store_ed25519_key(&paths, &server.base_url, &pass_before).await;
         assert!(!key_before.is_empty());
 
-        let (handle, mut events) = spawn_with(paths.clone(), SecretStoreMode::File);
+        let (handle, mut events) =
+            spawn_with(paths.clone(), WorkerOptions::agent(SecretStoreMode::File));
         match tokio::time::timeout(Duration::from_secs(10), events.recv())
             .await
             .unwrap()
@@ -3680,7 +3810,8 @@ mod tests {
         };
         paths.create_dirs().unwrap();
 
-        let (handle, mut events) = spawn_with(paths.clone(), SecretStoreMode::File);
+        let (handle, mut events) =
+            spawn_with(paths.clone(), WorkerOptions::agent(SecretStoreMode::File));
         handle.send(MatrixCmd::LoginPassword {
             homeserver: server.base_url.clone(),
             username: "alice".into(),
@@ -3738,7 +3869,8 @@ mod tests {
         };
         paths2.create_dirs().unwrap();
 
-        let (handle2, mut events2) = spawn_with(paths2.clone(), SecretStoreMode::File);
+        let (handle2, mut events2) =
+            spawn_with(paths2.clone(), WorkerOptions::agent(SecretStoreMode::File));
         handle2.send(MatrixCmd::LoginPassword {
             homeserver: server2.base_url.clone(),
             username: "alice".into(),
@@ -3852,7 +3984,7 @@ mod tests {
             &homeserver,
             &username,
             &password,
-            SecretStoreMode::File,
+            &WorkerOptions::agent(SecretStoreMode::File),
         )
         .await
         .unwrap();
@@ -3869,7 +4001,7 @@ mod tests {
             target,
             passphrase,
             in_keyring,
-        } = session::restore(&paths, SecretStoreMode::File).await
+        } = session::restore(&paths, &WorkerOptions::agent(SecretStoreMode::File)).await
         else {
             panic!("expected NeedReauth");
         };
@@ -3881,7 +4013,7 @@ mod tests {
             &password,
             &passphrase,
             in_keyring,
-            SecretStoreMode::File,
+            &WorkerOptions::agent(SecretStoreMode::File),
         )
         .await
         .unwrap();

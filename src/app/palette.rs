@@ -297,6 +297,7 @@ impl App {
             | Setting::DoNotDisturb
             | Setting::WindowTitle
             | Setting::ReadMarkers
+            | Setting::SearchHistory
             | Setting::RoomPreviews
             | Setting::LinkPreviews
             | Setting::KeepNotes

@@ -110,7 +110,9 @@ pub mod engine {
         InputEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MediaKeyCode, ModifierKeyCode,
         MouseButton, MouseEvent, MouseEventKind,
     };
-    pub use crate::matrix::{MatrixEvent, MatrixHandle, Notice, SecretStoreMode, spawn_with};
+    pub use crate::matrix::{
+        MatrixEvent, MatrixHandle, Notice, SecretStoreMode, WorkerOptions, spawn_with,
+    };
     pub use crate::notify::{DueReminder, NotifyIcon, NotifyMode};
     pub use crate::paths::Paths;
     pub use crate::probes::{NothingHere, Probes};
