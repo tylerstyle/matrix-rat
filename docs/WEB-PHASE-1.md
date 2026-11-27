@@ -137,7 +137,11 @@ today's code paths: the new names re-export what is used now.
    `termquery.rs`, the editor/suspend handling, signals, the theme/portal watchers, the
    desktop notifications and the audio/note/summary runners), leaving `App` with a
    platform-free surface: `on_input`, `on_matrix`, `on_tick`, the `take_*` effects,
-   `ui::draw`, `after_draw`.
+   `ui::draw`, `after_draw`. What step 5 left in `App` for this step: `IconCache` (its own
+   file, `notify/icon_cache.rs`) together with `notify_mode.resolved()` (the shell says
+   whether desktop notices are on, or resolves the icons when it sends them), the WAV copy a
+   transcription makes (`TempAudio::create` in `app/notes.rs`), mpv's socket name
+   (`audio::socket_path` in `app/playback.rs`), and `Graphics::detect_with_term`.
 7. **Native-only behind `cfg`, as a library, with the gate.** Two parts, each reviewed:
    - **7a, on native only:** the modules move from `main.rs` into `src/lib.rs`, which takes the
      crate-level attributes (`recursion_limit`, the two test-only allows, the
@@ -150,7 +154,15 @@ today's code paths: the new names re-export what is used now.
      browser arm for `crate::rt`'s timeout error); in `matrix/devices.rs` the key export and
      import, with the checks `App` makes of the key file's path (`app/devices.rs`: metadata,
      `is_dir`); the check that a saved download is still there (`app/files.rs`,
-     `path.exists()`); `FsStorage` (Unix file modes) and the test-only `Storage::files` hook.
+     `path.exists()`); `FsStorage` (Unix file modes) and the test-only `Storage::files` hook;
+     `NativeProbes` (and the test probes); in `matrix/keyring.rs` the ssh check in
+     `ResolvePassphraseError::user_message` (or the whole backend and migration part: the
+     browser needs only `SecretStoreMode`); `audio/ipc.rs` with `Reported::take` moved next
+     to the player. Pure helpers that only runners use stay where step 5 put them, under
+     `cfg(any(not(target_family = "wasm"), test))`: in `paths`, `editor`, `clipboard`,
+     `upload`, `audio` (and `recorder`, `record`), `images` and `notify` (the gate's
+     dead-code warnings list them). Trivial browser stubs: `upload::dropped_files`,
+     `files::display` and `resolve_dir`.
      Browser stubs, so `matrix/mod.rs` still compiles: `matrix/session.rs` (shared
      `ReauthKind`, `ReauthTarget`, `ActiveSession`, `RestoreOutcome`, `ReauthOutcome`; phase 2
      fills in login and the IndexedDB stores), `matrix/search.rs` (shared `SearchHit`; no local
