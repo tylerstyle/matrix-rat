@@ -165,9 +165,23 @@ today's code paths: the new names re-export what is used now.
      `wildcard_enum_match_arm` warning; `main.rs` keeps them for itself); `main.rs` becomes the
      CLI using the library, and its ~650 lines of tests move into the library modules they
      reach into (no `#[doc(hidden)] pub` shims).
+     **Done** (2026-11-27, `fceec8b..8023f67`): `src/lib.rs` (the library `matrix_rat`)
+     declares every module, all private, and has the attributes; `main.rs` keeps them and is
+     the command line only (`Args`, `Command`, `main`, `client_command`). What it uses is
+     public through one module of re-exports, `matrix_rat::cli`, under the paths the items
+     have inside the crate (`cli::agent::client::send`, `cli::paths::Paths`,
+     `cli::shell::terminal::run`, …), so `main.rs`'s code stayed the same and nothing else of
+     those modules is public; rustdoc's `private_intra_doc_links` is allowed (the docs are
+     read with `--document-private-items`). `build_runtime` and its limits moved to
+     `src/runtime.rs` with their two tests: the ignored one that measures threads opens an
+     SDK store and a theme watch, which the command line must not make public. The other five
+     tests (clap's parsing, `client_command`'s exit codes) test `main.rs`'s own items and
+     stay there. 1670 passed and 62 ignored, as before. `Cargo.toml`, `default.nix`, the
+     workflows and `check.sh` needed no change.
    - **7b, the browser:** compiled only for `not(target_family = "wasm")`: `agent/**`,
      `matrix/agent.rs`, the runner halves from step 5, `portal`, `watch`, `lock`, `focus`,
-     `termquery`, `logging`, the CLI; `logsafe.rs`'s arms for native-only error types (a
+     `termquery`, `logging`, the CLI (`main.rs`, and the library's `cli` and `runtime`);
+     `logsafe.rs`'s arms for native-only error types (a
      browser arm for `crate::rt`'s timeout error); in `matrix/devices.rs` the key export and
      import, with the checks `App` makes of the key file's path (`app/devices.rs`: metadata,
      `is_dir`); the check that a saved download is still there (`app/files.rs`,
@@ -179,7 +193,9 @@ today's code paths: the new names re-export what is used now.
      `cfg(any(not(target_family = "wasm"), test))`: in `paths`, `editor`, `clipboard`,
      `upload`, `audio` (and `recorder`, `record`), `images` and `notify` (the gate's
      dead-code warnings list them). Trivial browser stubs: `upload::dropped_files`,
-     `files::display` and `resolve_dir`.
+     `files::display` and `resolve_dir`. `App` also calls `upload::check`, `command_files`,
+     `complete` and `prepare` (the places are in step 5): they need browser stubs or a `cfg`
+     too (matrix-agy, step 6 review).
      Browser stubs, so `matrix/mod.rs` still compiles: `matrix/session.rs` (shared
      `ReauthKind`, `ReauthTarget`, `ActiveSession`, `RestoreOutcome`, `ReauthOutcome`; phase 2
      fills in login and the IndexedDB stores), `matrix/search.rs` (shared `SearchHit`; no local
