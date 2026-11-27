@@ -171,8 +171,9 @@ SDK's sweep on the dev server. It changes what this design expected of `run_sear
   later start leaves the sweep out (`plan` in `src/matrix/search_history.rs`). The walk reads
   each room's stored part back from disk (up to 130 batches a room) and asks the server only
   where the store has a gap (after an outage, say) or ends before 13 weeks, in the same order
-  the sweep would. It waits its second only after a room it fetched for: a room read from the
-  store alone asked nothing. It tells the two apart by the room's updates while it holds it
+  the sweep would. It waits its second only after a room it fetched for, or whose batch failed
+  (a failing server is not asked room after room at once): a room read from the store alone
+  asked nothing. It tells the two apart by the room's updates while it holds it
   (`EventsOrigin::Pagination` is a batch from the server, `Cache` one from the store).
   - The sweep's one other work, indexing the stored events once, is reached only through
     `run_search_backfill` in 0.20. When it is due (`reindexed-v1` missing, see the risks), the

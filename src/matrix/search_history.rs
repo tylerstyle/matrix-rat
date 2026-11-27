@@ -611,7 +611,7 @@ async fn deepen(client: &Client, cache: &EventCache, marks: &mut Marks) -> bool 
 
 /// How the walk of a room went.
 enum Walked {
-    /// It asked the server (or may have).
+    /// It asked the server (or may have, as when a batch failed).
     Fetched,
     /// It read the store alone.
     Stored,
@@ -648,8 +648,10 @@ async fn walk(cache: &EventCache, room_id: &RoomId, oldest: u64, marks: &mut Mar
         }
         let outcome = match answer {
             Ok(Some(outcome)) => outcome,
-            // An error: this room is left as it is.
-            Ok(None) => return walked,
+            // An error: this room is left as it is. It may have come from the server, so
+            // the next room waits its second (a failing server is not asked room after
+            // room at once).
+            Ok(None) => return Walked::Fetched,
             Err(()) => return Walked::Panicked,
         };
         // Newest first, so the oldest is last.
@@ -1303,6 +1305,43 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(1)).await;
             assert_eq!(found(&client, WORD).await, 0, "indexed again with no mark");
             end(history, client).await;
+            let _ = std::fs::remove_dir_all(root);
+        }
+
+        /// A batch that fails may have come from the server, so the walk waits its second
+        /// before the next room all the same: a failing server is not asked room after
+        /// room at once. With the marks of a run that went through, it walks alone.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_failing_server_is_asked_a_room_a_second() {
+            let server = fake::Server::answering(
+                three_rooms(),
+                Box::new(|request| {
+                    request.path.ends_with("/messages").then(|| {
+                        let body = json!({ "errcode": "M_UNKNOWN", "error": "no" });
+                        Reply::Status(400, body.to_string())
+                    })
+                }),
+            )
+            .await;
+            let client = signed_in(&server, app_options(true)).await;
+            let (root, paths) = super::server::profile("history-failing");
+            let dir = paths.search_dir();
+            std::fs::create_dir_all(&dir).unwrap();
+            for mark in [DONE, REINDEXED] {
+                std::fs::write(dir.join(mark), b"").unwrap();
+            }
+            let (events, mut shown) = unbounded_channel();
+            let mut history = SearchHistory::new(client.clone(), events, true, Some(dir));
+            let started = std::time::Instant::now();
+            history.caught_up();
+            until(&mut history, &mut shown, |run| {
+                matches!(run, HistoryRun::Done { .. })
+            })
+            .await;
+            // Three rooms, a second after each of the first two.
+            let took = started.elapsed();
+            assert!(took >= Duration::from_millis(1900), "{took:?}");
+            assert!(asked_for_messages(&server) >= 3);
             let _ = std::fs::remove_dir_all(root);
         }
 
