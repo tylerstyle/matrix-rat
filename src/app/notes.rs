@@ -595,15 +595,15 @@ impl App {
     /// in memory. What runs is stopped (a sound still on its way from the worker would
     /// never come), the in-memory notes are forgotten, and the owner is cleared. The
     /// file on disk stays across a soft logout (`NeedReauth`) and is removed separately
-    /// on logout or `NeedLogin` ([`Self::remove_notes_file`]).
+    /// on `NeedLogin` ([`Self::remove_notes_file`]) or a logout ([`Self::remove_all_notes`]).
     pub(super) fn forget_notes(&mut self) {
         self.stop_notes();
         self.notes.notes.clear();
         self.notes.owner = None;
     }
 
-    /// Deletes the kept-notes file on disk (when logging out or when the profile has no
-    /// session).
+    /// Deletes the kept-notes file on disk (when the profile has no session: a login is
+    /// needed).
     pub(super) fn remove_notes_file(&mut self) {
         if self.notes.stored
             && let Err(err) = self.storage.remove(&Key::Notes, Removal::Value)
@@ -612,11 +612,13 @@ impl App {
         }
     }
 
-    /// Removes the kept notes with whatever was left half written for them, quietly:
-    /// for a logout (see `forget_what_the_account_kept`).
+    /// Removes the kept notes with whatever was left half written for them: for a
+    /// logout (see `forget_what_the_account_kept`).
     pub(super) fn remove_all_notes(&mut self) {
-        if self.notes.stored {
-            let _ = self.storage.remove(&Key::Notes, Removal::All);
+        if self.notes.stored
+            && let Err(err) = self.storage.remove(&Key::Notes, Removal::All)
+        {
+            tracing::warn!(why = %crate::logsafe::kind_any(&err), "could not remove the notes");
         }
     }
 

@@ -578,7 +578,8 @@ impl App {
         let probes = Box::new(crate::probes::TestProbes::default());
         let storage = Box::new(crate::storage::FsStorage::default().with_themes(themes_dir));
         let mut app = Self::new_in_scheme(config, storage, probes, matrix, ColorScheme::Dark);
-        // Tests may well run inside a desktop that would obey: no window is raised.
+        // A click on a notice asks for no window to be raised: the tests that look at
+        // the desktop requests see only what they cause.
         app.notification_click_command = None;
         // Nor do they depend on the players and recorders the machine has, or on
         // running over SSH.
@@ -1436,7 +1437,8 @@ impl App {
                     self.send_matrix(MatrixCmd::Logout);
                     // Nothing may be sent for the old session from here on.
                     self.reset_session();
-                    self.remove_notes_file();
+                    // At once: a quit before the worker is done must not leave them.
+                    self.forget_what_the_account_kept();
                     self.show_toast("Logging out…");
                 } else {
                     menu.confirm_logout = true;
@@ -1445,16 +1447,20 @@ impl App {
         }
     }
 
-    /// The user logged out and the worker has removed the session: what the account
-    /// kept in the storage goes too, with everything set aside or half written for it.
-    /// The saved messages name its rooms and messages; the kept notes are message text
-    /// in plain form. Best effort, and quiet, as the rest of the logout's clean-up.
+    /// The user logs out: what the account kept in the storage goes, with everything
+    /// set aside or half written for it. The saved messages name its rooms and
+    /// messages; the kept notes are message text in plain form. Done the moment the
+    /// user confirms (the app may be closed before the worker has removed the
+    /// session) and again once the worker says it has (`MatrixEvent::LoggedOut`), for
+    /// anything written in between. Best effort; a failure is logged by its kind.
     /// (A session that merely ended keeps the saved messages: see `NeedLogin`.)
     fn forget_what_the_account_kept(&mut self) {
-        if self.bookmarks.stored {
-            let _ = self
+        if self.bookmarks.stored
+            && let Err(err) = self
                 .storage
-                .remove(&Key::Saved, crate::storage::Removal::All);
+                .remove(&Key::Saved, crate::storage::Removal::All)
+        {
+            tracing::warn!(why = %crate::logsafe::kind_any(&err), "could not remove the saved messages");
         }
         self.remove_all_notes();
     }
@@ -5827,9 +5833,10 @@ mod tests {
         Box::new(crate::storage::FsStorage::default().with_themes(dir))
     }
 
-    /// Only a logout the user asked for takes the saved messages along, once the
-    /// worker says it is done; the kept notes go whenever a login is needed, and a
-    /// soft logout keeps both for the same account's return.
+    /// Only a logout the user asked for takes the saved messages along (when it is
+    /// confirmed, and again once the worker says it is done); the kept notes go
+    /// whenever a login is needed, and a soft logout keeps both for the same
+    /// account's return.
     #[test]
     fn a_logout_takes_what_the_account_kept_and_an_ended_session_keeps_the_saved_list() {
         use crate::storage::MemStorage;
@@ -5879,8 +5886,9 @@ mod tests {
         app.on_matrix(MatrixEvent::NeedLogin { reason: None });
         assert_eq!(storage.names(), ["config", "saved", "saved.damaged"]);
 
-        // Logging out, asked twice: the notes go at once, the rest once the worker
-        // has removed the session.
+        // Logging out, asked twice: both go the moment the user confirms (the app may
+        // be closed before the worker is done), and what was written meanwhile goes
+        // once the worker has removed the session.
         app.modal = None;
         storage.put(&Key::Notes, b"{}");
         app.on_matrix(MatrixEvent::LoggedIn {
@@ -5891,8 +5899,11 @@ mod tests {
         app.change_setting(Setting::Logout, 0);
         app.change_setting(Setting::Logout, 0);
         assert_eq!(commands_sent(&mut commands), ["Logout"]);
-        assert_eq!(storage.names(), ["config", "saved", "saved.damaged"]);
+        assert_eq!(storage.names(), ["config"]);
+        storage.put(&Key::Saved, b"{}");
+        storage.put(&Key::Notes, b"{}");
         app.on_matrix(MatrixEvent::LoggedOut);
+        assert_eq!(storage.names(), ["config"]);
         app.on_matrix(MatrixEvent::NeedLogin { reason: None });
         assert_eq!(storage.names(), ["config"]);
         assert_eq!(MatrixEvent::LoggedOut.describe(), "LoggedOut");
