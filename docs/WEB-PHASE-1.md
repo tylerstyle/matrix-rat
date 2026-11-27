@@ -81,9 +81,10 @@ today's code paths: the new names re-export what is used now.
    `timeout`, `timeout_at`, `interval`, taking `crate::time::Instant` for deadlines (so the
    three bridges at `app.rs:518`, `matrix/left.rs:326`, `matrix/rooms.rs:432` go away; there is
    no second `Instant`). On native: tokio, converting the deadline with `.into()`. In the
-   browser: `wasm_bindgen_futures::spawn_local` and gloo timers (deadline → remaining duration,
-   clamped to `u32::MAX` ms as `matrix-sdk-common/src/sleep.rs` does), and two things of our
-   own, because the obvious substitutes are wrong:
+   browser: `wasm_bindgen_futures::spawn_local` and gloo timers (deadline → remaining duration
+   in whole milliseconds, rounded up, clamped to `i32::MAX` ms: gloo hands `setTimeout` an
+   `i32`, so `u32::MAX` as in `matrix-sdk-common/src/sleep.rs` would fire at once), and two
+   things of our own, because the obvious substitutes are wrong:
    - **`JoinHandle::is_finished`:** matrix-sdk-common's browser handle answers
      `abort_handle.is_aborted()`, so a task that ended normally never reads as finished;
      `matrix/paging.rs:44` would wedge paging and `matrix/media.rs:274` would keep finished
