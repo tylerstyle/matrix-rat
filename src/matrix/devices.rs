@@ -5,17 +5,23 @@
 //! while its popup is open, and the outcome of what it asked for.
 
 use std::collections::HashSet;
+#[cfg(not(target_family = "wasm"))]
 use std::ffi::OsStr;
 use std::future::pending;
+#[cfg(not(target_family = "wasm"))]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+#[cfg(not(target_family = "wasm"))]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(not(target_family = "wasm"))]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use futures::StreamExt;
 use matrix_sdk::config::RequestConfig;
 use matrix_sdk::encryption::backups::UploadState;
+#[cfg(not(target_family = "wasm"))]
 use matrix_sdk::encryption::{KeyExportError, RoomKeyImportError};
 use matrix_sdk::ruma::api::client::backup::get_latest_backup_info;
 use matrix_sdk::ruma::api::client::device::delete_devices;
@@ -754,12 +760,17 @@ async fn sign_out(
 }
 
 // ----- room keys to and from a file ---------------------------------------------------
+//
+// The terminal's alone: the browser has no files to write the keys into or read them
+// from (phase 2 gives it downloads and the file picker), and matrix-sdk has no
+// `export_room_keys` or `import_room_keys` there.
 
 /// A folder of our own, next to where a key file is to appear, in which the file is
 /// written first. Nobody else can look into it or put anything there (mode 0700), so
 /// the SDK, which is given a path and opens it with `File::create`, cannot be made to
 /// write through a link or into a file of someone else's making. Removed, with what
 /// is in it, when dropped.
+#[cfg(not(target_family = "wasm"))]
 struct Staging {
     dir: PathBuf,
     /// The folder as we made it, to see that it was not swapped for another.
@@ -767,6 +778,7 @@ struct Staging {
     file: Option<PathBuf>,
 }
 
+#[cfg(not(target_family = "wasm"))]
 impl Staging {
     fn create(parent: &Path) -> std::io::Result<Self> {
         let mut last = None;
@@ -877,6 +889,7 @@ impl Staging {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 impl Drop for Staging {
     fn drop(&mut self) {
         // Only what is ours: a folder that was swapped is left alone.
@@ -891,6 +904,7 @@ impl Drop for Staging {
 }
 
 /// The folder a path lies in; for a bare file name, the current one.
+#[cfg(not(target_family = "wasm"))]
 fn folder_of(parent: &Path) -> &Path {
     if parent.as_os_str().is_empty() {
         Path::new(".")
@@ -906,6 +920,7 @@ fn folder_of(parent: &Path) -> &Path {
 /// offers, and it takes a path that it opens itself, later, with `File::create`. So
 /// it is given a path inside a [`Staging`] folder, and the result is published under
 /// the wanted name only when it is complete.
+#[cfg(not(target_family = "wasm"))]
 async fn export_keys(
     client: &Client,
     path: PathBuf,
@@ -961,6 +976,7 @@ async fn export_keys(
 /// Runs file work on the blocking threads. Making folders, publishing a file and
 /// syncing it to the drive can take a while on a slow or network drive, and the
 /// worker's loop must not wait for it meanwhile.
+#[cfg(not(target_family = "wasm"))]
 async fn on_disk<T: Send + 'static>(
     work: impl FnOnce() -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
@@ -969,6 +985,7 @@ async fn on_disk<T: Send + 'static>(
         .unwrap_or_else(|_| Err("The file could not be handled".to_owned()))
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn import_error(err: &RoomKeyImportError) -> String {
     #[expect(
         clippy::wildcard_enum_match_arm,
@@ -992,6 +1009,7 @@ fn import_error(err: &RoomKeyImportError) -> String {
 
 /// Reads message keys from a file as Element (or [`export_keys`]) writes it. Returns
 /// how many were new to this device, and how many the file held.
+#[cfg(not(target_family = "wasm"))]
 async fn import_keys(
     client: &Client,
     path: PathBuf,
@@ -1013,6 +1031,27 @@ async fn import_keys(
         Ok(result) => Ok((result.imported_count, result.total_count)),
         Err(err) => Err(import_error(&err)),
     }
+}
+
+#[cfg(target_family = "wasm")]
+const NO_KEY_FILES: &str = "Room keys go to and from a file in the terminal app only, for now";
+
+#[cfg(target_family = "wasm")]
+async fn export_keys(
+    _client: &Client,
+    _path: PathBuf,
+    _passphrase: Zeroizing<String>,
+) -> Result<(usize, PathBuf), String> {
+    Err(NO_KEY_FILES.to_owned())
+}
+
+#[cfg(target_family = "wasm")]
+async fn import_keys(
+    _client: &Client,
+    _path: PathBuf,
+    _passphrase: Zeroizing<String>,
+) -> Result<(usize, usize), String> {
+    Err(NO_KEY_FILES.to_owned())
 }
 
 #[cfg(test)]

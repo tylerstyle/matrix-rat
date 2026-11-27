@@ -1,33 +1,17 @@
 //! Store passphrase management: optional D-Bus Secret Service (`org.freedesktop.secrets`)
 //! via `zbus`, plus safe two-way migration between `session.json` and the keyring.
 //!
-//! The modes, the errors and the migration over any [`KeyringBackend`] are here; the
-//! Secret Service client itself is in [`secret_service`].
+//! The errors and the migration over any [`KeyringBackend`] are here; the Secret Service
+//! client itself is in [`secret_service`]. The modes ([`SecretStoreMode`]) are in
+//! [`super::auth`], which the browser, without a keyring, has too.
 
 mod secret_service;
 
 use std::future::Future;
 
-use serde::Deserialize;
-
 pub use secret_service::SecretServiceKeyring;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SecretStoreMode {
-    /// Use the OS secret service when it answers quickly (not over SSH); fall back to the
-    /// session file otherwise.
-    Auto,
-    /// Require the OS secret service; refuse to fall back to storing the passphrase in
-    /// `session.json`.
-    Keyring,
-    /// Store the passphrase directly in `session.json` (`0600`). The default: a
-    /// passphrase that has moved into the keyring is out of reach whenever the app is
-    /// started without the desktop session (over SSH, on a console), and the account
-    /// then cannot be opened there. Moving it is for the user to decide.
-    #[default]
-    File,
-}
+pub use super::auth::SecretStoreMode;
 
 /// Identifies one account + device entry in the keyring without carrying secrets.
 #[derive(Clone, PartialEq, Eq, Hash)]

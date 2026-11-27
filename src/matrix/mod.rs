@@ -10,6 +10,7 @@ mod devices;
 mod directory;
 mod drafts;
 mod emotes;
+#[cfg(not(target_family = "wasm"))]
 mod keyring;
 mod keywords;
 mod left;
@@ -41,6 +42,7 @@ mod verify;
 
 #[cfg(not(target_family = "wasm"))]
 pub use agent::{AgentCmd, AgentEvent, MAX_WATCHED as AGENT_MAX_WATCHED};
+pub use auth::SecretStoreMode;
 pub use collect::{ARCHIVE_EVENTS, Archived, CollectCmd, CollectEvent, LAST_EVENTS, UnreadText};
 pub use devices::{
     BackupUpload, DevicesCmd, DevicesEvent, ServerBackup, Session, SessionList, SessionTrust,
@@ -52,8 +54,8 @@ pub use directory::{DirectoryPage, PreviewMembership, PublicRoom, RoomPreview};
 #[cfg(test)]
 pub use emotes::EmotePack;
 pub use emotes::{CustomEmoji, EmoteCatalog, MAX_SHORTCODE_LEN, StickerItem, is_valid_mxc};
-pub use keyring::SecretStoreMode;
 // For `crate::logsafe`, which turns it into a word for the log.
+#[cfg(not(target_family = "wasm"))]
 pub(crate) use keyring::KeyringError;
 pub use keywords::{KeywordsCmd, KeywordsEvent, MAX_KEYWORDS, shown_keywords};
 #[cfg(test)]

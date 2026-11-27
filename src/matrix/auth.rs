@@ -1,12 +1,32 @@
 //! What a login is to the worker, whatever keeps it: the session it holds while it
 //! runs, how a restore and a renewed login end, and what a soft logout keeps for the
-//! next login. On this system [`super::session`] logs in and keeps the session on disk;
-//! in the browser [`browser`] stands in for it until phase 2 logs in there.
+//! next login, and where the store's passphrase is kept. On this system
+//! [`super::session`] logs in and keeps the session on disk, and [`super::keyring`]
+//! keeps the passphrase; in the browser `browser` stands in for the session until
+//! phase 2 logs in there.
 
 use matrix_sdk::Client;
 use serde::{Deserialize, Serialize};
 
+#[cfg(not(target_family = "wasm"))]
 use super::keyring::KeyringKey;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SecretStoreMode {
+    /// Use the OS secret service when it answers quickly (not over SSH); fall back to the
+    /// session file otherwise.
+    Auto,
+    /// Require the OS secret service; refuse to fall back to storing the passphrase in
+    /// `session.json`.
+    Keyring,
+    /// Store the passphrase directly in `session.json` (`0600`). The default: a
+    /// passphrase that has moved into the keyring is out of reach whenever the app is
+    /// started without the desktop session (over SSH, on a console), and the account
+    /// then cannot be opened there. Moving it is for the user to decide.
+    #[default]
+    File,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -36,6 +56,7 @@ impl std::fmt::Debug for ReauthTarget {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 impl ReauthTarget {
     pub fn keyring_key(&self, profile: &str) -> KeyringKey {
         KeyringKey::new(profile, &self.user_id, &self.device_id)

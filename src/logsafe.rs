@@ -16,7 +16,9 @@ use std::sync::Arc;
 
 use matrix_sdk::ruma::api::error::Error as ServerError;
 
-use crate::matrix::{KeyringError, PageError};
+#[cfg(not(target_family = "wasm"))]
+use crate::matrix::KeyringError;
+use crate::matrix::PageError;
 
 /// The reduced form of an error, safe to log. Small and `Copy`, so it can be made in
 /// the log line itself.
@@ -177,9 +179,12 @@ fn recognise(err: &(dyn Error + 'static)) -> Option<Why> {
     if find::<crate::rt::Elapsed>(err).is_some() {
         return Some(TIMED_OUT);
     }
+    // D-Bus, file watches and the keyring are the terminal's alone.
+    #[cfg(not(target_family = "wasm"))]
     if let Some(err) = find::<zbus::Error>(err) {
         return Some(dbus(err));
     }
+    #[cfg(not(target_family = "wasm"))]
     if let Some(err) = find::<notify::Error>(err) {
         #[expect(clippy::wildcard_enum_match_arm, reason = "foreign notify::ErrorKind")]
         let why = match &err.kind {
@@ -190,6 +195,7 @@ fn recognise(err: &(dyn Error + 'static)) -> Option<Why> {
         };
         return Some(why);
     }
+    #[cfg(not(target_family = "wasm"))]
     if let Some(err) = find::<KeyringError>(err) {
         return Some(Why::Word(match err {
             KeyringError::Unavailable(_) => "keyring unavailable",
@@ -277,9 +283,14 @@ fn network(err: &matrix_sdk::reqwest::Error) -> Why {
             code: None,
         };
     }
+    #[cfg(not(target_family = "wasm"))]
+    let connect = err.is_connect();
+    // reqwest in the browser (over `fetch`) does not tell a failed connection apart.
+    #[cfg(target_family = "wasm")]
+    let connect = false;
     Why::Network(if err.is_timeout() {
         "timed out"
-    } else if err.is_connect() {
+    } else if connect {
         "no connection"
     } else if err.is_body() || err.is_decode() {
         "broken answer"
@@ -304,6 +315,7 @@ fn timeline(err: &matrix_sdk_ui::timeline::Error) -> Why {
 }
 
 /// D-Bus errors can carry the bus address and the other side's own words.
+#[cfg(not(target_family = "wasm"))]
 fn dbus(err: &zbus::Error) -> Why {
     #[expect(clippy::wildcard_enum_match_arm, reason = "foreign zbus::Error")]
     match err {
