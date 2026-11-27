@@ -219,8 +219,13 @@ impl Rules {
 pub(super) enum Report {
     /// The run `run` sent its first request: back to this date.
     Begun { run: u64, back_to: String },
-    /// The run `run` ended; see [`Input::Ended`].
-    Ended { run: u64, finished: bool },
+    /// The run `run` ended; see [`Input::Ended`]. `clean`: it finished, and no room's
+    /// walk failed on the way (see [`Deepened`]).
+    Ended {
+        run: u64,
+        finished: bool,
+        clean: bool,
+    },
 }
 
 /// Sends the end of a run when dropped: also when it panicked, or was cancelled (the loop
@@ -229,6 +234,7 @@ struct EndReport {
     reports: UnboundedSender<Report>,
     run: u64,
     finished: bool,
+    clean: bool,
 }
 
 impl Drop for EndReport {
@@ -236,6 +242,7 @@ impl Drop for EndReport {
         let _ = self.reports.send(Report::Ended {
             run: self.run,
             finished: self.finished,
+            clean: self.clean,
         });
     }
 }
@@ -331,10 +338,19 @@ impl SearchHistory {
                 self.back_to = Some(back_to);
                 self.show();
             }
-            Report::Ended { run, finished } if run == self.run && self.rules.running => {
+            Report::Ended {
+                run,
+                finished,
+                clean,
+            } if run == self.run && self.rules.running => {
                 // The task is kept: it may be waiting for the index to settle, which the
                 // end of the session cancels (see `Marks`).
                 self.apply(Input::Ended { finished });
+                // The profile's run went through: every room as far as it goes, and no
+                // outage on the way (the rules say done only then). An empty file, once.
+                if clean && self.rules.done {
+                    Marks::new(self.index_dir.clone()).put(DONE);
+                }
             }
             // Of a run that was stopped.
             Report::Begun { .. } | Report::Ended { .. } => {}
@@ -363,6 +379,7 @@ impl SearchHistory {
                     reports: self.reports.clone(),
                     run: self.run,
                     finished: false,
+                    clean: false,
                 };
                 let how = How {
                     delay: if delay {
@@ -438,7 +455,9 @@ struct How {
 ///   index, though it is stored. Written before the first fetch, removed [`SETTLE`] after
 ///   the run. Found at a start, it has the SDK index the stored events again (by removing
 ///   `reindexed-v1`): CPU only, and what is in the index already is skipped.
-/// - `history-done`: a run of this profile went through (see [`plan`]).
+/// - `history-done`: a run of this profile went through, clean (see [`plan`]): it
+///   finished, no room's walk failed, and the sync had no outage meanwhile. Written by the
+///   session, which knows of outages.
 struct Marks {
     dir: Option<PathBuf>,
     /// This run wrote `history-indexing`.
@@ -563,14 +582,15 @@ async fn run(client: Client, how: How, mut marks: Marks, mut ended: EndReport) {
         deepen(&client, cache, &mut marks).await
     };
     match rt::timeout(TIME_LIMIT, work).await {
-        Ok(true) => {
-            let elapsed_s = started.elapsed().as_secs();
-            tracing::info!(elapsed_s, "search history done");
-            marks.put(DONE);
-            ended.finished = true;
-        }
         // Stopped, as at the time limit: the setting may try again.
-        Ok(false) => tracing::warn!("search history stopped: the SDK failed"),
+        Ok(Deepened::Panicked) => tracing::warn!("search history stopped: the SDK failed"),
+        Ok(deepened) => {
+            let elapsed_s = started.elapsed().as_secs();
+            let short = deepened == Deepened::Short;
+            tracing::info!(elapsed_s, short, "search history done");
+            ended.finished = true;
+            ended.clean = !short;
+        }
         Err(_) => tracing::warn!("search history stopped at the time limit"),
     }
     // The box says so now; the index may still be taking in the last batches. The client
@@ -595,38 +615,63 @@ async fn run(client: Client, how: How, mut marks: Marks, mut ended: EndReport) {
 ///
 /// Here each room is held while it is walked, so every batch goes on from the last: back
 /// to 13 weeks, the room's start, or [`MAX_BATCHES`]. One room at a time, so at most one
-/// room's older events are in memory; the room shrinks back when it is let go. False if
-/// the SDK panicked and the walk ended there.
-async fn deepen(client: &Client, cache: &EventCache, marks: &mut Marks) -> bool {
+/// room's older events are in memory; the room shrinks back when it is let go.
+async fn deepen(client: &Client, cache: &EventCache, marks: &mut Marks) -> Deepened {
     let back_ms = BACK_DAYS * 24 * 60 * 60 * 1000;
     let oldest = u64::from(MilliSecondsSinceUnixEpoch::now().get()).saturating_sub(back_ms);
     let mut rooms = client.joined_rooms();
     rooms.retain(|room| !room.is_space());
     rooms.sort_by_key(|room| std::cmp::Reverse(room.recency_stamp()));
-    let mut fetched = false;
+    let mut asked = false;
+    let mut short = false;
     for room in &rooms {
         // Left during the run (as the SDK's queue checks too).
         if room.state() != RoomState::Joined {
             continue;
         }
-        if fetched {
+        if asked {
             rt::sleep(ROOM_PACING).await;
         }
         match walk(cache, room.room_id(), oldest, marks).await {
-            Walked::Panicked => return false,
-            Walked::Fetched => fetched = true,
-            Walked::Stored => fetched = false,
+            Walked::Panicked => return Deepened::Panicked,
+            Walked::Fetched => asked = true,
+            Walked::Stored => asked = false,
+            // It may have come from the server, so the next room waits its second too: a
+            // failing server is not asked room after room at once.
+            Walked::Failed => {
+                asked = true;
+                short = true;
+            }
         }
     }
-    true
+    if short {
+        Deepened::Short
+    } else {
+        Deepened::Through
+    }
+}
+
+/// How the walk of every room went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Deepened {
+    /// Every room as far as it goes.
+    Through,
+    /// To the last room, but some room's walk failed (an outage, a server error), so it is
+    /// short: the run is done for the session, and the profile's first run is still to come.
+    Short,
+    /// The SDK panicked, and the walk ended there.
+    Panicked,
 }
 
 /// How the walk of a room went.
 enum Walked {
-    /// It asked the server (or may have, as when a batch failed).
+    /// It fetched from the server.
     Fetched,
     /// It read the store alone.
     Stored,
+    /// A batch failed (from the server or not), or the room could not be had: the room is
+    /// left short.
+    Failed,
     /// The SDK panicked: the walk had better end.
     Panicked,
 }
@@ -634,12 +679,12 @@ enum Walked {
 /// Walks one room back to `oldest` (ms since the epoch).
 async fn walk(cache: &EventCache, room_id: &RoomId, oldest: u64, marks: &mut Marks) -> Walked {
     let Ok((room, _handles)) = cache.room(room_id).await else {
-        return Walked::Stored;
+        return Walked::Failed;
     };
     // Held while it is walked: the room keeps what was loaded in memory. What it hears
     // tells a batch from the server from one read back from the store.
     let Ok((_events, mut held)) = room.subscribe().await else {
-        return Walked::Stored;
+        return Walked::Failed;
     };
     let mut walked = Walked::Stored;
     let pagination = room.pagination();
@@ -660,10 +705,8 @@ async fn walk(cache: &EventCache, room_id: &RoomId, oldest: u64, marks: &mut Mar
         }
         let outcome = match answer {
             Ok(Some(outcome)) => outcome,
-            // An error: this room is left as it is. It may have come from the server, so
-            // the next room waits its second (a failing server is not asked room after
-            // room at once).
-            Ok(None) => return Walked::Fetched,
+            // An error: this room is left as it is.
+            Ok(None) => return Walked::Failed,
             Err(()) => return Walked::Panicked,
         };
         // Newest first, so the oldest is last.
@@ -1366,23 +1409,9 @@ mod tests {
         /// room at once. With the marks of a run that went through, it walks alone.
         #[tokio::test(flavor = "multi_thread")]
         async fn a_failing_server_is_asked_a_room_a_second() {
-            let server = fake::Server::answering(
-                three_rooms(),
-                Box::new(|request| {
-                    request.path.ends_with("/messages").then(|| {
-                        let body = json!({ "errcode": "M_UNKNOWN", "error": "no" });
-                        Reply::Status(400, body.to_string())
-                    })
-                }),
-            )
-            .await;
+            let server = fake::Server::answering(three_rooms(), Box::new(failing)).await;
             let client = signed_in(&server, app_options(true)).await;
-            let (root, paths) = super::server::profile("history-failing");
-            let dir = paths.search_dir();
-            std::fs::create_dir_all(&dir).unwrap();
-            for mark in [DONE, REINDEXED] {
-                std::fs::write(dir.join(mark), b"").unwrap();
-            }
+            let (root, dir) = marked("history-failing", &[DONE, REINDEXED]);
             let (events, mut shown) = unbounded_channel();
             let mut history = SearchHistory::new(client.clone(), events, true, Some(dir));
             let started = std::time::Instant::now();
@@ -1395,6 +1424,84 @@ mod tests {
             let took = started.elapsed();
             assert!(took >= Duration::from_millis(1900), "{took:?}");
             assert!(asked_for_messages(&server) >= 3);
+            let _ = std::fs::remove_dir_all(root);
+        }
+
+        /// `/messages` fails: the server refuses it (a 5xx the SDK would try again, with
+        /// a wait that grows).
+        fn failing(request: &fake::Request) -> Option<Reply> {
+            request.path.ends_with("/messages").then(|| {
+                let body = json!({ "errcode": "M_UNKNOWN", "error": "no" });
+                Reply::Status(400, body.to_string())
+            })
+        }
+
+        /// A temporary profile's search index folder, with these marks in it.
+        fn marked(tag: &str, marks: &[&str]) -> (std::path::PathBuf, std::path::PathBuf) {
+            let (root, paths) = super::server::profile(tag);
+            let dir = paths.search_dir();
+            std::fs::create_dir_all(&dir).unwrap();
+            for mark in marks {
+                std::fs::write(dir.join(mark), b"").unwrap();
+            }
+            (root, dir)
+        }
+
+        /// A profile's first run whose rooms failed (the server refused) is done for the
+        /// session, but the profile has not had its run: the next start's is paced as a
+        /// first run again, with the SDK's sweep.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_first_run_whose_rooms_failed_is_not_the_profiles_run() {
+            let server = fake::Server::answering(
+                rooms(vec![message("$own", fake::ME)], vec![]),
+                Box::new(failing),
+            )
+            .await;
+            let client = signed_in(&server, app_options(true)).await;
+            let (root, dir) = marked("history-failed-first", &[]);
+            let (events, mut shown) = unbounded_channel();
+            let mut history = SearchHistory::new(client.clone(), events, true, Some(dir.clone()));
+            history.caught_up();
+            until(&mut history, &mut shown, |run| {
+                matches!(run, HistoryRun::Done { .. })
+            })
+            .await;
+            assert!(asked_for_messages(&server) > 0);
+            assert!(
+                !dir.join(DONE).exists(),
+                "a failed run counted as the profile's"
+            );
+            let _ = std::fs::remove_dir_all(root);
+        }
+
+        /// A run that saw an outage is not the profile's run either, though its rooms
+        /// came through; its catch-up, without an outage, is.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn the_profiles_run_is_one_without_an_outage() {
+            let server = fake::Server::answering(
+                rooms(vec![message("$own", fake::ME)], vec![]),
+                Box::new(at_the_start),
+            )
+            .await;
+            let client = signed_in(&server, app_options(true)).await;
+            let (root, dir) = marked("history-outage-first", &[]);
+            let (events, mut shown) = unbounded_channel();
+            let mut history = SearchHistory::new(client.clone(), events, true, Some(dir.clone()));
+            history.caught_up();
+            history.offline();
+            until(&mut history, &mut shown, |run| {
+                matches!(run, HistoryRun::Running { .. })
+            })
+            .await;
+            // Ended while the sync is offline: the catch-up waits for it.
+            until(&mut history, &mut shown, |run| *run == HistoryRun::Waiting).await;
+            assert!(!dir.join(DONE).exists(), "a run with an outage counted");
+            history.online();
+            until(&mut history, &mut shown, |run| {
+                matches!(run, HistoryRun::Done { .. })
+            })
+            .await;
+            assert!(dir.join(DONE).exists(), "the catch-up did not count");
             let _ = std::fs::remove_dir_all(root);
         }
 
