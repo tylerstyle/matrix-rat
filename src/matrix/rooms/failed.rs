@@ -457,6 +457,41 @@ async fn a_refused_reaction_is_taken_back_by_toggling_it() {
     );
 }
 
+/// A reaction that failed for now (503, here on bob's message) stops the room's queue,
+/// and a message sent after it is held up. Taking the reaction back with its chip turns
+/// the queue on again: the held message goes out.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reaction_that_failed_for_now_is_taken_back_and_what_waited_goes_out() {
+    let mut stage = Stage::new(Refused::Reaction, 503).await;
+    let toggle = || MatrixCmd::ToggleReaction {
+        room_id: ROOM.to_owned(),
+        item: ItemRef::Event(BOBS.to_owned()),
+        key: "👍".to_owned(),
+        shortcode: None,
+    };
+    stage.handle(toggle()).await;
+    stage
+        .until(|messages| {
+            message_of(messages, BOBS).is_some_and(|m| m.reactions.iter().any(|r| r.failed))
+        })
+        .await;
+    assert!(
+        !stage.queue_on(),
+        "a passing failure stops the room's queue"
+    );
+    stage.send("after").await;
+    stage.until(|messages| held(messages, "after")).await;
+
+    stage.handle(toggle()).await;
+    stage
+        .until(|messages| {
+            message_of(messages, BOBS).is_some_and(|m| m.reactions.is_empty())
+                && gone_out(messages, "after")
+        })
+        .await;
+    assert!(stage.queue_on());
+}
+
 /// `Retry` and `Discard` on a message with nothing waiting say so.
 #[tokio::test(flavor = "multi_thread")]
 async fn nothing_to_retry_or_discard_is_said() {

@@ -1756,17 +1756,25 @@ impl Timelines {
                 // Taking a reaction back is not queued: it is sent at once, and on a
                 // failure the SDK puts it back. The toast says which it was.
                 let target = item_id(&item);
-                let what = match &target {
-                    Ok(target) if reacted(&timeline, target, &key).await => {
-                        "Could not remove the reaction"
-                    }
-                    _ => "Could not react",
+                let ours = match &target {
+                    Ok(target) => our_reaction(&timeline, target, &key).await,
+                    Err(_) => None,
+                };
+                let what = match ours {
+                    Some(_) => "Could not remove the reaction",
+                    None => "Could not react",
                 };
                 self.spawn(what, async move {
                     timeline
                         .toggle_reaction_with_extra_content(&target?, &key, extra)
                         .await
                         .sdk()?;
+                    if ours == Some(true) {
+                        // Taking back a reaction that failed aborts it, which only wakes
+                        // the room's queue: after a failure taken as passing it is
+                        // stopped, and what was held up behind it would wait for ever.
+                        timeline.room().send_queue().set_enabled(true);
+                    }
                     Ok(())
                 });
             }
@@ -2028,16 +2036,21 @@ async fn failed_parts(
     parts
 }
 
-/// Whether we have reacted to the item `target` with `key`, as far as the timeline
-/// shows: toggling it then takes the reaction back.
-async fn reacted(timeline: &Timeline, target: &TimelineEventItemId, key: &str) -> bool {
+/// Our reaction with `key` to the item `target`, as far as the timeline shows: `None`
+/// where there is none (toggling adds one), else whether it could not be sent
+/// (toggling takes it back).
+async fn our_reaction(
+    timeline: &Timeline,
+    target: &TimelineEventItemId,
+    key: &str,
+) -> Option<bool> {
     let own = timeline.room().own_user_id().to_owned();
-    find_event(timeline, target).await.is_some_and(|event| {
-        event
-            .reactions()
-            .get(key)
-            .is_some_and(|senders| senders.contains_key(&own))
-    })
+    let event = find_event(timeline, target).await?;
+    let info = event.reactions().get(key)?.get(&own)?;
+    Some(matches!(
+        info.send_state,
+        Some(EventSendState::SendingFailed { .. })
+    ))
 }
 
 /// The item `id` of `timeline`, local echo or not, if it is there.
