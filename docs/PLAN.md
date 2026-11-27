@@ -273,7 +273,14 @@ backend, and installable on iOS and Android as a home-screen app (a PWA).
   Android phone; answers: does Beeper's server allow browser requests (CORS), how big is the
   download, how fast on a phone, does matrix.org's OAuth accept the Pages address); 1 the
   interfaces; 2 the web app; 3 the phone version; 4 later: real pictures, voice, push, app
-  stores. **Versions** (the user, 2026-11-27): 1.2.0 is phase 2, the web app usable in
+  stores. **Layout from phase 2 on** (the user, 2026-11-27: "use those names"): one repository,
+  a Cargo workspace of three crates: `matrix-rat`, the terminal app (the name stays, so do the
+  binary, the Nix and NUR package and the release archives); `matrix-rat-engine`, the core both
+  apps use (phase 1's `engine` module); `matrix-rat-web`, the browser shell. Prefixed so they
+  collide with nothing (all three names free on crates.io on 2026-11-27); all
+  `publish = false`: nothing of it is for crates.io (the engine has no stable interface for
+  others, the web crate is built into the site, the app installs from the release archives
+  and the packages). **Versions** (the user, 2026-11-27): 1.2.0 is phase 2, the web app usable in
   browsers and on phones at least as the test build is; 1.3.0 is phase 3, the phone version. The phone-friendly keys come with 1.2.0
   already (the user): the key bar (Esc, Tab, Ctrl, Alt, arrows, palette) and every action
   reachable without Esc, Ctrl or Alt. **1.3.0 also** (from matrix-sdk 0.20, the user,
