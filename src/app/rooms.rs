@@ -605,7 +605,7 @@ impl App {
         }
     }
 
-    pub(super) fn dir_search_debounce_deadline(&self) -> Option<tokio::time::Instant> {
+    pub(super) fn dir_search_debounce_deadline(&self) -> Option<Instant> {
         search_debounce_deadline(self.dir_search_debounce)
     }
 

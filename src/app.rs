@@ -53,7 +53,6 @@ use crossterm::event::EventStream;
 use futures::StreamExt;
 use ratatui::layout::Rect;
 use tokio::signal::unix::{SignalKind, signal};
-use tokio::time::MissedTickBehavior;
 
 use crate::action::{Action, Dir, Pane};
 use crate::composer::Composer;
@@ -76,6 +75,7 @@ use crate::model::{
     ItemRef, Message, MsgKind, OWN_NAME, Reaction, Room, RoomKind, SendState, demo_rooms,
 };
 use crate::paths::Paths;
+use crate::rt::{self, MissedTickBehavior};
 use crate::terminal::{self, TerminalGuard};
 use crate::theme::{ColorScheme, DEFAULT_THEME, Theme, truecolor_supported};
 use crate::time::Instant;
@@ -516,9 +516,9 @@ pub(super) fn bump_search_gen(counter: &mut u64, debounce: &mut Option<Instant>)
     (*counter, debounce.take().is_some())
 }
 
-/// Converts a search debounce start timestamp into a `tokio::time::Instant` deadline.
-pub(super) fn search_debounce_deadline(debounce: Option<Instant>) -> Option<tokio::time::Instant> {
-    debounce.map(|at| (at + SEARCH_DEBOUNCE).into())
+/// Converts a search debounce start timestamp into its deadline.
+pub(super) fn search_debounce_deadline(debounce: Option<Instant>) -> Option<Instant> {
+    debounce.map(|at| at + SEARCH_DEBOUNCE)
 }
 
 /// Clears and returns `true` when a search debounce deadline has elapsed.
@@ -531,9 +531,9 @@ pub(super) fn take_due_search_debounce(debounce: &mut Option<Instant>) -> bool {
     }
 }
 
-async fn wait_deadline(deadline: Option<tokio::time::Instant>) {
+async fn wait_deadline(deadline: Option<Instant>) {
     match deadline {
-        Some(at) => tokio::time::sleep_until(at).await,
+        Some(at) => rt::sleep_until(at).await,
         None => std::future::pending().await,
     }
 }
@@ -5366,17 +5366,17 @@ fn open_in_browser(url: &str) {
 /// Waits up to `grace` for `tasks` to end on their own. Returns `false` if any task
 /// outlived the grace and had to be aborted (after aborting, drains briefly so drop
 /// handlers — such as killing child process groups — run before returning).
-async fn drain_or_abort(tasks: &mut tokio::task::JoinSet<()>, grace: Duration) -> bool {
+async fn drain_or_abort(tasks: &mut rt::JoinSet<()>, grace: Duration) -> bool {
     if tasks.is_empty() {
         return true;
     }
     let done = async { while tasks.join_next().await.is_some() {} };
-    if tokio::time::timeout(grace, done).await.is_ok() {
+    if rt::timeout(grace, done).await.is_ok() {
         return true;
     }
     tasks.abort_all();
     let aborted = async { while tasks.join_next().await.is_some() {} };
-    let _ = tokio::time::timeout(Duration::from_millis(500), aborted).await;
+    let _ = rt::timeout(Duration::from_millis(500), aborted).await;
     false
 }
 
@@ -5392,7 +5392,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     let initial_scheme = crate::portal::resolve_initial_scheme(portal_scheme, term_reply);
     let mut terminal = guard.activate()?;
     let mut events = EventStream::new();
-    let mut tick = tokio::time::interval(Duration::from_millis(250));
+    let mut tick = rt::interval(Duration::from_millis(250));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     // Without these, a kill or a closed terminal window would skip all cleanup.
     let mut sigterm = signal(SignalKind::terminate())?;
@@ -5444,17 +5444,17 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     let (pasted, mut pasted_back) = tokio::sync::mpsc::unbounded_channel();
     // What the audio players say comes back here; their tasks end with them.
     let (player_news, mut player_back) = tokio::sync::mpsc::unbounded_channel();
-    let mut players = tokio::task::JoinSet::new();
+    let mut players = rt::JoinSet::new();
     // And what a recording says; kept separate so releasing the terminal for `$EDITOR`
     // can drain recordings without disturbing playback.
     let (record_news, mut record_back) = tokio::sync::mpsc::unbounded_channel();
-    let mut recorders = tokio::task::JoinSet::new();
+    let mut recorders = rt::JoinSet::new();
     // So do the programs that transcribe and translate, and what they wrote.
     let (note_news, mut note_back) = tokio::sync::mpsc::unbounded_channel();
-    let mut note_programs = tokio::task::JoinSet::new();
+    let mut note_programs = rt::JoinSet::new();
     // The same for the summary command of "catch up".
     let (summary_news, mut summary_back) = tokio::sync::mpsc::unbounded_channel();
-    let mut summaries = tokio::task::JoinSet::new();
+    let mut summaries = rt::JoinSet::new();
     // What the worker said while the external editor had the terminal.
     let mut held_events = external_editor::HeldEvents::default();
 
@@ -5492,7 +5492,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
                 // Its reader thread would take the keys meant for the editor: the stream
                 // is dropped, and a new one is read from once we are back.
                 drop(std::mem::replace(&mut events, EventStream::new()));
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                rt::sleep(Duration::from_millis(50)).await;
                 terminal::absorb_reader_wake();
                 terminal::release();
                 let dir = paths.runtime_dir.clone();
@@ -5524,7 +5524,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
                 // picture is decoded to check it. Messages and keys are handled meanwhile.
                 let dir = paths.runtime_dir.clone();
                 let back = pasted.clone();
-                tokio::spawn(async move {
+                rt::spawn(async move {
                     let id = request.id;
                     let result = tokio::task::spawn_blocking(move || {
                         crate::clipboard::paste(&request, &dir, crate::clipboard::run_tool)
@@ -5643,7 +5643,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
         while recorders.join_next().await.is_some() {}
         while note_programs.join_next().await.is_some() {}
     };
-    let _ = tokio::time::timeout(Duration::from_secs(2), stopped).await;
+    let _ = rt::timeout(Duration::from_secs(2), stopped).await;
     drop(players);
     drop(recorders);
     drop(note_programs);
@@ -5663,7 +5663,7 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
         // Close every command sender so the worker also sees the channel end.
         drop(matrix);
         let drained = async { while events.recv().await.is_some() {} };
-        let _ = tokio::time::timeout(wait, drained).await;
+        let _ = rt::timeout(wait, drained).await;
     }
     drop(app);
     crate::audio::remove_leftovers(&paths.audio_dir());

@@ -131,11 +131,9 @@ impl App {
         }
     }
 
-    pub(super) fn search_debounce_deadline(&self) -> Option<tokio::time::Instant> {
+    pub(super) fn search_debounce_deadline(&self) -> Option<Instant> {
         match &self.modal {
-            Some(Modal::GlobalSearch(state)) => {
-                state.pending_at.map(|at| (at + SEARCH_DEBOUNCE).into())
-            }
+            Some(Modal::GlobalSearch(state)) => state.pending_at.map(|at| at + SEARCH_DEBOUNCE),
             _ => None,
         }
     }

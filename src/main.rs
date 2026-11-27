@@ -52,6 +52,7 @@ mod people;
 mod portal;
 mod previews;
 mod rich;
+mod rt;
 mod saved;
 mod terminal;
 mod termquery;

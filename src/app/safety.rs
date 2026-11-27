@@ -317,7 +317,7 @@ impl super::App {
         }
     }
 
-    pub(super) fn user_search_debounce_deadline(&self) -> Option<tokio::time::Instant> {
+    pub(super) fn user_search_debounce_deadline(&self) -> Option<Instant> {
         search_debounce_deadline(self.user_search_debounce)
     }
 
