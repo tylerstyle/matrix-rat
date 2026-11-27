@@ -1184,6 +1184,15 @@ pub(super) async fn set_room_display_name(
         .into_content()
         .deserialize_as_unchecked::<RoomMemberEventContent>()
         .map_err(|err| failed("update your name in this room", &err.into()))?;
+    // Sent back, it would also change our membership: only while we are in the room.
+    if content.membership != MembershipState::Join {
+        return Err("Could not update your name in this room: you are not in it.".to_owned());
+    }
+    // The profile stays (avatar and the like); what belongs to the join itself does not: who
+    // authorised it (a restricted room), a third-party invite, the join's reason.
+    content.join_authorized_via_users_server = None;
+    content.third_party_invite = None;
+    content.reason = None;
     content.displayname = target_name.clone();
     room.send_state_event_for_key(&own, content)
         .await
@@ -2014,10 +2023,6 @@ mod tests {
                 _ => None,
             })
             .await;
-            // Each look-up checks at most SHARED_ROOM_MAX_SYNCS rooms whose members are not
-            // loaded and says when it stopped short; the rooms it checked keep their member
-            // lists, so asking again goes further. An account with more joined rooms than that
-            // (the test accounts collect them) needs a second or third ask.
             // Each look-up checks at most SHARED_ROOM_MAX_SYNCS rooms whose members are not
             // loaded and says when it stopped short; the rooms it checked keep their member
             // lists, so asking again goes further. The test accounts collect joined rooms over
