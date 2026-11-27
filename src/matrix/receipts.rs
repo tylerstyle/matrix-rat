@@ -15,8 +15,8 @@ use matrix_sdk::ruma::{MilliSecondsSinceUnixEpoch, OwnedUserId, UserId};
 use matrix_sdk_ui::eyeball_im::Vector;
 use matrix_sdk_ui::timeline::{EventTimelineItem, TimelineItem, TimelineItemContent};
 
-use super::convert::{ambiguous, day_label, display_name};
-use crate::model::{Message, ReadBy, Reader};
+use super::convert::{Deleter, ambiguous, day_label, deleter, display_name};
+use crate::model::{DeletedBy, Deletion, Message, ReadBy, Reader, disambiguated};
 use crate::text::{is_blank, sanitize_line, truncate};
 
 /// Names looked up in the member list are remembered up to this many; beyond that
@@ -30,12 +30,15 @@ const NAME_WIDTH: usize = 40;
 
 type Stamp = Option<MilliSecondsSinceUnixEpoch>;
 
-/// The receipts shown on one timeline item.
+/// The receipts shown on one timeline item, and who deleted it.
 struct Picked<'a> {
     /// The item's unique id, which is the message's id.
     id: &'a str,
     readers: Vec<(&'a UserId, Stamp)>,
     total: u32,
+    /// Who deleted it, where that was someone else than its sender and than us: named
+    /// like a reader (see `convert::deleter`).
+    deleter: Option<OwnedUserId>,
 }
 
 /// A name from the member list. `found` is false for a stand-in (the id's first
@@ -55,9 +58,11 @@ pub struct Names {
     /// named by their messages), and the order they were looked up in.
     known: HashMap<OwnedUserId, Known>,
     order: VecDeque<OwnedUserId>,
-    /// What the last pass made, by message id, and a digest of the receipts it was
-    /// made from.
+    /// What the last pass made, by message id, and a digest of the receipts (and the
+    /// deleters) it was made from.
     made: HashMap<String, ReadBy>,
+    /// Who deleted a message and their name as shown, by message id, from the last pass.
+    deleters: HashMap<String, (OwnedUserId, String)>,
     digest: Option<u64>,
     /// A digest of the timeline's changes of membership and profile at the last pass.
     /// A new one may have changed anyone's name, or who shares it: what was looked
@@ -70,7 +75,8 @@ pub struct Names {
 }
 
 impl Names {
-    /// Fills in `read_by` on the messages made from `items` (matched by their id).
+    /// Fills in `read_by` on the messages made from `items` (matched by their id), and
+    /// the name of whoever deleted one where that was someone else than its sender.
     /// Names come from the local store only: a receipt is not worth a request. Those
     /// `ignored` are not shown as readers.
     pub async fn annotate(
@@ -96,10 +102,15 @@ impl Names {
                     item.unique_id().0.hash(&mut members);
                 }
                 let (readers, total) = pick(receipts(event), own, event.sender(), ignored);
-                (total > 0).then_some(Picked {
+                let moderator = match event.content().is_redacted().then(|| deleter(event, own)) {
+                    Some(Deleter::Other(user)) => Some(user),
+                    _ => None,
+                };
+                (total > 0 || moderator.is_some()).then(|| Picked {
                     id: item.unique_id().0.as_str(),
                     readers,
                     total,
+                    deleter: moderator,
                 })
             })
             .collect();
@@ -132,18 +143,29 @@ impl Names {
                 .get(message.id.as_str())
                 .cloned()
                 .unwrap_or_default();
+            // A message made before (see `convert::Reuse`) gets the name of now too.
+            if let Some(Deletion {
+                by: DeletedBy::Other { user_id, name },
+                ..
+            }) = &mut message.deleted
+                && let Some((user, shown)) = self.deleters.get(message.id.as_str())
+                && user.as_str() == user_id.as_str()
+            {
+                name.clone_from(shown);
+            }
         }
     }
 
-    /// Decides whether names have to be worked out: `None` if the receipts and the
-    /// changes of membership (`members`, a digest) are the ones of the last pass and
-    /// nothing was left open; otherwise everyone to name.
-    fn plan<'a>(
+    /// Decides whether names have to be worked out: `None` if the receipts, the
+    /// deleters and the changes of membership (`members`, a digest) are the ones of the
+    /// last pass and nothing was left open; otherwise everyone to name. A deletion
+    /// changes no receipt: without its deleter in the digest it would not be named.
+    fn plan<'p>(
         &mut self,
-        picked: &[Picked<'a>],
+        picked: &'p [Picked<'_>],
         synced: bool,
         members: u64,
-    ) -> Option<HashSet<&'a UserId>> {
+    ) -> Option<HashSet<&'p UserId>> {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         for item in picked {
             item.id.hash(&mut hasher);
@@ -152,6 +174,7 @@ impl Names {
                 user.hash(&mut hasher);
                 stamp.hash(&mut hasher);
             }
+            item.deleter.hash(&mut hasher);
         }
         let digest = hasher.finish();
         // The member list has arrived since: stand-ins from before get their names.
@@ -176,7 +199,10 @@ impl Names {
         Some(
             picked
                 .iter()
-                .flat_map(|item| item.readers.iter().map(|(user, _)| *user))
+                .flat_map(|item| {
+                    let readers = item.readers.iter().map(|(user, _)| *user);
+                    readers.chain(item.deleter.as_deref())
+                })
                 .collect(),
         )
     }
@@ -226,8 +252,28 @@ impl Names {
         speakers: &HashMap<&UserId, (String, bool)>,
         now: &DateTime<Local>,
     ) {
+        // Named as a reader is, but by the user ID where no name is known: who deleted
+        // a message is not left to a stand-in.
+        self.deleters = picked
+            .iter()
+            .filter_map(|item| {
+                let user = item.deleter.as_deref()?;
+                let (name, ambiguous) = match (speakers.get(user), self.known.get(user)) {
+                    (Some((name, ambiguous)), _) => (name.clone(), *ambiguous),
+                    (None, Some(known)) if known.found => (known.name.clone(), known.ambiguous),
+                    (None, _) => (sanitize_line(user.as_str()), false),
+                };
+                let shown = if ambiguous {
+                    disambiguated(&name, user.as_str())
+                } else {
+                    name
+                };
+                Some((item.id.to_owned(), (user.to_owned(), shown)))
+            })
+            .collect();
         self.made = picked
             .iter()
+            .filter(|item| item.total > 0)
             .map(|item| {
                 let readers = item
                     .readers
@@ -407,6 +453,7 @@ mod tests {
             id,
             readers: readers.iter().map(|user| (*user, stamp(5))).collect(),
             total: readers.len() as u32,
+            deleter: None,
         }
     }
 
@@ -602,6 +649,57 @@ mod tests {
             pass(&mut names, &[picked("m2", &last)], &nobody, &members, true),
             Some(0)
         );
+    }
+
+    /// A deletion by a moderator changes no receipt: the moderator is named all the
+    /// same, by what they wrote, by the member list, or else by their user ID, and the
+    /// name stays on the message in the passes after.
+    #[test]
+    fn a_deletion_without_a_change_of_receipts_names_the_moderator() {
+        let bob = user_id!("@bob:example.org");
+        let carol = user_id!("@carol:example.org");
+        let dave = user_id!("@dave:example.org");
+        let nobody = HashMap::new();
+        let members = HashMap::from([(carol, "Carol"), (bob, "Bob")]);
+        let mut names = Names::default();
+        let items = [picked("m1", &[bob])];
+        assert_eq!(pass(&mut names, &items, &nobody, &members, true), Some(1));
+        assert!(names.deleters.is_empty());
+        // Carol deletes m2, which nobody has read: the receipts are the same.
+        let deleted = Picked {
+            deleter: Some(carol.to_owned()),
+            ..picked("m2", &[])
+        };
+        let items = [picked("m1", &[bob]), deleted];
+        assert_eq!(pass(&mut names, &items, &nobody, &members, true), Some(1));
+        assert_eq!(names.deleters["m2"], (carol.to_owned(), "Carol".to_owned()));
+        // A message without readers has none listed.
+        assert!(!names.made.contains_key("m2"));
+        // Nothing changed: nothing worked out again, the name is kept.
+        assert_eq!(pass(&mut names, &items, &nobody, &members, true), None);
+        assert_eq!(names.deleters["m2"].1, "Carol");
+        // Someone the member list does not know is named by their user ID.
+        let unknown = Picked {
+            deleter: Some(dave.to_owned()),
+            ..picked("m3", &[])
+        };
+        assert_eq!(
+            pass(&mut names, &[unknown], &nobody, &members, true),
+            Some(1)
+        );
+        assert_eq!(names.deleters["m3"].1, "@dave:example.org");
+        // One who shares a name with someone else, as the SDK says, carries the ID.
+        let mut names = Names::default();
+        let speakers = HashMap::from([(carol, ("carol".to_owned(), true))]);
+        let deleted = Picked {
+            deleter: Some(carol.to_owned()),
+            ..picked("m2", &[])
+        };
+        assert_eq!(
+            pass(&mut names, &[deleted], &speakers, &members, true),
+            Some(0)
+        );
+        assert_eq!(names.deleters["m2"].1, "carol (@carol:example.org)");
     }
 
     #[test]
