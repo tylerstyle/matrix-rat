@@ -266,6 +266,10 @@ backend, and installable on iOS and Android as a home-screen app (a PWA).
     while the keyboard is open.
   - **A Send button** next to the message field (the user): with the keyboard closed, a
     message is sent without opening it again. Enter keeps sending.
+  - **The version in the top bar** (the user, for testing): the test build shows its commit
+    and build time; the web app shows its release number there, so after an update (the
+    service worker's "Update available, reload?", confirmed by the user) it is plain which
+    version runs.
 
 ### 6.3 Later, after 1.0.0 or by demand
 
