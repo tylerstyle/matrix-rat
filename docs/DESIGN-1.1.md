@@ -6,7 +6,13 @@ and one fix that matrix-agy's review of the 0.20 update found
 (matrix-sdk, matrix-sdk-base and matrix-sdk-ui pinned at `=0.20.0`). Design only: nothing here
 is built yet.
 
-References: ours are `src/…:line` at `e260d34`. The SDK's are inside the 0.20.0 crates in the
+Revised the same day after matrix-agy's review of `fbb3cce` (`.claude/agy/review-design-1.1.md`,
+verdict CHANGES): its nine must-fix points and its smaller notes are folded in, the two open
+questions are now the user's decisions (see [Decisions](#decisions)), and the cost of item 1 is
+measured on the dev homeserver, not on a profile copy.
+
+References: ours are `src/…:line` at `e260d34`; main has moved since (deps-1.1, the dot), so a
+line may be off by a few. The SDK's are inside the 0.20.0 crates in the
 cargo registry (`~/.cargo/registry/src/index.crates.io-*/`), written as `matrix-sdk/src/…:line`
 and likewise for `matrix-sdk-ui`, `matrix-sdk-crypto`, `matrix-sdk-base` and
 `matrix-sdk-sqlite`.
@@ -45,6 +51,13 @@ When done:
 │   Searches messages on this device, back to about 28 Aug                   │
 ```
 
+The date is 13 weeks before now, written short: day and month within the same year, with the
+year when the fetch reaches into the last one (from January to March), e.g. on 10 Feb 2027:
+
+```
+│   Fetching older messages, back to 11 Nov 2026…                            │
+```
+
 Off in the settings (today's text): `Searches messages loaded on this device`.
 
 Matches while fetching: the note row at the bottom (`src/ui/global_search.rs:244-255`) says so.
@@ -65,8 +78,10 @@ a note.
 
 Settings, Behaviour group, after "Read markers" (the rows about what goes to and comes from the
 server): `Search history   3 months` / `off`. Enter or ←→ switch it, saved as
-`search_history = true|false`. Off stops a running fetch at once; on starts one if none has run
-in this session.
+`search_history = true|false`, on by default (the user's decision, see
+[Decisions](#decisions)). Off stops a running fetch at once; on starts one if none has finished in
+this session, and it really fetches, because the app always has the queue (see [The app always
+has the queue](#the-app-always-has-the-queue)). The setting governs only this three-month fetch.
 
 ### The SDK, as 0.20 has it
 
@@ -77,12 +92,19 @@ in this session.
   priority.
 - **The flag turns on three things, not one.** We cannot have the first without the others:
   - the search backfill (Low priority, only when we call it);
-  - the latest-event backfill (`latest_events/room_latest_events.rs:300-342`; High priority, no
-    batch cap, detached). It pages back a room whose loaded events hold nothing to show as its
-    latest message, until it finds something;
+  - the latest-event backfill (`latest_events/room_latest_events.rs:195-206, 300-342`; High
+    priority, no batch cap, detached). It pages back a room whose loaded events hold nothing to
+    show as its latest message, until it finds something;
   - the read-receipt backfill (`event_cache/caches/read_receipts.rs:139-165`; Normal priority,
     at most 20 batches). It pages back until it finds the event a receipt points at, so the
     unread count can be worked out.
+
+  What the second and third mean for the app, which now runs them for every user, is in [The app
+  always has the queue](#the-app-always-has-the-queue).
+- **One run per room.** Requests for a room already queued or running at the same priority are
+  joined to it (`back_pagination_queue.rs:247-281`); the scheduler never starts a second run for
+  a room that has one (`:505-520`). A run ends at a batch that meets its stop condition, at the
+  room's start, at an empty batch, or at its batch cap (`:583-615`).
 - **`run_search_backfill(strategy)`** (`search_backfill.rs:94-182`) works like this:
   1. It returns at once if there is no queue (L95-97).
   2. Once per profile it indexes the events already stored (`reindex_stored_events`, L189-242).
@@ -110,28 +132,46 @@ in this session.
   setting is on. The two places are `src/matrix/mod.rs:1937-1941` and `:2219-2225`. The delay
   lets the room list, the previews and the open room's first page go first; the once-only
   reindex reads the whole store.
-- **Again.** Once when the sync comes back from Offline, if it went offline during the run.
-  Requests that failed then leave rooms short: a failed room is not marked done, but its week
-  is passed. Never two runs at once.
+- **Again, after an outage.** Requests that fail while the network is down leave rooms short: a
+  failed room is not marked done, but its week is passed. So one catch-up run follows an
+  outage. Never two runs at once:
+  - While a run is going, an Offline sync state sets `saw_offline`.
+  - When the run ends with `saw_offline` set: if the sync is Running, the catch-up starts at
+    once; if it is still Offline, it starts at the next Offline → Running.
+  - On Offline → Running when no run is going and the last one ended with `saw_offline`: the
+    catch-up starts at once (no `START_DELAY`: the room list is up already).
+  - A run that starts clears `saw_offline`. So a catch-up is itself caught up only if it, too,
+    sees an outage: one run per outage at most.
+  - The setting turned off clears it all; turned on, it starts a run unless one has finished
+    (`Done`) in this session. A run stopped by the setting has not finished.
+
+  These rules are one small function of (run going, `saw_offline`, sync state, event), so they
+  are tested without a server (below).
 - **Time.** 13 weeks back from now, as the SDK has it. We do not change it. A very busy room
   (more than 300 events in a week) stops at the cap for that week and is covered less deep; the
   next start goes further from what is stored.
 - **Rooms.** All joined rooms, the most recent first. The SDK skips spaces, invites and left
   rooms.
 - **Bandwidth.** Foreground pacing (one room a second into the queue), Low priority, 3 runs at
-  once shared with the other two backfills, at most 130 requests per room per run.
+  once shared with the other two backfills, at most 130 requests per room per run. The other
+  two go first (High and Normal beat Low), so at start the search waits behind them.
 - **Time limit.** Our task gives up after 6 h; see the risks: a panic in a queue task makes
   `join()` wait for ever.
 - **The dev server in tests.** Only the tests about it turn it on, through the worker options
   below. The other server tests keep it off, so they neither wait for it nor load the server.
-  Test accounts are new, with one or two rooms, so a run takes seconds.
+  Test accounts are new, with one or two rooms, so a run takes seconds. The tests of previews
+  and unread dots build their client with the queue, as the app does (see [The app always has
+  the queue](#the-app-always-has-the-queue)).
 
 ### Cost
 
+The figures here are reckoned from the SDK's caps and guessed sizes. The real ones come from the
+dev-server measurement in the next section, before the release.
+
 - **Requests.** One `/messages` of 30 events per batch, and only for what is not stored yet.
   A quiet room needs 1–2 requests; a room with 3 000 messages in three months needs about 100;
-  never more than 130 per room and run. An answer is roughly 30–60 KB. In encrypted rooms add
-  one key-backup request per unknown megolm session when decryption fails
+  never more than 130 per room and run. An answer is roughly 30–60 KB (a guess). In encrypted
+  rooms add one key-backup request per unknown megolm session when decryption fails
   (`BackupDownloadStrategy::AfterDecryptionFailure`, `src/matrix/session.rs:148-154`;
   `matrix-sdk/src/room/mod.rs:1984, 2027`).
 - **Later starts.** As far as I read `run_request` (`back_pagination_queue.rs:540-617`), it
@@ -140,14 +180,72 @@ in this session.
   goes to the server. So a later start costs mostly disk reads, and requests only past the end
   of what is stored.
 - **Disk.** What is fetched stays in the SQLite event cache (encrypted) and in the search
-  index. At roughly 1–2 KB per stored event, 100 000 events are 100–200 MB. These numbers are
-  measured on the copy of the user's 1.0.3 profile (the upgrade test of PLAN §6.1) before the
-  merge.
+  index. At a guessed 1–2 KB per stored event, 100 000 events are 100–200 MB; the measurement
+  replaces the guess.
 - **Memory.** Shrinks back after each room (above). A room open in the app keeps what was
   fetched for it while it is open.
 - **Duration.** Foreground with 100 rooms: at most 100 s of pacing per week, so at most about
   22 minutes for a first run, plus the requests themselves. It gets shorter week by week as
   rooms reach their start.
+
+### Measuring before the release, on the dev server
+
+**Not on a profile copy.** The copy of the user's 1.0.3 profile (the upgrade test of PLAN §6.1)
+is opened offline only: in a namespace with no network, it checks the store migration, that the
+profile opens, and that no login form shows. It cannot measure the fetch. A copy of a
+logged-in profile is the same device to the server; if it synced, it would take the to-device
+messages (room keys) meant for the user's real client.
+
+**The measuring test.** `search_history_cost` in `src/matrix/search_history.rs`, `#[ignore]` and
+run only when `MATRIX_RAT_MEASURE=1` is set, so the usual server run neither waits for it nor
+fills the dev server. It runs alone, like every server run.
+
+1. **Fill.** A (a plain SDK client) makes rooms of known sizes, about 10 000 events in all,
+   messages of 100–200 characters, sent a few at a time:
+   - `busy`: 5 000 messages, more than one run can take (3 900);
+   - two `medium` rooms of 1 000;
+   - five `quiet` rooms of 20, which one sync brings whole;
+   - `state-only`: one message, then 2 000 topic changes, for the latest-event walk below;
+   - optionally an encrypted room of 1 000 with a key backup, for the decryption cost.
+2. **Simulated weeks.** First choice: the spec lets an application service set an event's time
+   with the `ts` query parameter of `/send` and `/state`. If continuwuity honours it (to be
+   checked; it needs an appservice registration in the dev server's config), A spreads each
+   room over 16 weeks; the busy room then has over 300 a week, so every week meets its cap.
+   Otherwise every event is sent now. Then each week's request of a room that still has older
+   events meets its 10-batch cap, so every room costs the most it can: `busy` 130 batches
+   (3 900 events), a `medium` room all of its 1 000 by week 4. That is the upper bound, which is
+   what the estimate needs; the 13-week stop itself is covered by the SDK's tests.
+3. **Count.** B logs in with the worker on a new profile in a temp folder, through a counting
+   relay: a test-only TCP relay in front of the dev server that forwards bytes and counts
+   request lines, all of them and the `GET …/messages` ones apart. It counts kinds only; no path
+   or id is kept.
+4. **Measure, in three steps.**
+   - With `WorkerOptions::app(…, false)` (search history off): what the other two backfills
+     cost at start, until no `/messages` has gone out for 10 s.
+   - Then `MatrixCmd::SearchHistory { enabled: true }`, which also proves that turning it on
+     mid-session fetches: `/messages` count, time from `Running` to `Done`, and the growth of the
+     profile folder (event cache and search index).
+   - Then a second start on the same profile: requests and time again, to check that a later
+     start costs mostly disk reads.
+5. **Report.** One line of numbers: requests, seconds, bytes, events fetched (known from what
+   was sent and the caps, checked against requests × 30), bytes per event and seconds per
+   request. No ids, paths or text. It asserts only loose bounds (at most 130 search requests per
+   room and run; at most 20 read-receipt batches per room and sync), since times on a shared dev
+   server vary.
+
+**The estimate for 100 000 events**, worked out from those numbers and written here and in the
+release notes:
+
+- requests: 100 000 / 30 ≈ 3 400, plus about one per room and week that ends short;
+- disk: 100 000 × the measured bytes per event;
+- time: the pacing (up to rooms × 13 s) plus requests × the measured seconds per request / 3. The
+  dev server is local, so its seconds per request are a floor; the estimate also gives the time
+  at 0.5 s a request, a guess for a busy public server, said to be one.
+
+**The gate.** "Measure before release" stays, on the dev server: the test runs before the 1.1.0
+release and its numbers replace the guesses above. Proposed: if 100 000 events come to more than
+1 GB of disk or more than an hour at 0.5 s a request, the default goes back to the user before
+the release.
 
 ### Encrypted rooms
 
@@ -158,6 +256,85 @@ not reach the index, so it sends them there explicitly). Nothing to do on our si
 them once their keys are in. Until then they are not found, because the index holds only
 decrypted text. Rooms whose keys never come stay unsearchable, as today.
 
+### The app always has the queue
+
+**Decided** (matrix-claude, on matrix-agy's review, 2026-11-27; the review's "Option A"). The
+interactive app always builds its client with the back-pagination queue. The `search_history`
+setting governs only the three-month search backfill. The latest-event and read-receipt
+backfills run in the app whatever the setting, and stay off in `serve`.
+
+**Why.** The queue is made when the client is built, and cannot be added later. Built only when
+the setting is on, an app started with it off would, on turning it on, call
+`run_search_backfill`, which returns at once without a queue (L95-97), and we would say "Done"
+having fetched nothing. With the queue always there, turning the setting on mid-session really
+fetches.
+
+**What that means for the other two backfills, which now run for every 1.1 user:**
+
+- **Latest-event backfill.**
+  - *Which rooms:* only those the SDK is asked to track: the top 500 of the room list
+    (`LATEST_ROOMS`, `src/matrix/mod.rs:113`), when room previews are on (`Previews::listen`,
+    `:2497-2528`). With previews off, none. We do not use the room list service's
+    `subscribe_to_rooms`, which would add its own.
+  - *When:* a tracked room's loaded events hold nothing to show as its latest message. Messages,
+    stickers, poll starts and calls count, and so do our own join or invite and a knock we may
+    answer; edits, reactions, deletions, verification requests and other state events do not
+    (`latest_event/builder.rs:713-870`).
+  - *Bounds:* High priority, detached, no batch cap. It stops at the first batch that holds
+    something to show, at the room's start, or at an empty batch; one run per room at a time.
+    The unbounded case is a long room with no message in it (say, a bridged room of membership
+    changes): it is walked to its start. What it fetched is stored, so a later start reads it
+    from disk.
+  - *On screen:* a room whose last 20 events hold no message gets a preview, where today its
+    line has none. Better, not worse.
+- **Read-receipt backfill.**
+  - *Which rooms:* any joined room whose sync brings timeline events while our own read receipt
+    points at an event that is not loaded.
+  - *Bounds:* Normal priority, detached, at most 20 batches of 30 (600 events) per run; it stops
+    as soon as the receipt's event is loaded. A later sync of that room asks again if the event
+    is still not found; while one run is queued or going, the request joins it. As far as I read
+    (`back_pagination_queue.rs:547-552`), a later run reads the stored part from disk first, and
+    its batch count includes those, so the network cost of a room is about 600 events past what
+    is stored. The measurement checks it.
+  - *On screen:* little. We show unread as a dot, from `num_unread_notifications() > 0 ||
+    num_unread_messages() > 0` (`src/matrix/mod.rs:2623-2632`), not the count. When the receipt
+    is not loaded, every loaded event counts as unread, so the dot is on either way; the
+    backfill only makes the hidden count exact. Mostly a cost, then.
+- **Sharing the slots.** The three share 3 runs at once, High before Normal before Low. At start
+  the two side backfills go first and the search waits; `START_DELAY` gives them a head start.
+  Our own scrolling back (`src/matrix/paging.rs`) does not go through the queue.
+
+**Risks:**
+
+- Traffic right after start, for every user and even with search history off: up to 500
+  latest-event walks (only for rooms without a message in their last 20 events) and up to one
+  20-batch walk per room with an old receipt. The measurement's first step counts it.
+- A long room without messages takes a High slot until its walk ends; the search waits. The
+  `state-only` room of the measurement (2 000 topic changes) shows how long.
+- A panic in one of their runs leaks a slot for the session, as for the search (see the risks
+  below). Our paging's catch (`src/matrix/paging.rs:64-90`) does not cover detached runs.
+- Previews and unread dots may change; the tests below pin what they should be.
+
+**Tests:**
+
+- Unit: `WorkerOptions::app(_, true)` and `app(_, false)` both have `back_pagination`;
+  `WorkerOptions::agent` has neither switch. With the flag the client's event cache has a queue,
+  without it none (see Tests below).
+- Unit, fake homeserver, with a `/sync` fed through `sync_once` as in
+  `src/matrix/rooms.rs:3263`: a room whose own receipt points at an event the server never
+  returns. The server sees at most 20 `/messages` for it after one sync, and the room's `unread`
+  is what it is without the queue.
+- Server: `a_preview_comes_from_older_messages`. B (a plain SDK client) joins A's room. Then A
+  sends a message with a unique word, then 40 topic changes, so B's join is older than the
+  message. B logs in again with the worker and `WorkerOptions::app(…, false)`. Within 10 s,
+  B's room list line shows the message. (With `WorkerOptions::agent` it does not: the line
+  stays as today.)
+- Server: the tests of previews and unread dots run with the app's options, as users run them:
+  `rooms_come_with_their_latest_message` (`src/matrix/mod.rs:3053`),
+  `a_room_marked_unread_shows_in_the_users_other_clients` (`src/matrix/rooms.rs:5366`) and
+  `the_read_marker_stands_before_what_was_not_read` (`:5583`). They must pass unchanged.
+- The measuring test's first step (above) gives the numbers.
+
 ### Not in `serve`
 
 `matrix-rat serve` keeps the queue off:
@@ -167,7 +344,8 @@ decrypted text. Rooms whose keys never come stay unsearchable, as today.
   daemon that cares about the one or two rooms it is bound to;
 - it would grow a store and an index that nobody searches.
 
-So the switch is a worker option, and `serve` and most tests pass "off".
+So the switch is a worker option: the app always turns the queue on, `serve` and most tests
+leave it off.
 
 ### Our changes
 
@@ -175,10 +353,14 @@ So the switch is a worker option, and `serve` and most tests pass "off".
    takes `WorkerOptions { secret_store, back_pagination, search_history }`, and `Worker` keeps
    them.
    - `WorkerOptions::app(secret_store, search_history)` is for the terminal shell
-     (`src/shell/terminal.rs:491`, with the setting from the config).
+     (`src/shell/terminal.rs:491`, with the setting from the config). It always sets
+     `back_pagination: true`; `search_history` only says whether the fetch runs.
    - `WorkerOptions::agent(secret_store)`, with both off, is for `serve`
-     (`src/agent/serve.rs:1249, 1367`) and for the existing tests (`src/matrix/mod.rs:3566,
-     3628, 3683, 3741`, `src/matrix/agent.rs:1464`).
+     (`src/agent/serve.rs:1249, 1367`) and for the existing tests: `spawn(paths)`
+     (`src/matrix/mod.rs:1427`) passes it, and so do `src/matrix/mod.rs:3566, 3628, 3683, 3741`
+     and `src/matrix/agent.rs:1464`. The three server tests named above pass `app(…, false)`.
+   - `back_pagination` is fixed when the client is built; `search_history` can change at any
+     time (`MatrixCmd::SearchHistory`).
 2. **Client builder.** `offline_client` (`src/matrix/session.rs:189-221`) gets
    `back_pagination: bool` and calls `.with_enable_automatic_back_pagination(…)`.
    - It is reached through the functions that build the client of a stored session: `restore`
@@ -197,17 +379,23 @@ So the switch is a worker option, and `serve` and most tests pass "off".
    - In tests, `START_DELAY` is 0.
 4. **Session loop** (`src/matrix/mod.rs`).
    - It starts the run where the room list first catches up, when the option is on.
-   - `MatrixCmd::SearchHistory { enabled }` starts or stops it. Outside a session the command
-     updates the worker's option, instead of being dropped with the others at `:1700-1737`.
+   - `MatrixCmd::SearchHistory { enabled }` starts or stops it, by the rules in "Again, after an
+     outage" above. Outside a session the command updates the worker's option, instead of being
+     dropped with the others at `:1700-1737`.
    - `stop()` runs at teardown next to `searcher.cancel()` (`:2347`), on quit, logout and
      expiry alike. The `JoinSet`'s `abort_all` (`:2351`) would do it as well.
-   - The sync arm (`:2199-2217`) starts a second run on Offline → Running if the first one saw
-     Offline.
+   - The sync arm (`:2199-2217`) feeds the sync states to the catch-up rules. The run's end comes
+     back to the session loop on a channel the loop selects on, so the loop, not the task, starts
+     the catch-up and there are never two runs at once.
 5. **Protocol.**
    - `MatrixEvent::SearchHistory(HistoryRun)`, with
      `HistoryRun { Off, Waiting, Running { back_to }, Done { back_to }, Stopped }`.
-   - `back_to` is the day label of now − 91 days, as `convert::day_label` makes it ("28 Aug").
-     The worker makes it, so the app needs no clock arithmetic.
+   - `back_to` is the date of now − 91 days, written by a new `short_date(when, now)` in
+     `search_history.rs`: `%-d %b` ("28 Aug") when it is in the same year as now, `%-d %b %Y`
+     ("11 Nov 2026") when not. `convert::day_label` (`src/matrix/convert.rs:550-557`) does not
+     fit: it writes `%a %-d %b %Y` ("Fri 28 Aug 2026"), and "Today"/"Yesterday". The helper stays
+     out of `convert.rs`, which items 2 and 3 change. The worker makes the text, so the app needs
+     no clock arithmetic.
    - Both go in the hand-written Debug lists (`:495`, `:1139`). They hold no content anyway.
 6. **App.**
    - Two fields: `App.search_history: bool` (the setting) and `App.history_run: HistoryRun`.
@@ -226,18 +414,21 @@ So the switch is a worker option, and `serve` and most tests pass "off".
    - Release notes: "Until messages are loaded again, search finds fewer of them"
      (`docs/RELEASE-NOTES-1.1-draft.md:22-23`, note at `:91-94`) becomes: the first start
      indexes the stored messages again and fetches three months of history in the background
-     (with the costs measured on the profile copy).
+     (with the costs measured on the dev server, and how to turn it off).
 
 ### States, keys, settings
 
-One setting (`search_history`, Behaviour group, on by default; see open question 2). No new key.
-The new state is `HistoryRun`, kept in `App` and shown only in the search box.
+One setting (`search_history`, Behaviour group, on by default: the user's decision, see
+[Decisions](#decisions)). It governs only the three-month fetch; the app has the queue either
+way. No new key. The new state is `HistoryRun`, kept in `App` and shown only in the search box;
+the worker keeps `saw_offline` and whether a run has finished.
 
 ### Log privacy
 
 - **Ours.** Counts and times only:
   - `info!(rooms, "search history started")`;
   - `info!(elapsed_s, "search history done")`;
+  - `info!("search history catches up after an outage")`;
   - `warn!("search history stopped at the time limit")`.
   No room ids, no query and no error text: an error is logged by its kind only
   (`logsafe::kind`).
@@ -269,12 +460,24 @@ The new state is `HistoryRun`, kept in `App` and shown only in the search box.
     is extended. With the flag, the client's event cache, once subscribed, has a queue
     (`back_pagination_queue().is_some()`). Without the flag it has none.
   - `search_history.rs`, using the fake homeserver (`src/matrix/spaces.rs:1349`,
-    `fake::Server::answering`) with one joined room, two cases:
+    `fake::Server::answering`) with one joined room, three cases:
     - `/messages` answers an empty chunk with no `end`. The run ends; the events are
       `Running`, then `Done`.
-    - `/messages` answers `Reply::Never`. `stop()` ends the task within a second, and no
-      further `/messages` reaches the server.
-  - `WorkerOptions::agent` (what `serve` passes) has both switches off.
+    - `/messages` answers `Reply::Never`. `stop()` ends our task within a second, and no
+      further `/messages` reaches the server. The one already in flight inside the queue stays
+      parked until the client is dropped, so the test drops the client before it waits for the
+      fake server to shut down.
+    - Started with `WorkerOptions::app(…, false)`, then `SearchHistory { enabled: true }`: a
+      `/messages` reaches the server, and the events are `Running`, then `Done` (the review's
+      Catch #1: on mid-session really fetches).
+  - The catch-up rules, as a plain function: Offline during a run gives one catch-up when the
+    run ends (at once if the sync is Running, else at the next Running); Offline → Running after
+    the run ended with `saw_offline` starts it at once; no Offline, no catch-up; never a second
+    run while one goes; off clears it; on after `Done` starts nothing.
+  - `short_date`: same year ("28 Aug"), across New Year ("11 Nov 2026"), and the 91
+    days from a date in February.
+  - `WorkerOptions::app(_, false)` has `back_pagination`; `WorkerOptions::agent` (what `serve`
+    passes) has both switches off.
   - App: the setting switches, is saved and sends `SearchHistory { enabled }`. The config
     default and parsing are tested. `HistoryRun` events change the box's text.
 - **Snapshots.**
@@ -292,17 +495,21 @@ The new state is `HistoryRun`, kept in `App` and shown only in the search box.
   recovery and a key backup, as in `history_unlocks_after_verification`
   (`src/matrix/verify.rs:2393`), and sends 60 encrypted messages. B enters the recovery key
   (`MatrixCmd::Recover`). The first message is found once its key is downloaded.
-- **Not tested here: the 13-week bound.** A test server cannot backdate events. The SDK's own
-  tests cover `stop_when_older_than`.
+- **The other two backfills:** see the tests in [The app always has the
+  queue](#the-app-always-has-the-queue).
+- **The cost:** `search_history_cost`, by hand before the release (see [Measuring before the
+  release](#measuring-before-the-release-on-the-dev-server)).
+- **Not tested here: the 13-week bound**, unless continuwuity honours the appservice `ts` (see
+  the measuring test). The SDK's own tests cover `stop_when_older_than`.
 
 ### Size and risks
 
-Size **M**.
+Size **M**, and **S** for the measuring test and its relay.
 
-- **The other two backfills come with the flag.** They add requests right after start. Unread
-  counts and room previews may change, probably for the better: counts the SDK could not work
-  out before, previews for rooms whose last events are all hidden. This is checked on the
-  user's profile copy, with a release note if counts visibly change.
+- **The other two backfills come with the queue, for every user.** Their bounds, risks and tests
+  are in [The app always has the queue](#the-app-always-has-the-queue); their start-up cost is
+  the measuring test's first step, on the dev server. A release note says that previews now
+  reach back for rooms whose last events hold no message.
 - **A panic inside a queue run never reports `Finished`.** This is the #5416 kind of panic that
   `src/matrix/paging.rs:64-90` catches for our own paging (scheduler:
   `back_pagination_queue.rs:354-420`). That room's slot stays taken, and its `join()` waits for
@@ -351,8 +558,11 @@ Own messages in the timeline:
   And one more ◌ waiting
 ```
 
-- **Markers.** They use `Role::Error`, like "✕ not sent". A failed reaction's chip shows `✕`
-  after its count.
+- **Markers.** The "✕ …" part uses `Role::Error`, like "✕ not sent"; "(edited)" and the other
+  badges before it keep their muted look. A failed reaction's chip shows `✕` after its count.
+- **On others' messages too.** A failed reaction of ours, or a failed deletion of someone else's
+  message by us as a moderator, sits on a message that is not ours. It shows and is handled the
+  same way.
 - **"◌ waiting"** marks a message of ours queued after a failure in the same room. It goes out
   once the failure is retried or discarded. Today it says "◌ sending" for ever.
 - **Status line on such a message:** `Enter try again · Del discard edit`. For a failed deletion
@@ -381,8 +591,10 @@ Own messages in the timeline:
   discards. Each acts on every failed part of the selected message at once. There is no new key
   and no new action.
 - Del on a failed deletion discards the deletion, so the message comes back, because Del throws
-  away whatever did not go out; the status line names it ("keep message"). This is open
-  question 1.
+  away whatever did not go out; the status line names it ("keep message"). The user decided so
+  (see [Decisions](#decisions)).
+- This holds on others' messages as well: Del on a message with a failed part discards it,
+  whoever sent the message, before the usual "only your own messages" rule (change 5).
 - `EditLast` (`src/app.rs:3286`) and the palette's "Try sending again" (`src/palette.rs:162,
   1453`; `src/app/palette.rs:59`) count a message with a failed part like a failed message.
 - Mouse:
@@ -428,16 +640,29 @@ Own messages in the timeline:
        `:606-608`;
      - `redaction_send_state()` failed → `delete_error`;
      - our own reactions' `send_state` failed → `Reaction.failed`.
-   - Once a room's messages are made: if any has a failed part, our messages still `Sending`
-     get `held`, because a failure blocks or stops the room's whole queue.
+   - `held` is not set here. It is set in `prepare_messages` (`src/matrix/rooms.rs:2468+`), right
+     after `reuse.convert(…)` (`:2481`): if any message has a failed part, our messages still
+     `Sending` get `held`, because a failure blocks or stops the room's whole queue; otherwise
+     none has it. It depends on other items, so it cannot live in `event_message`: when an older
+     item's edit fails or is cleared, a newer `Sending` item keeps its `Arc`, and `Reuse`
+     (`src/matrix/rooms/reuse.rs`) hands back its cached `Message`. A pass after `Reuse` keeps
+     `Reuse`'s rule (a message depends on its item only) and still updates `held`.
 3. **Worker** (`src/matrix/rooms.rs`).
    - `MatrixCmd::Retry { room_id, item }` keeps its name and now tries every failed part of the
      item again. It looks the item up (as at `:1433-1440`), calls `retry_send` for each failed
      part (`Event`, `Edit`, `Redaction`, `Reaction { key }`), then
      `room.send_queue().set_enabled(true)` once.
    - The new `MatrixCmd::Discard { room_id, item }` calls `abort_send` for every failed part
-     except the message itself. A failed message keeps going through `Redact` as today
-     (`src/app.rs:3013-3024`).
+     except the message itself, then `timeline.room().send_queue().set_enabled(true)`. A failed
+     message keeps going through `Redact` as today (`src/app.rs:3013-3024`), and the worker's
+     `Redact` (`src/matrix/rooms.rs:1267-1290`), when it aborts a local message that failed,
+     calls `set_enabled(true)` after it as well.
+   - Why both: `SendHandle::abort()` only wakes the room's task (`notifier.notify_one()`,
+     `send_queue/mod.rs:3256-3266`); it does not turn the queue on. After a recoverable failure
+     the queue is off (`:1137`), so without the call the task wakes, finds it off (`:786`) and
+     sleeps again: the messages behind the discarded one lose `held` and stay "◌ sending" until
+     the next Offline → Running or restart. After an unrecoverable failure the queue is on, and
+     the call does nothing.
    - When nothing is found: "Nothing waits to be sent here any more" (today: "this message is
      no longer waiting").
    - `Discard` goes into the command's Debug next to `Retry` (`src/matrix/mod.rs:569`) and into
@@ -445,15 +670,27 @@ Own messages in the timeline:
 4. **Back online** (`src/matrix/mod.rs:2199-2217`). The sync arm remembers the last state. On
    Offline → Running it calls `client.send_queue().set_enabled(true).await`.
 5. **App.**
-   - `selected_failed()` (`src/app.rs:2569`) uses `failed_any()`.
+   - `selected_failed()` (`src/app.rs:2569`) and the guard of the retrying `Action::Reply`
+     (`:3246-3252`) use `failed_any()` in place of `state == Failed`.
    - Enter sends `Retry`, as today.
-   - Del sends `Discard` when a part of a sent message failed; otherwise Del works as today
-     (`delete_message`, `:2995`).
+   - `delete_message` (`:2996-3012`): the check for a failed part comes **first**, before the
+     `!message.own` guard (which opens the reason popup or toasts "You can only delete your own
+     messages"). A failed reaction or a failed moderator deletion sits on someone else's
+     message. When a part of a sent message failed, Del sends `Discard`; otherwise Del works as
+     today.
 6. **UI.**
-   - `marker()` (`src/ui/timeline.rs:181-202`):
-     - `edit_error` → "✕ edit not sent[: why]";
-     - `delete_error` → "✕ deletion not sent[: why]";
-     - `held` → "◌ waiting" in place of "◌ sending".
+   - `marker()` (`src/ui/timeline.rs:181-202`) returns its parts, each with its role, in place of
+     one `(String, Role)`:
+     - the badges as today ("(edited)", "(pinned)", the shield), in their role;
+     - `edit_error` → "✕ edit not sent[: why]", in `Role::Error`;
+     - `delete_error` → "✕ deletion not sent[: why]", in `Role::Error`;
+     - `held` → "◌ waiting" in place of "◌ sending", muted.
+   - Its three callers (`:761`, `:856`, `:1262`) put the parts after the text, joined by
+     spaces, when they fit, and on a row of their own when not, as today; the width check
+     takes them all. With item 3, a deleted line leaves room for the marker (item 3, change 4),
+     so "✕ deletion not sent" stays in view under a long reason.
+   - `hash_message` (`src/ui/timeline/memo.rs:581`) hashes `edit_error`, `delete_error`, `held`
+     and each `Reaction.failed`, or the rows of a changed message are not drawn again.
    - The chips (`:935-980`) add " ✕" in `Role::Error` for `failed`.
    - The status hints (`src/ui/status.rs:194-198`) name the part.
    - The menu (`src/menu.rs:415+`) and the details' Delivery fact (`src/details.rs:89-93`)
@@ -483,6 +720,11 @@ Nothing native: the timeline and send-queue calls exist in the browser too (matr
 ### Tests
 
 - **Unit, worker side**, with the fake homeserver as in `src/matrix/rooms.rs:3230+`:
+  - An edit answered 503 until told otherwise, a message sent after it `held`. After the SDK's
+    three tries the edit has failed and the room's queue is off. Then `Discard`: the old text is
+    back, and the held message goes out with no `Retry` (the `set_enabled` after `abort_send`).
+  - The same with a failed message in place of the edit, and Del (`Redact` on it): the held
+    message goes out.
   - An edit answered 403 (`M_FORBIDDEN`): the message has `edit_error`, and a message sent after
     it is `held`. Then `Retry`, with the server now answering 200: `edit_error` is gone, and the
     held message goes out.
@@ -500,6 +742,8 @@ Nothing native: the timeline and send-queue calls exist in the browser too (matr
     sliding sync, so the sync state cannot come from it.
 - **App.**
   - Enter on a message with a failed part sends `Retry`; Del sends `Discard`.
+  - On someone else's message with our failed reaction, and with our failed moderator deletion:
+    Del sends `Discard` (not the reason popup, not the toast), and Enter sends `Retry`.
   - The menu entries and status hints depend on the part (extend `typing_notices_and_retry`,
     `src/app.rs:7706-7743`).
   - `EditLast` picks such a message.
@@ -523,6 +767,8 @@ Size **M**.
   alone after a failure. The message still goes out once the failure is handled.
 - **`abort_send(Redaction)` on a deletion of a remote event** has to bring the message back with
   its content (`unredacted_item`). The server test confirms it.
+- **Turning the queue on while still offline** after a discard: the next message fails again and
+  shows "✕ not sent", as today. No loop: the queue turns itself off again.
 
 ## 3. A deleted message shows why
 
@@ -593,16 +839,38 @@ Details (`i`), new facts after "Sent":
    - Debug says only whether there is a reason and which `DeletedBy` it is.
 2. **Convert** (`src/matrix/convert.rs:782-787`) sets `deleted`. The reason is cleaned:
    `sanitize_line` (`src/text.rs:29`), runs of spaces made one, trimmed, none if `is_blank`,
-   then `truncate(…, 500)`.
+   then `truncate(…, 500)`. `DeletedBy::Other` gets the user ID as its name for now; the name
+   comes in the next step.
 3. **Names.** `receipts::Names::annotate` (`src/matrix/receipts.rs:76`, called at
    `src/matrix/rooms.rs:2485`) also names whoever deleted a message, when that is not the sender,
    the way it names readers: from the loaded messages first, then the member store
-   (`get_member_no_sync`). If neither knows them, it uses their user ID. Ambiguous names get the
-   ID, as elsewhere.
-4. **Timeline** (`src/ui/timeline.rs:713` area). The deleted line is built from `deleted`, in
-   `Role::ReplyQuote` as today.
-5. **Details** (`src/details.rs:156+`). "Deleted" and "Reason" facts after "Sent".
-6. **Delete with a reason.**
+   (`get_member_no_sync`). If neither knows them, it uses their user ID.
+   - **`Names::plan`** (`src/matrix/receipts.rs:141-182`) decides whether to name anyone at all,
+     from a digest of the receipts. A deletion that comes with no change of receipts would leave
+     the digest as it was, and the deleter would never be named. So `Picked` gains the deleter
+     (read from `original_json()`, see "Who" above), the digest hashes each
+     `(message id, deleter)`, and the `needed` set includes the deleters. Items with a deleter
+     and no readers are picked too (today only `total > 0`, `:96-100`).
+   - `Names` keeps the deleters' names by message id beside `made`, and every pass writes them
+     into `DeletedBy::Other.name` as it writes `read_by` (`:121-128`). So a message `Reuse` hands
+     back gets the current name.
+   - **Namesakes.** `Message::people()` (`src/model.rs:710-740`) also yields the deleter, so
+     `mark_namesakes` (`src/matrix/rooms.rs:2489`) learns them, and `Namesakes::mark_among`
+     (`src/model.rs:976+`) tells them apart like a quoted sender (`tell`). A moderator who shares
+     a name with someone in view then shows with their ID, in lazy-loaded rooms too, where the
+     SDK's `name_ambiguous()` is still false.
+4. **Timeline** (`src/ui/timeline.rs:713-717` area). Today `MsgKind::Redacted` goes through
+   `Rich::of(message.html, body_text)` and `highlight::colour`, which is harmless for the fixed
+   "Message deleted". With someone's reason or name in it, Markdown in either (links, bold,
+   code, spoilers, quotes) would be formatted, made clickable, or looked up for a link preview.
+   So a deleted message is drawn plain: one `Span::styled(truncate(&line, room), Role::ReplyQuote)`,
+   with no `Rich::of`, no `highlight::colour` and no link detection. `room` is the body width,
+   less the marker's width and a space when there is a marker (item 2's "✕ deletion not sent")
+   and both fit on the row; when they do not, the marker gets a row of its own, as today.
+5. **Memo.** `hash_message` (`src/ui/timeline/memo.rs:581`) hashes `deleted`.
+6. **Details** (`src/details.rs:156+`). "Deleted" and "Reason" facts after "Sent", as plain
+   text.
+7. **Delete with a reason.**
    - `Action::DeleteWithReason` ("delete_with_reason", Timeline, "Delete with a reason…")
      in `src/keymap.rs:195-217`. It has no default key, like `doctor` or `archive_room`, but
      can be bound in the key editor.
@@ -610,7 +878,7 @@ Details (`i`), new facts after "Sent":
    - The palette shows it when Delete is shown (`src/palette.rs:1335`), for our own messages
      only.
    - The app calls `open_redact_confirm(index)`.
-7. **README.** `delete_with_reason` (unbound by default) in the list of timeline actions
+8. **README.** `delete_with_reason` (unbound by default) in the list of timeline actions
    (`README.md:419`), and the menu entry.
 
 ### Safety of the text
@@ -620,6 +888,8 @@ Details (`i`), new facts after "Sent":
   - `sanitize_line` removes control characters (so escape sequences) and the direction overrides
     (`src/text.rs:48-58`), and turns newlines into spaces.
   - The model caps it at 500 columns; the line cuts it to the width.
+  - It is never parsed as Markdown or searched for links: the timeline draws it as one plain
+    span (change 4), the details as plain text.
 - It is never logged and never in Debug.
 - It is not passed to `serve` or the MCP tools (`src/matrix/agent.rs:747` stays "redacted"):
   that would hand an agent text from anyone in the room, for little use.
@@ -641,13 +911,20 @@ Nothing native. The gate as usual.
 
 - **Unit, convert.** Uses the fake homeserver as in `src/matrix/rooms.rs:3230+`, with a sync
   whose timeline holds deleted events with `unsigned.redacted_because`. Cases:
-  - a reason with `\u{1b}[31m` and `\n` comes out clean, on one line;
+  - a reason with `\u{1b}[31m` and `\n` comes out on one line: no `\u{1b}` and no `\n` in it.
+    The literal `[31m` stays: `sanitize_line` removes control characters, not the printable
+    rest of an escape sequence, and that rest is harmless text;
   - 2 000 characters are cut;
   - a blank reason gives none;
   - deleted by the sender, by someone else, and by us;
   - no `redacted_because` gives `Sender`.
+- **Unit, names.** A deletion that comes with no change of receipts still gets the moderator's
+  name; a moderator who shares a name with a sender in view is shown with their ID.
 - **Unit, UI side.**
   - The details facts.
+  - A reason with `[x](https://example.org)`, `**b**` and `` `c` `` is drawn as it is written:
+    no link among the row's hits, no bold.
+  - A failed own deletion with a 500-column reason keeps "✕ deletion not sent" in view.
   - The menu shows "Delete with a reason…" only on our own sent messages that are not deleted.
   - Choosing it opens the reason popup, and submitting sends `Redact { reason: Some(…) }`.
 - **Snapshots.** `deleted_reasons` (the three lines above) and the details popup of a deleted
@@ -659,7 +936,7 @@ Nothing native. The gate as usual.
 
 ### Size
 
-**S**.
+**S**, nearer M with the names (change 3).
 
 ## 4. Verified without the signing keys
 
@@ -750,6 +1027,11 @@ In the verification itself:
   - on the device being verified (B): `If so, press “They match” here first, then on your
     device “LAPTOP”.`
   - on the other one (A): `If so, press “They match” on your device “PHONE” first, then here.`
+
+  The order matters only while A does not trust B yet. So B shows its line only while this
+  device is not verified, and A only while the other device is not. When B is verified but
+  lacks the keys, A trusts it already and answers whatever the order, so neither line shows;
+  nor when the user verifies again two devices that have everything.
 - **Done, on B.**
   - At first as today: "✓ This device is now verified." and "Your other device sends it the
     keys it lacks…".
@@ -757,7 +1039,8 @@ In the verification itself:
     `⚠ The signing keys did not come. Verify again, or enter your recovery key.`, with the same
     buttons as the popup above.
 - **`KEYS_GRACE`** is 30 s. There is no hint while a verification runs, nor in the 30 s after
-  this device's verification has ended; the keys normally come within seconds.
+  this device's verification has ended; the keys normally come within seconds. When the 30 s
+  are up, the screen changes by itself, with no key pressed and no sync (change 2).
 
 ### The cheap mitigation: the order
 
@@ -778,8 +1061,17 @@ state.
    cry wolf.
 2. **`keys_missing(security)`** in `src/verify.rs`: `identity == Present && device == Verified
    && !signing_keys`. `VerifyState::keys_missing(now)` adds: no flow running, and not within
-   `KEYS_GRACE` of `done_at`. `done_at` is a new field: when a verification of this device
-   reached Done.
+   `KEYS_GRACE` of `done_at`. `done_at` is a new field of `VerifyState`: when a verification of
+   this device reached Done; a new flow clears it.
+   - **Waking up at the end of the grace.** The app has no list of deadlines: the shell ticks
+     every 250 ms (`src/shell/terminal.rs:480`) into `App::on_tick` (`src/app.rs:5405`), whose
+     `verify_tick` (`src/app/verify.rs:217`) already opens a popup held back while the user
+     typed (`TYPING_PAUSE`). `verify_tick` also marks the screen dirty once when
+     `done_at + KEYS_GRACE` has passed and the keys are still missing, so an idle screen shows
+     the hint or the Done popup's warning at 30 s. A `keys_warned` flag keeps it to once.
+   - **Reset.** `done_at` and `keys_warned` live in `VerifyState`, which `App::reset_session`
+     (`src/app.rs:1730`, on logout and when the session ends) resets as a whole
+     (`self.verify = Default::default()`, `:1751`).
 3. **`Hint::KeysMissing`**.
    - It comes from `hint()` (`src/verify.rs:57-71`) and is drawn in `src/ui/verify.rs:360-395`.
    - `setting_text` (`:89-102`) and `describe`'s cross-signing row (`:111-116`) gain the
@@ -801,20 +1093,27 @@ state.
 6. **Worker** (`src/matrix/verify.rs`).
    - **`this_device`** (`:1093-1097`) is also true when this device lacks the signing keys. So a
      second verification on B is titled "Verify this device" and ends with the keys text.
-   - **`await_own_signature`** (`:957-970`) keeps looking, after 0, 1, 2, 4, 8 and 16 s, until
-     the device is cross-signed **and** has the signing keys, and updates the status each time
-     (`refresh.notify_one()`). As far as I can see, keys that arrive this way wake none of the
-     streams `watch_security` listens to (`:1484-1540`): `import_secret` saves only the private
-     identity (`matrix-sdk-crypto/src/store/mod.rs:1174-1200`). Without this, the app might
-     only learn of the keys at the next unrelated change.
+   - **The status after the keys come** is already taken care of: the handler for
+     `ToDeviceSecretSendEvent` (`:634-638`) calls `refresh.notify_one()`, and the status is
+     worked out again.
+   - **`await_own_signature`** (`:957-970`) today looks, after 0, 1, 2, 4 and 8 s, until the
+     device is cross-signed, fetching our keys (`refresh_own_keys`, a `/keys/query`) each time
+     it is not. It then keeps looking, after 16 s as well, until the device also has the signing
+     keys, but without the network: once the device is cross-signed, `/keys/query` cannot bring
+     private keys, so it only reads `cross_signing_status()` and calls `refresh.notify_one()`.
+     Belt and braces next to the handler above, at no cost to the server.
    - **`VerifyStage::Confirmed`** is shown once our `confirm()` has returned (`answer`,
-     `:1303`), that is once our MAC is out. It no longer comes from the SDK's earlier
-     `SasState::Confirmed` (`:1278`), unless the flow is Done by then. "Waiting for … to
-     confirm…" stays true, and the tests get a signal they can rely on (below).
+     `:1303`), that is once our MAC is out, and only if `!sas.is_done() && !sas.is_cancelled()`
+     at that moment. It no longer comes from the SDK's earlier `SasState::Confirmed` (`:1278`).
+     The guard is on the SDK's state, not on our `done()`: when we confirm second, `confirm()`
+     moves the SDK to Done before `follow` (`:1121-1135`) has seen it, so our `done()` is still
+     false and a `Confirmed` would flash just before `Done`. "Waiting for … to confirm…" stays
+     true, and the tests get a signal they can rely on (below).
 7. **Sessions popup** (`src/app/devices.rs:170-198`). Choosing a session that is verified
    already starts a verification, instead of the toast "That session is verified already"
    (`:183`; the test at `:1588` changes). That is how the other device fixes this one.
-8. **Wording** in `src/ui/verify.rs`: Compare (`:236-249`) and Done (`:251-273`).
+8. **Wording** in `src/ui/verify.rs`: Compare (`:236-249`, the order lines only while the device
+   being verified is not verified yet) and Done (`:251-273`).
 
 ### The flaky test, made deterministic without hiding the race
 
@@ -846,8 +1145,10 @@ state.
 4. **New `old_device_first_ends_with_the_keys`**: the race order, with two workers,
    `Pair::finish(Order::OldFirst)`.
    - In most runs B gets the keys.
-   - Otherwise, after the grace period, B reports `Verified && !signing_keys`. Then the test
-     runs the fix (B sends `VerifyCmd::Request`, NewFirst) and asserts the keys.
+   - Otherwise B's `Security` stays `Verified && !signing_keys` for a short poll window (5–10 s
+     after `Verified`). `KEYS_GRACE` belongs to the app's `VerifyState`, not to the worker's
+     `Security`, so this worker test does not wait 30 s. Then the test runs the fix (B sends
+     `VerifyCmd::Request`, NewFirst) and asserts the keys.
    - Either way the test prints which case happened. It never fails because of the race, and it
      does not pretend the race is gone: the test logs show how often it hits.
 - **Unit.**
@@ -857,6 +1158,9 @@ state.
   - `start_verification` opens KeysMissing.
   - Verify again sends `VerifyCmd::Request`; Enter recovery key opens the recovery form.
   - In the sessions popup, a verified session leads to `RequestDevice`.
+  - `verify_tick` marks the screen dirty once when the grace ends with the keys missing, and
+    not when they came; logout clears `done_at`.
+  - The order lines: shown while the device being verified is not verified, not otherwise.
 - **Snapshots.**
   - New: `verify_keys_missing` (the popup), `verify_keys_missing_hint` (the status line),
     `verify_compare_other_device` (A's line) and `verify_done_keys_missing`.
@@ -885,32 +1189,39 @@ Size **M**.
 
 ## Build order and branches
 
-Before all four: the `DEFAULT_FILTER` change (`off,matrix_rat=info`), planned separately for
-1.1. Items 1 and 2 rely on it to keep the SDK's lines with ids and raw errors out of the log.
-
 | Branch | Item | Size | Files |
 |---|---|---|---|
-| `verify-keys` | 4 | M | `src/verify.rs`, `src/ui/verify.rs` (+ snapshots), `src/app/verify.rs`, `src/app/devices.rs`, `src/matrix/verify.rs` (tests included), README (encryption) |
-| `deletion-reason` | 3 | S | `src/model.rs`, `src/matrix/convert.rs`, `src/matrix/receipts.rs`, `src/ui/timeline.rs`, `src/details.rs`, `src/menu.rs`, `src/keymap.rs`, `src/palette.rs`, `src/app.rs`, `src/app/moderation.rs`, snapshots, README |
-| `send-retry` | 2 | M | `src/model.rs`, `src/matrix/convert.rs`, `src/matrix/rooms.rs`, `src/matrix/mod.rs` (`MatrixCmd`, the sync arm), `src/ui/timeline.rs`, `src/ui/status.rs`, `src/details.rs`, `src/menu.rs`, `src/palette.rs`, `src/app.rs`, `src/app/palette.rs`, snapshots, README |
-| `search-backfill` | 1 | M | `src/matrix/session.rs`, `src/matrix/auth.rs`, `src/matrix/mod.rs` (`spawn_with`, `Worker`, protocol, session loop), new `src/matrix/search_history.rs`, `src/agent/serve.rs`, `src/shell/terminal.rs`, `src/matrix/agent.rs` (test call), `src/config.rs`, `src/modal.rs`, `src/app.rs`, `src/ui/global_search.rs` (+ snapshots), README, release notes |
+| `quiet-logs` | before all | S | `src/logging.rs` (`DEFAULT_FILTER` to `off,matrix_rat=info`, + test), README, release notes; planned separately for 1.1 |
+| `verify-keys` | 4 | M | `src/verify.rs`, `src/ui/verify.rs` (+ snapshots), `src/app/verify.rs` (`verify_tick`), `src/app/devices.rs`, `src/matrix/verify.rs` (tests included), README (encryption) |
+| `deletion-reason` | 3 | S–M | `src/model.rs` (`people`, `mark_among`), `src/matrix/convert.rs`, `src/matrix/receipts.rs` (`plan`, `annotate`), `src/matrix/rooms.rs` (fake-server tests), `src/ui/timeline.rs`, `src/ui/timeline/memo.rs`, `src/details.rs`, `src/menu.rs`, `src/keymap.rs`, `src/palette.rs`, `src/app.rs`, `src/app/moderation.rs`, snapshots, README |
+| `send-retry` | 2 | M | `src/model.rs`, `src/matrix/convert.rs`, `src/matrix/rooms.rs` (`prepare_messages`, `Retry`, `Discard`, `Redact`), `src/matrix/mod.rs` (`MatrixCmd`, the sync arm), `src/ui/timeline.rs`, `src/ui/timeline/memo.rs`, `src/ui/status.rs`, `src/details.rs`, `src/menu.rs`, `src/palette.rs`, `src/app.rs`, `src/app/palette.rs`, snapshots, README |
+| `search-backfill` | 1 | M (+ S) | `src/matrix/session.rs`, `src/matrix/auth.rs`, `src/matrix/mod.rs` (`spawn`, `spawn_with`, `Worker`, protocol, session loop, a server test's options), new `src/matrix/search_history.rs` (with `short_date`, the measuring test and its relay), `src/matrix/rooms.rs` (two server tests' options), `src/agent/serve.rs`, `src/shell/terminal.rs`, `src/matrix/agent.rs` (test call), `src/config.rs`, `src/modal.rs`, `src/app.rs`, `src/ui/global_search.rs` (+ snapshots), README, release notes |
+
+`verify-keys` leaves `src/app.rs` alone: `on_tick` already calls `verify_tick`, and
+`reset_session` resets the whole `VerifyState`, `done_at` included. Only its tests may go there.
 
 The order:
 
-1. **`verify-keys` first.** It fixes something users can hit today, and it ends the 1-in-8 flake
+0. **`quiet-logs` first.** Items 1 and 2 rely on it to keep the SDK's lines with ids and raw
+   errors out of the log.
+1. **`verify-keys` next.** It fixes something users can hit today, and it ends the 1-in-8 flake
    that would otherwise muddy every later server run.
 2. **`deletion-reason`, then `send-retry` on top of it.** They share the model, convert, the
    timeline drawing, the details and the menu.
-3. **`search-backfill` alongside 2, merged last.** It holds the biggest unknowns (the cost on a
-   real profile, the side effects). It meets `send-retry` only in two places:
+3. **`search-backfill` alongside 2, merged last.** It holds the biggest unknowns: the cost,
+   measured on the dev server before the release, and the two backfills that now run for every
+   user. It meets `send-retry` only in three places:
    - `src/matrix/mod.rs`: new `MatrixCmd` variants on both sides, and both hook Offline →
      Running in the sync arm (`:2199-2217`). Whichever comes second joins the two hooks into
      one `back_online` function.
+   - `src/matrix/rooms.rs`: only the options of two server tests, far from `prepare_messages`
+     and the commands.
    - `src/app.rs`, at different places.
 
-Built side by side without touching the same files: `verify-keys`, `deletion-reason` and
-`search-backfill`. `send-retry` follows `deletion-reason`. All of them touch the README and the
-release-notes draft, in separate sections, so those merges are add/add.
+Built side by side without touching the same code: `verify-keys`, `deletion-reason` and
+`search-backfill` (the last two share only test lines in `src/matrix/rooms.rs` and separate
+places in `src/app.rs`). `send-retry` follows `deletion-reason`. All of them touch the README
+and the release-notes draft, in separate sections, so those merges are add/add.
 
 Each branch gets its own worktree, `nix-shell --run scripts/check.sh`, the wasm gate and its
 server tests, then matrix-agy's review before the merge, as for the other 1.1 branches. There is
@@ -923,18 +1234,35 @@ one dev homeserver and two server runs at once break each other, so the branches
 - Search history in `serve` or in the browser.
 - Turning a room's queue back on after a passing failure while the sync stays up
   (`SendQueue::subscribe_errors`, `send_queue/mod.rs:406`, with a back-off). Until then: Enter,
-  or the next Offline → Running.
+  Del, or the next Offline → Running.
+- A setting for the latest-event and read-receipt backfills. They come with the queue, which
+  the app always has (see [The app always has the queue](#the-app-always-has-the-queue)).
 - Keeping the text of a discarded edit, to edit it again.
 - Deletion reasons for agents (`serve`, MCP).
 - Reporting the secret-request race upstream. The user leaves matrix-rust-sdk alone for now
   (2026-11-27), and its AI policy rules out an AI-written report.
 
-## Open questions
+## Decisions
 
-1. **Del on a failed deletion** (for the user).
-   - Proposed: Del discards the failed deletion, so the message comes back. The status line says
-     "keep message", and Del discards any failed thing in the same way.
-   - The other way: Del tries the deletion again, and only the menu offers "Keep the message".
-2. **Search history on by default** (for the user). Proposed: on, with a settings row to turn it
-   off. On the first start after the upgrade it costs requests and disk; the numbers come from
-   the profile copy before the release.
+The two open questions of the first draft, answered by the user on 2026-11-27 (as relayed by
+matrix-claude), and the two decisions of the review round.
+
+1. **Del on a failed deletion keeps the message** (the user: "Del on a failed deletion keeps the
+   message"). Del discards the failed deletion, so the message comes back; the status line says
+   "keep message", and Del discards any failed thing in the same way. Enter tries the deletion
+   again. matrix-agy endorsed the same: one rule for all four kinds, and a wrong key costs
+   nothing (a second Del deletes), where the other way round it would delete for good.
+2. **Search history is on by default** (the user: "Search history is on by default"). A settings
+   row turns it off. On the first start after the upgrade it costs requests and disk; the
+   numbers come from the dev-server measurement before the release (see [Measuring before the
+   release](#measuring-before-the-release-on-the-dev-server)). The proposed gate there brings
+   the default back to the user only if 100 000 events would cost more than 1 GB of disk or an
+   hour of fetching.
+3. **The app always has the back-pagination queue** (matrix-claude, on matrix-agy's Catch #1:
+   "Option A"). The setting governs only the three-month fetch; the latest-event and
+   read-receipt backfills run in the app for everyone, and stay off in `serve`. See [The app
+   always has the queue](#the-app-always-has-the-queue).
+4. **The cost is measured on the dev homeserver, not on a profile copy** (matrix-claude). The
+   copy of the user's 1.0.3 profile is tested offline only: store migration, opening, no login
+   form. A copy that synced would be the user's own device to the server and would take the
+   room keys meant for the user's real client.
