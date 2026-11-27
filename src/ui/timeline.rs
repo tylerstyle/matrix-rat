@@ -246,7 +246,9 @@ fn deleted_rows(i: usize, message: &Message, repeated_shield: bool, lay: &Lay) -
     let parts: Vec<(String, Role)> = marker(message, repeated_shield).into_iter().collect();
     let after = parts.iter().map(|(part, _)| width(part) + 1).sum::<usize>();
     let room = body_width.saturating_sub(after);
-    let beside = after == 0 || room >= DELETED_KEEPS.min(width(&line));
+    // Both fit: the marker, and as much of the line as it keeps (an empty line keeps
+    // nothing, and its marker may still be wider than the body).
+    let beside = after == 0 || body_width >= after + DELETED_KEEPS.min(width(&line));
     let mut spans = vec![
         Span::raw(INDENT),
         Span::styled(
@@ -2485,6 +2487,59 @@ mod tests {
     /// marker after it on the same row; where too little of the line would be left
     /// beside it, the marker gets a row of its own. Without a marker the line takes the
     /// whole width.
+    /// However narrow the pane, a deleted message stays within its width: a line with
+    /// a long reason, and an empty one (demo data) whose marker is wider than the body,
+    /// which then goes on a row of its own, cut.
+    #[test]
+    fn a_deleted_message_fits_any_width() {
+        use crate::model::DeletedBy;
+        let theme = Theme::builtin(DEFAULT_THEME).unwrap();
+        let images = ImageStore::new(Graphics::halfblocks());
+        let marked = |message: Message| Message {
+            saved: true,
+            pinned: true,
+            ..message
+        };
+        let empty = marked(Message {
+            kind: MsgKind::Redacted,
+            ..by_bob("")
+        });
+        let long = marked(deleted(
+            &"y".repeat(crate::model::Deletion::REASON_MAX),
+            DeletedBy::Us,
+        ));
+        let mut room = demo_rooms().remove(0);
+        // The rows after the header.
+        let message_rows = |room: &Room, max: usize| -> Vec<String> {
+            let rows = build_rows(room, max, &theme, None, &images);
+            let header = rows
+                .iter()
+                .position(|row| row.line.spans.first().is_some_and(|s| s.content == "● "))
+                .unwrap();
+            for row in &rows[header + 1..] {
+                assert!(row.line.width() <= max, "width {max}: {:?}", row.line);
+            }
+            rows[header + 1..]
+                .iter()
+                .map(|row| row.line.to_string())
+                .collect()
+        };
+        for message in [empty, long] {
+            room.messages = vec![message];
+            for max in 6..=40 {
+                message_rows(&room, max);
+            }
+        }
+        // The empty line, then "(pinned) (saved)" (16 columns) cut to a body of 10.
+        room.messages[0] = marked(Message {
+            kind: MsgKind::Redacted,
+            ..by_bob("")
+        });
+        assert_eq!(message_rows(&room, 12), ["  ", "  (pinned) …"]);
+        // Wide enough: beside it.
+        assert_eq!(message_rows(&room, 30), ["   (pinned) (saved)"]);
+    }
+
     #[test]
     fn a_long_reason_keeps_the_marker_in_view() {
         use crate::model::DeletedBy;
