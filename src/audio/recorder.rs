@@ -9,12 +9,14 @@
 //! sound server counts as there when its socket is (a `stat`, no more). Looking at
 //! this machine is in [`find`]; what is found, and why nothing was, is here.
 
+#[cfg(not(target_family = "wasm"))]
 mod find;
 
 use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+#[cfg(not(target_family = "wasm"))]
 pub use find::{choose, choose_here};
 
 /// A program with its arguments, started without a shell.

@@ -13,6 +13,7 @@
 //! clipboard holds, nothing a tool writes and no file name is ever logged or shown in
 //! `Debug` output.
 
+#[cfg(not(target_family = "wasm"))]
 mod system;
 
 use std::ffi::OsStr;
@@ -24,6 +25,7 @@ use image::ImageFormat;
 use crate::images::human_size;
 use crate::upload::FALLBACK_LIMIT;
 
+#[cfg(not(target_family = "wasm"))]
 pub use system::{paste, run_tool, tools_from_env};
 
 /// The desktop's clipboard tools.

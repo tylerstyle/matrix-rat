@@ -10,6 +10,7 @@
 //! [`detect`]; the cache, with what the terminal is sent (ratatui-image's encodings,
 //! made on a thread of their own for the viewer), is in [`store`].
 
+#[cfg(not(target_family = "wasm"))]
 mod detect;
 mod store;
 
@@ -21,6 +22,7 @@ use image::{DynamicImage, ImageDecoder, ImageReader, Limits, Rgba, RgbaImage};
 
 use crate::model::MediaRef;
 
+#[cfg(not(target_family = "wasm"))]
 pub(crate) use detect::{in_multiplexer, placeholders_broken};
 pub use store::{EncodeDone, Encoded, ImageStore, ViewerContent};
 

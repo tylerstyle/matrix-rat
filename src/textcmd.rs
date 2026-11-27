@@ -16,6 +16,7 @@
 //! The types of a run are here; starting and watching the programs, and finding a
 //! setting's program on `PATH`, are in [`process`].
 
+#[cfg(not(target_family = "wasm"))]
 mod process;
 
 use std::ffi::{OsStr, OsString};
@@ -27,6 +28,7 @@ use tokio::sync::oneshot;
 
 use crate::audio::TempAudio;
 
+#[cfg(not(target_family = "wasm"))]
 pub use process::{parse, run};
 
 /// The most that is kept of what a program writes: far more than a message's text.

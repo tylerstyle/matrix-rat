@@ -14,6 +14,7 @@
 //! the user names one, and whether that is a local model or a service is theirs to
 //! decide.
 
+#[cfg(not(target_family = "wasm"))]
 mod find;
 
 use std::collections::BTreeMap;
@@ -30,6 +31,7 @@ use crate::textcmd::{Command, Failure, MAX_OUTPUT, Step};
 
 #[cfg(test)]
 pub use find::{transcriber, translator};
+#[cfg(not(target_family = "wasm"))]
 pub use find::{transcriber_here, translator_here};
 
 /// The most notes kept; the oldest go first.

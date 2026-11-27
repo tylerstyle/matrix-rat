@@ -10,12 +10,17 @@
 //! A shell without files (the browser's) keeps them in its own storage, which can
 //! refuse (full, private mode): every operation can fail.
 
-use std::io::{self, Read, Write};
+use std::io;
+#[cfg(not(target_family = "wasm"))]
+use std::io::{Read, Write};
+#[cfg(not(target_family = "wasm"))]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+#[cfg(not(target_family = "wasm"))]
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+#[cfg(not(target_family = "wasm"))]
 use crate::paths::Paths;
 
 /// What is kept.
@@ -122,6 +127,7 @@ pub fn read_found(storage: &dyn Storage, key: &Key) -> Result<String> {
         .with_context(|| format!("could not read {}", storage.describe(key)))
 }
 
+#[cfg(not(target_family = "wasm"))]
 /// The files the app has always kept, each where and how it always was.
 #[derive(Clone, Default)]
 pub struct FsStorage {
@@ -131,6 +137,7 @@ pub struct FsStorage {
     saved_file: PathBuf,
 }
 
+#[cfg(not(target_family = "wasm"))]
 /// Hand-written: the paths name the user's home folder.
 impl std::fmt::Debug for FsStorage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -138,9 +145,11 @@ impl std::fmt::Debug for FsStorage {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 /// Files put aside under one label; beyond that nothing is put aside.
 pub const ASIDE_MOST: usize = 20;
 
+#[cfg(not(target_family = "wasm"))]
 impl FsStorage {
     /// The profile's files: the configuration and the themes in the shared
     /// configuration folder, the notes and the saved messages in its data folder.
@@ -195,6 +204,7 @@ impl FsStorage {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 impl Storage for FsStorage {
     fn read(&self, key: &Key) -> Result<Option<Vec<u8>>> {
         let path = self.path(key);
@@ -304,6 +314,7 @@ impl Storage for FsStorage {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 /// The file's text, of at most `most` bytes; `None` if there is no file. A larger
 /// file is an error, read no further than one byte beyond.
 fn read_bounded(file: &Path, most: u64) -> io::Result<Option<String>> {
@@ -321,6 +332,7 @@ fn read_bounded(file: &Path, most: u64) -> io::Result<Option<String>> {
     Ok(Some(text))
 }
 
+#[cfg(not(target_family = "wasm"))]
 /// Removes `file`; not there is fine.
 fn remove_if_there(file: &Path) -> io::Result<()> {
     match std::fs::remove_file(file) {
@@ -329,6 +341,7 @@ fn remove_if_there(file: &Path) -> io::Result<()> {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 /// Removes `file` and everything next to it whose name starts with its name and a
 /// dot: what was put aside, and a write's leftover. Best effort.
 fn remove_with_siblings(file: &Path) {
@@ -349,6 +362,7 @@ fn remove_with_siblings(file: &Path) {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 /// `name` next to `file`, or `name.1`, `name.2`…: the first that is not taken, so
 /// that what was put aside earlier is not written over.
 fn free_name(file: &Path, name: &str) -> Option<PathBuf> {
@@ -365,6 +379,7 @@ fn free_name(file: &Path, name: &str) -> Option<PathBuf> {
         })
 }
 
+#[cfg(not(target_family = "wasm"))]
 /// Copies `source` into a new file at `target`, readable by the user only, and
 /// waits for it to reach the disk.
 fn copy_private(source: &Path, target: &Path) -> io::Result<()> {
@@ -385,6 +400,7 @@ fn copy_private(source: &Path, target: &Path) -> io::Result<()> {
     written
 }
 
+#[cfg(not(target_family = "wasm"))]
 /// Writes `bytes` to a new file next to `path`, for the user only, and puts it in
 /// `path`'s place in one step, once it is on the disk.
 fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -410,6 +426,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     written
 }
 
+#[cfg(not(target_family = "wasm"))]
 /// Writes `bytes` to a new file next to `path`, created for the owner only, and
 /// renames it into `path`'s place.
 fn write_owner_only(path: &Path, bytes: &[u8]) -> io::Result<()> {

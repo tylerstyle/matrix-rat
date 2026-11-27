@@ -20,7 +20,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::time::{Instant, MissedTickBehavior};
 
 use super::child::Group;
-use super::ipc::{self, Lines};
+use super::ipc::{self, Lines, Said};
 use super::{Control, End, Player, PlayerEvent, PlayerUpdate, Reported, Request};
 
 /// How long mpv gets to open its control socket, and how often it is tried.
@@ -199,6 +199,22 @@ impl Mpv {
                 said.take(what);
             }
         });
+    }
+}
+
+impl Reported {
+    /// Takes in what mpv said.
+    fn take(&mut self, said: Said) {
+        match said {
+            Said::Position(at) => self.position = Some(at),
+            Said::Length(length) => self.length = Some(length),
+            Said::Paused(paused) => self.paused = paused,
+            Said::Ended => {
+                if self.length.is_some() {
+                    self.position = self.length;
+                }
+            }
+        }
     }
 }
 

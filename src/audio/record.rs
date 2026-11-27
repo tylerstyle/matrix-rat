@@ -25,6 +25,7 @@
 //! What is asked and told, and the counting of the sound, are here; running the two
 //! programs is in [`run`].
 
+#[cfg(not(target_family = "wasm"))]
 mod run;
 
 use std::fmt;
@@ -36,6 +37,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use super::recorder::Tool;
 use super::{MAX_AMPLITUDE, TempAudio};
 
+#[cfg(not(target_family = "wasm"))]
 pub use run::run;
 
 /// Samples a second, of the sound between the two programs.

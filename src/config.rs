@@ -1,11 +1,14 @@
 //! User configuration (`~/.config/matrix-rat/config.toml`). Everything is optional.
 
+#[cfg(not(target_family = "wasm"))]
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-use crate::storage::{FsStorage, Key, Storage};
+#[cfg(not(target_family = "wasm"))]
+use crate::storage::FsStorage;
+use crate::storage::{Key, Storage};
 use crate::theme::DEFAULT_THEME;
 
 #[derive(Clone, Deserialize)]
@@ -292,6 +295,7 @@ impl Default for Config {
 impl Config {
     /// A missing file gives the defaults; a file that is not TOML at all is an error the
     /// user should see. One setting with a value we do not understand is not: see `parse`.
+    #[cfg(not(target_family = "wasm"))]
     pub fn load(path: &Path) -> Result<Config> {
         Self::load_from(&FsStorage::default().with_config(path))
     }

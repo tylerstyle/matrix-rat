@@ -6,7 +6,46 @@
 //! are come from here; everything that looks at the disk or the home folder is in
 //! [`disk`].
 
+#[cfg(not(target_family = "wasm"))]
 mod disk;
+/// The browser has no disk to look at: no path names a file there, a paste is text,
+/// and nothing is read (phase 2 sends what the browser's file picker gives).
+#[cfg(target_family = "wasm")]
+mod disk {
+    use std::path::{Path, PathBuf};
+
+    use super::{Chosen, Completion, Prepared};
+
+    const NO_DISK: &str = "There are no files on a disk here.";
+
+    pub fn check(_path: &Path) -> Result<Chosen, String> {
+        Err(NO_DISK.to_owned())
+    }
+
+    pub fn dropped_files(_text: &str) -> Option<Vec<PathBuf>> {
+        None
+    }
+
+    pub fn command_files(_argument: &str) -> Result<Vec<Chosen>, String> {
+        Err(NO_DISK.to_owned())
+    }
+
+    pub fn complete(_typed: &str) -> Option<Completion> {
+        None
+    }
+
+    pub fn prepare(_path: &Path, _limit: Option<u64>) -> Result<Prepared, String> {
+        Err(NO_DISK.to_owned())
+    }
+
+    pub fn prepare_as(
+        _path: &Path,
+        _name: String,
+        _limit: Option<u64>,
+    ) -> Result<Prepared, String> {
+        Err(NO_DISK.to_owned())
+    }
+}
 
 use std::io::Cursor;
 use std::path::{Path, PathBuf};

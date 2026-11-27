@@ -4,12 +4,29 @@
 //! (`HOME`, `user-dirs.dirs`) are found in [`home`]; the files are written in
 //! [`write`].
 
+#[cfg(not(target_family = "wasm"))]
 mod home;
+/// The browser has no home folder, no `HOME` and no `user-dirs.dirs`: a folder is
+/// taken and shown as it was given.
+#[cfg(target_family = "wasm")]
+mod home {
+    use std::path::{Path, PathBuf};
+
+    pub fn resolve_dir(setting: &str) -> PathBuf {
+        PathBuf::from(setting.trim())
+    }
+
+    pub fn display(path: &Path) -> String {
+        path.display().to_string()
+    }
+}
+#[cfg(not(target_family = "wasm"))]
 mod write;
 
 use std::path::Path;
 
 pub use home::{display, resolve_dir};
+#[cfg(not(target_family = "wasm"))]
 pub use write::{NewFile, write_new};
 
 use crate::text::sanitize_line;

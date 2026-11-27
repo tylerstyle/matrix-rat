@@ -13,12 +13,17 @@
 //! sockets, [`ipc`] holds what is said to mpv and read from it, [`play`] runs the
 //! player. [`recorder`] chooses the programs a voice message is recorded with.
 
+#[cfg(not(target_family = "wasm"))]
 mod child;
+#[cfg(not(target_family = "wasm"))]
 mod find;
+#[cfg(not(target_family = "wasm"))]
 mod ipc;
+#[cfg(not(target_family = "wasm"))]
 mod play;
 pub mod record;
 pub mod recorder;
+#[cfg(not(target_family = "wasm"))]
 mod temp;
 
 use std::ffi::OsString;
@@ -28,13 +33,15 @@ use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use ipc::Said;
-
 #[cfg(test)]
 pub use find::choose;
+#[cfg(not(target_family = "wasm"))]
 pub use find::choose_here;
+#[cfg(not(target_family = "wasm"))]
 pub(crate) use find::{find_on_path, is_executable};
+#[cfg(not(target_family = "wasm"))]
 pub use play::run;
+#[cfg(not(target_family = "wasm"))]
 pub use temp::{private_dir, remove_leftovers, socket_path};
 
 /// The largest file played here: the size at which saving asks first. A larger one is
@@ -344,21 +351,6 @@ pub struct Reported {
     pub paused: bool,
     /// The real length, which the sender may not have stated.
     pub length: Option<Duration>,
-}
-
-impl Reported {
-    fn take(&mut self, said: Said) {
-        match said {
-            Said::Position(at) => self.position = Some(at),
-            Said::Length(length) => self.length = Some(length),
-            Said::Paused(paused) => self.paused = paused,
-            Said::Ended => {
-                if self.length.is_some() {
-                    self.position = self.length;
-                }
-            }
-        }
-    }
 }
 
 /// What the app hears of a player.

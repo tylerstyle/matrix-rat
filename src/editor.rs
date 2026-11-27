@@ -8,6 +8,7 @@
 //! Nothing about the draft is ever logged or shown in `Debug` output, and neither is the
 //! file's name: it is a message the user has not sent yet.
 
+#[cfg(not(target_family = "wasm"))]
 mod run;
 
 use std::fmt;
@@ -15,6 +16,7 @@ use std::io;
 
 #[cfg(test)]
 pub use run::command;
+#[cfg(not(target_family = "wasm"))]
 pub use run::{command_from_env, edit, run_command};
 
 /// What to run and what to start the file with.

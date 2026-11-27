@@ -3,6 +3,7 @@
 //! The profile's names for its folders and files are here. Finding the user's folders
 //! (`etcetera`) and making them with their permissions is in [`system`].
 
+#[cfg(not(target_family = "wasm"))]
 mod system;
 
 use std::path::PathBuf;

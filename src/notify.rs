@@ -6,6 +6,7 @@
 //! [`send`]; the owner-only folder of icon files the desktop is pointed at is the
 //! terminal shell's (`shell::terminal::icon_cache`).
 
+#[cfg(not(target_family = "wasm"))]
 mod send;
 
 use std::io::Cursor;
@@ -19,6 +20,7 @@ use crate::matrix::Notice;
 use crate::text::truncate;
 use crate::theme::{Role, Theme};
 
+#[cfg(not(target_family = "wasm"))]
 pub use send::{session_bus, set_app_icon, show, show_reminder};
 
 pub const TILE_SIZE: u32 = 96;

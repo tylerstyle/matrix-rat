@@ -5,11 +5,13 @@
 //! always has: the same variables, the same `PATH` look-ups, the same files. A shell
 //! without programs to run (the browser's) answers that nothing is there.
 
-use crate::audio::recorder::{self, NoRecorder, Recorder};
-use crate::audio::{self, NoPlayer, Player};
+use crate::audio::recorder::{NoRecorder, Recorder};
+use crate::audio::{NoPlayer, Player};
 use crate::catchup::{self, NoCommand};
-use crate::notes::{self, NoTranscriber, NoTranslator, Transcriber, Translator};
+use crate::notes::{NoTranscriber, NoTranslator, Transcriber, Translator};
 use crate::notify::NotifyMode;
+#[cfg(not(target_family = "wasm"))]
+use crate::{audio, audio::recorder, notes};
 
 /// The questions. Each answer is what the app would find on its own: nothing here
 /// starts a program, and the answers say nothing of the user's that the app did not
@@ -47,9 +49,11 @@ pub trait Probes {
 }
 
 /// This process's environment and this machine: what the app has always looked at.
+#[cfg(not(target_family = "wasm"))]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NativeProbes;
 
+#[cfg(not(target_family = "wasm"))]
 impl Probes for NativeProbes {
     fn truecolor(&self) -> bool {
         crate::theme::truecolor_supported()

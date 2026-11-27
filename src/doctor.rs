@@ -13,6 +13,7 @@
 //! The report, the popup and the facts are here; looking at this machine (the
 //! environment, `PATH`, the config file, the terminal) is in [`here`].
 
+#[cfg(not(target_family = "wasm"))]
 mod here;
 
 use crate::config::ImageMode;
@@ -21,6 +22,7 @@ use crate::keymap::Keymap;
 use crate::matrix::SecretStoreMode;
 use crate::notify::NotifyMode;
 
+#[cfg(not(target_family = "wasm"))]
 pub use here::command_line;
 
 /// How a line is to be read.

@@ -16,6 +16,7 @@
 //! The runner is small and private to this feature on purpose; it is in [`process`],
 //! with finding the command on `PATH`. The data and the cleaning are here.
 
+#[cfg(not(target_family = "wasm"))]
 mod process;
 
 use std::fmt;
@@ -28,6 +29,7 @@ use crate::text::sanitize;
 
 #[cfg(test)]
 pub use process::choose;
+#[cfg(not(target_family = "wasm"))]
 pub use process::{choose_here, run};
 
 /// How long the command may take.
