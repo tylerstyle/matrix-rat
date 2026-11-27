@@ -31,6 +31,14 @@ handful of fixes from the SDK, and the SQLite in the release archives is current
   line only: no row more, and it is there without colours (`NO_COLOR`) and in 256 colours
   over ssh as well. Until now such a run read as one long message, parted only where a
   message had reactions.
+- **A deleted message says why, and who deleted it.** "Message deleted: sent to the wrong
+  room" when the sender gave a reason, "Deleted by carol: spam link" when a moderator
+  deleted it, "Deleted by you" for one you deleted. The details (`i`) show the whole
+  reason and the user ID of whoever deleted it. The reason is shown as it was written, on
+  one line: no links, no formatting.
+- **Delete with a reason…** in the menu of your own messages and in the command palette
+  asks for a reason before it deletes; `Del` still deletes at once. It has no key by
+  default (`delete_with_reason` under `[keys.timeline]` gives it one).
 
 ## Changed
 
