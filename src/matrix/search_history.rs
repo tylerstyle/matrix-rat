@@ -15,7 +15,8 @@
 //!
 //! What is fetched reaches the search index a moment later, and what has not reached it
 //! when the session ends is lost to it for good; [`Marks`] has the profile's next start
-//! index the stored events again then.
+//! index the stored events again then. Once a run of the profile has finished, a later
+//! start skips the SDK's sweep (see [`plan`]).
 
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
@@ -55,11 +56,9 @@ const BACK: Days = Days::new(BACK_DAYS);
 const BATCH: u16 = 30;
 const MAX_BATCHES: usize = 130;
 
-/// Between the rooms of our walk, as the SDK's `Foreground` sweep waits between rooms.
-#[cfg(not(test))]
+/// After a room our walk fetched for, before the next: as the SDK's `Foreground` sweep
+/// waits between rooms. A room read back from the store alone asked the server nothing.
 const ROOM_PACING: Duration = Duration::from_secs(1);
-#[cfg(test)]
-const ROOM_PACING: Duration = Duration::ZERO;
 
 /// After a run that fetched, how long the search index is given to take it all in before
 /// [`Marks`] counts it as in. On the dev server it took 7 s after a run of 9 000 events.
@@ -428,6 +427,7 @@ struct How {
 ///   index, though it is stored. Written before the first fetch, removed [`SETTLE`] after
 ///   the run. Found at a start, it has the SDK index the stored events again (by removing
 ///   `reindexed-v1`): CPU only, and what is in the index already is skipped.
+/// - `history-done`: a run of this profile went through (see [`plan`]).
 struct Marks {
     dir: Option<PathBuf>,
     /// This run wrote `history-indexing`.
@@ -437,6 +437,7 @@ struct Marks {
 /// The SDK's own (`matrix_sdk::search_index`, `REINDEX_MARKER`; matrix-sdk is pinned).
 const REINDEXED: &str = "reindexed-v1";
 const INDEXING: &str = "history-indexing";
+const DONE: &str = "history-done";
 
 impl Marks {
     fn new(dir: Option<PathBuf>) -> Self {
@@ -495,7 +496,25 @@ impl Marks {
     }
 }
 
-/// One run: wait, then the SDK's sweep and our walk, under the time limit.
+/// Whether a run starts with the SDK's sweep, and how. The first run of a profile does,
+/// paced as the design has it: the last week of every room first, a second between rooms.
+/// Once one has gone through, the sweep has nothing left to fetch: it never gets past what
+/// is stored (see [`deepen`]), and our walk reads that too, filling what the store lacks,
+/// in the same order. It would only cost a second per room and week, for nothing. Its
+/// index of the stored events is still needed when it is due (`reindexed-v1` gone, say
+/// after [`Marks::catch_up_on_leftovers`]), the one way to it in 0.20; then without the
+/// pacing, since it mostly reads the store.
+fn plan(went_through_before: bool, index_due: bool) -> Option<SearchBackfillStrategy> {
+    if !went_through_before {
+        Some(SearchBackfillStrategy::Foreground)
+    } else if index_due {
+        Some(SearchBackfillStrategy::Background)
+    } else {
+        None
+    }
+}
+
+/// One run: wait, then the SDK's sweep (see [`plan`]) and our walk, under the time limit.
 /// `ended` says how it ended when it is dropped, also when the task is cancelled or
 /// panics; it is sent as soon as the run is through, before the index settles.
 async fn run(client: Client, how: How, mut marks: Marks, mut ended: EndReport) {
@@ -516,24 +535,26 @@ async fn run(client: Client, how: How, mut marks: Marks, mut ended: EndReport) {
     // A mark of this session's last run, stopped before the index settled: this run takes
     // it over, and removes it once it has settled in turn.
     marks.indexing = marks.has(INDEXING);
+    let sweep = plan(marks.has(DONE), !marks.has(REINDEXED));
     let rooms = client.joined_rooms().len();
-    tracing::info!(rooms, "search history started");
+    tracing::info!(rooms, sweep = sweep.is_some(), "search history started");
     let _ = ended.reports.send(Report::Begun {
         run: ended.run,
         back_to: back_to(chrono::Local::now().date_naive()),
     });
     let started = crate::time::Instant::now();
     let work = async {
-        marks.fetching();
-        cache
-            .run_search_backfill(SearchBackfillStrategy::Foreground)
-            .await;
+        if let Some(strategy) = sweep {
+            marks.fetching();
+            cache.run_search_backfill(strategy).await;
+        }
         deepen(&client, cache, &mut marks).await
     };
     match rt::timeout(TIME_LIMIT, work).await {
         Ok(true) => {
             let elapsed_s = started.elapsed().as_secs();
             tracing::info!(elapsed_s, "search history done");
+            marks.put(DONE);
             ended.finished = true;
         }
         // Stopped, as at the time limit: the setting may try again.
@@ -570,16 +591,19 @@ async fn deepen(client: &Client, cache: &EventCache, marks: &mut Marks) -> bool 
     let mut rooms = client.joined_rooms();
     rooms.retain(|room| !room.is_space());
     rooms.sort_by_key(|room| std::cmp::Reverse(room.recency_stamp()));
-    for (n, room) in rooms.iter().enumerate() {
+    let mut fetched = false;
+    for room in &rooms {
         // Left during the run (as the SDK's queue checks too).
         if room.state() != RoomState::Joined {
             continue;
         }
-        if n > 0 {
+        if fetched {
             rt::sleep(ROOM_PACING).await;
         }
-        if let Walked::Panicked = walk(cache, room.room_id(), oldest, marks).await {
-            return false;
+        match walk(cache, room.room_id(), oldest, marks).await {
+            Walked::Panicked => return false,
+            Walked::Fetched => fetched = true,
+            Walked::Stored => fetched = false,
         }
     }
     true
@@ -836,6 +860,15 @@ mod tests {
         assert_eq!(rules.on(Input::Setting(true)), started(false, false));
     }
 
+    #[test]
+    fn a_later_start_leaves_the_sdk_sweep_out_unless_the_index_is_due() {
+        let shown = |plan: Option<SearchBackfillStrategy>| format!("{plan:?}");
+        assert_eq!(shown(plan(false, false)), "Some(Foreground)");
+        assert_eq!(shown(plan(false, true)), "Some(Foreground)");
+        assert_eq!(shown(plan(true, true)), "Some(Background)");
+        assert_eq!(shown(plan(true, false)), "None");
+    }
+
     /// Against the fake homeserver, with a client built as the app builds it.
     mod fake_server {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -846,7 +879,7 @@ mod tests {
         use serde_json::{Value, json};
         use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
-        use super::super::{HistoryRun, INDEXING, REINDEXED, Report, SearchHistory};
+        use super::super::{DONE, HistoryRun, INDEXING, REINDEXED, Report, SearchHistory};
         use crate::matrix::spaces::fake::{self, Reply};
         use crate::matrix::{MatrixEvent, SecretStoreMode, WorkerOptions};
 
@@ -1195,7 +1228,8 @@ mod tests {
         /// A session that ends before the index has settled leaves `history-indexing`, and
         /// the next start has the SDK index the stored events again: what the index lost
         /// is found, though the server sends it no more. With no mark left, a later start
-        /// indexes nothing again (the SDK's `reindexed-v1` contract, which this pins). The index losing a room's part is done by hand: it
+        /// reads the store alone and indexes nothing again (the SDK's `reindexed-v1`
+        /// contract, which this pins). The index losing a room's part is done by hand: it
         /// is what a quit does to what is still queued for it.
         #[tokio::test(flavor = "multi_thread")]
         async fn what_the_index_missed_is_indexed_at_the_next_start() {
@@ -1243,7 +1277,7 @@ mod tests {
             let (mut history, mut shown) = session(&client, Duration::from_secs(3600));
             until(&mut history, &mut shown, done).await;
             until_found(&client, WORD).await;
-            for mark in [INDEXING, REINDEXED] {
+            for mark in [INDEXING, DONE, REINDEXED] {
                 assert!(dir.join(mark).exists(), "{mark}");
             }
             end(history, client).await;
@@ -2299,16 +2333,34 @@ mod tests {
             let indexed = until_indexed(&handle, &mut events, &mut generation, stamp).await;
             let disk2 = size(&root);
             let reached2 = reached(&handle, &mut events, &mut generation, stamp).await;
+            // The index has settled: its mark goes (`SETTLE` after the run).
+            let mark = paths.search_dir().join(super::super::INDEXING);
+            let settling = Instant::now();
+            while mark.exists() && settling.elapsed() < Duration::from_secs(60) {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            assert!(!mark.exists(), "the mark stayed");
             shut_down(handle, events).await;
 
-            // 3. A later start on the same profile: mostly from the disk.
+            // 3. A later start on the same profile: the store alone, without the SDK's
+            //    sweep.
             let before = relay.tally();
-            let (handle, mut events) = spawn_app(paths, true);
+            let (handle, mut events) = spawn_app(paths.clone(), true);
             let run3 = until_done(&mut events).await;
             let step3 = relay.tally().since(&before);
             tokio::time::sleep(Duration::from_secs(2)).await;
             let disk3 = size(&root);
             let reached3 = reached(&handle, &mut events, &mut generation, stamp).await;
+            shut_down(handle, events).await;
+
+            // 4. A start after a session that ended before the index settled: the SDK
+            //    indexes the stored events again, then its sweep without pacing.
+            std::fs::write(&mark, b"").unwrap();
+            let before = relay.tally();
+            let (handle, mut events) = spawn_app(paths, true);
+            let run4 = until_done(&mut events).await;
+            let step4 = relay.tally().since(&before);
+            let reached4 = reached(&handle, &mut events, &mut generation, stamp).await;
             shut_down(handle, events).await;
             let lost = relay.counts.lost.load(Ordering::Relaxed);
             drop(relay);
@@ -2335,6 +2387,7 @@ mod tests {
                  reached {reached2:?}, \
                  {per_event:.0} B on disk and {down_per_event:.0} B down per event fetched; \
                  step 3 (restart) {} in {:.0} s, disk +{} KB, reached {reached3:?}; \
+                 step 4 (restart, index redone) {} in {:.0} s, reached {reached4:?}; \
                  lost connections {lost}",
                 PLANS.len(),
                 step1.line(),
@@ -2346,6 +2399,8 @@ mod tests {
                 step3.line(),
                 run3.as_secs_f64(),
                 disk3.saturating_sub(disk2) / 1024,
+                step4.line(),
+                run4.as_secs_f64(),
             );
             println!(
                 "search_history_cost: 100k events in 100 rooms: about {requests_100k:.0} \
@@ -2369,6 +2424,8 @@ mod tests {
             // Our walk reaches what the SDK's sweep alone does not.
             assert!(reached2[0] >= 3000, "{reached2:?}");
             assert!(step3.messages <= rooms, "{step3:?}");
+            assert!(step4.messages <= rooms, "{step4:?}");
+            assert_eq!(reached4, reached2);
             assert_eq!(lost, 0);
         }
     }
