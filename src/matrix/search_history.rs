@@ -256,8 +256,11 @@ pub(super) struct SearchHistory {
     shown: Option<HistoryRun>,
     /// The search index's folder, for [`Marks`]; `None`: no marks.
     index_dir: Option<PathBuf>,
-    /// A run of this session has looked for what an earlier session left unindexed.
+    /// A run of this session has looked for what an earlier session left unindexed: it
+    /// has begun (a run stopped while it waits has not looked).
     looked_for_leftovers: bool,
+    /// See [`START_DELAY`].
+    start_delay: Duration,
     /// See [`SETTLE`].
     settle: Duration,
 }
@@ -284,6 +287,7 @@ impl SearchHistory {
             shown: None,
             index_dir,
             looked_for_leftovers: false,
+            start_delay: START_DELAY,
             settle: SETTLE,
         };
         // The browser keeps no index and has no queue: nothing to fetch for.
@@ -322,6 +326,8 @@ impl SearchHistory {
     pub(super) fn on_report(&mut self, report: Report) {
         match report {
             Report::Begun { run, back_to } if run == self.run && self.rules.running => {
+                // It looked before it said so.
+                self.looked_for_leftovers = true;
                 self.back_to = Some(back_to);
                 self.show();
             }
@@ -359,8 +365,12 @@ impl SearchHistory {
                     finished: false,
                 };
                 let how = How {
-                    delay,
-                    leftovers: !std::mem::replace(&mut self.looked_for_leftovers, true),
+                    delay: if delay {
+                        self.start_delay
+                    } else {
+                        Duration::ZERO
+                    },
+                    leftovers: !self.looked_for_leftovers,
                     settle: self.settle,
                 };
                 let marks = Marks::new(self.index_dir.clone());
@@ -408,10 +418,11 @@ impl Drop for SearchHistory {
     }
 }
 
-/// How a run goes: `delay`: [`START_DELAY`] first; `leftovers`: look for what an earlier
-/// session left unindexed (the session's first run does); `settle`: see [`SETTLE`].
+/// How a run goes: `delay`: how long it waits first ([`START_DELAY`] or none);
+/// `leftovers`: look for what an earlier session left unindexed (until a run of the
+/// session has begun); `settle`: see [`SETTLE`].
 struct How {
-    delay: bool,
+    delay: Duration,
     leftovers: bool,
     settle: Duration,
 }
@@ -518,8 +529,8 @@ fn plan(went_through_before: bool, index_due: bool) -> Option<SearchBackfillStra
 /// `ended` says how it ended when it is dropped, also when the task is cancelled or
 /// panics; it is sent as soon as the run is through, before the index settles.
 async fn run(client: Client, how: How, mut marks: Marks, mut ended: EndReport) {
-    if how.delay {
-        rt::sleep(START_DELAY).await;
+    if !how.delay.is_zero() {
+        rt::sleep(how.delay).await;
     }
     let Some(cache) = super::cache::of(&client) else {
         return;
@@ -538,6 +549,7 @@ async fn run(client: Client, how: How, mut marks: Marks, mut ended: EndReport) {
     let sweep = plan(marks.has(DONE), !marks.has(REINDEXED));
     let rooms = client.joined_rooms().len();
     tracing::info!(rooms, sweep = sweep.is_some(), "search history started");
+    // After the look for leftovers: the session counts it as done from here.
     let _ = ended.reports.send(Report::Begun {
         run: ended.run,
         back_to: back_to(chrono::Local::now().date_naive()),
@@ -1305,6 +1317,47 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(1)).await;
             assert_eq!(found(&client, WORD).await, 0, "indexed again with no mark");
             end(history, client).await;
+            let _ = std::fs::remove_dir_all(root);
+        }
+
+        /// The session's first run looks for what an earlier session left unindexed once
+        /// it has waited its start delay. Stopped while it waits (the setting off and on
+        /// again in those seconds), it has not looked, and the next run of the session
+        /// does: otherwise that run would take the earlier session's mark over, skip the
+        /// index of the stored events, and remove the mark, and what the index missed
+        /// would stay missed. (The SDK's index of a client without stores is not in
+        /// `dir`, so `reindexed-v1` there goes only by the look for leftovers.)
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_first_run_stopped_while_it_waits_leaves_the_leftovers_to_the_next() {
+            let server = fake::Server::answering(
+                rooms(vec![message("$own", fake::ME)], vec![]),
+                Box::new(at_the_start),
+            )
+            .await;
+            let client = signed_in(&server, app_options(true)).await;
+            let (root, paths) = super::server::profile("history-leftovers");
+            let dir = paths.search_dir();
+            std::fs::create_dir_all(&dir).unwrap();
+            for mark in [INDEXING, DONE, REINDEXED] {
+                std::fs::write(dir.join(mark), b"").unwrap();
+            }
+            let (events, mut shown) = unbounded_channel();
+            let mut history = SearchHistory::new(client.clone(), events, true, Some(dir.clone()));
+            history.start_delay = Duration::from_secs(3600);
+            history.settle = Duration::from_secs(3600);
+            history.caught_up();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert!(dir.join(REINDEXED).exists(), "looked while it waited");
+            history.set_enabled(false);
+            history.set_enabled(true);
+            until(&mut history, &mut shown, |run| {
+                matches!(run, HistoryRun::Done { .. })
+            })
+            .await;
+            assert!(
+                !dir.join(REINDEXED).exists(),
+                "the leftovers were not looked for"
+            );
             let _ = std::fs::remove_dir_all(root);
         }
 
