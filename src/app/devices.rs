@@ -379,9 +379,13 @@ impl App {
             (KeysStage::Status, Click::Export) => {
                 let download_dir = download_dir.unwrap_or_default();
                 let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-                let path = default_export_path(&download_dir, &date, |path| {
-                    std::fs::symlink_metadata(path).is_ok()
-                });
+                // The browser has no files to look at: the worker answers there that
+                // key files are the terminal's.
+                #[cfg(not(target_family = "wasm"))]
+                let taken = |path: &std::path::Path| std::fs::symlink_metadata(path).is_ok();
+                #[cfg(target_family = "wasm")]
+                let taken = |_: &std::path::Path| false;
+                let path = default_export_path(&download_dir, &date, taken);
                 popup.stage = KeysStage::Export(ExportForm::new(&path));
             }
             (KeysStage::Status, Click::Import) => {
@@ -417,6 +421,8 @@ impl App {
             form.focus = 0;
             return;
         };
+        // In the browser the worker answers that key files are the terminal's.
+        #[cfg(not(target_family = "wasm"))]
         if path.is_dir() {
             form.error = Some("That is a folder. Add the name of the file to write.".to_owned());
             form.focus = 0;
@@ -435,6 +441,7 @@ impl App {
             return;
         }
         // The worker refuses too; this saves typing the passphrase for nothing.
+        #[cfg(not(target_family = "wasm"))]
         if std::fs::symlink_metadata(&path).is_ok() {
             form.error = Some(
                 "A file with that name exists already. Nothing is overwritten: choose \
@@ -473,6 +480,8 @@ impl App {
             form.focus = 0;
             return;
         };
+        // In the browser the worker answers that key files are the terminal's.
+        #[cfg(not(target_family = "wasm"))]
         match std::fs::metadata(&path) {
             Ok(meta) if meta.is_file() => {}
             Ok(meta) => {
