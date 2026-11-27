@@ -40,9 +40,9 @@ nucleo-matcher = "0.3.1"
 mime = "0.3"
 # Wipes passwords and passphrases from memory when they are dropped; the version the SDK uses.
 zeroize = "1"
-comrak = { version = "1.0.0", default-features = false }
+comrak = { version = "1.2.0", default-features = false }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
-toml_edit = "0.25.19"
+toml_edit = "0.25.21"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 syntect = { version = "5.3.0", default-features = false, features = ["default-syntaxes", "parsing", "regex-fancy"] }
 
@@ -75,7 +75,7 @@ notify = "8"
 ratatui-image = { version = "11.1.0", default-features = false, features = ["crossterm"] }
 notify-rust = { version = "4.19.0", default-features = false, features = ["z"] }
 # Same version & features notify-rust already pulls in, to watch XDG portal appearance.
-zbus = { version = "6.3.0", default-features = false, features = ["default-rt", "proxy"] }
+zbus = { version = "6.5.0", default-features = false, features = ["default-rt", "proxy"] }
 
 # The browser (`wasm32-unknown-unknown`).
 [target.'cfg(target_family = "wasm")'.dependencies]
