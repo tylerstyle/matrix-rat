@@ -14,6 +14,7 @@ use tokio::sync::watch;
 use super::MatrixEvent;
 use super::left::LeftRooms;
 use super::safety::{IgnoredSet, is_ignored_in};
+use crate::rt;
 use crate::text::{sanitize_line, truncate};
 use crate::time::{SystemTime, UNIX_EPOCH};
 
@@ -225,7 +226,7 @@ pub struct OwnMembers {
     tried: std::collections::HashSet<matrix_sdk::ruma::OwnedRoomId>,
     /// Rooms where our membership is known; nothing to do there.
     fine: std::collections::HashSet<matrix_sdk::ruma::OwnedRoomId>,
-    tasks: tokio::task::JoinSet<()>,
+    tasks: rt::JoinSet<()>,
 }
 
 impl OwnMembers {

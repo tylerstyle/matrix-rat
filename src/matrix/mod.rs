@@ -92,6 +92,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use crate::format::Outgoing;
 use crate::model::{ItemRef, Message, PinnedMessage, RoomPower};
 use crate::paths::Paths;
+use crate::rt;
 
 /// Rooms shown before the user scrolls for more. Paging arrives with the timeline work.
 const ROOM_PAGE: usize = 10_000;
@@ -1418,7 +1419,7 @@ pub fn spawn_with(
 ) -> (MatrixHandle, UnboundedReceiver<MatrixEvent>) {
     let (commands, command_rx) = unbounded_channel();
     let (events, event_rx) = unbounded_channel();
-    tokio::spawn(async move {
+    rt::spawn(async move {
         Worker {
             paths,
             secret_store,
@@ -1578,7 +1579,7 @@ impl Worker {
                 let target = active.target.clone();
                 let mut reason = None;
                 // Tell the server, but log out here even if it cannot be reached.
-                match tokio::time::timeout(Duration::from_secs(10), active.client.logout()).await {
+                match rt::timeout(Duration::from_secs(10), active.client.logout()).await {
                     Ok(Ok(())) => {}
                     outcome => {
                         let why = match &outcome {
@@ -1603,7 +1604,7 @@ impl Worker {
                 self.emit(MatrixEvent::Error(format!("{err:#}")));
                 // Keep the session on disk: this may be a temporary problem.
                 // Try again shortly, unless told to stop first.
-                let retry = tokio::time::sleep(Duration::from_secs(5));
+                let retry = rt::sleep(Duration::from_secs(5));
                 tokio::pin!(retry);
                 loop {
                     tokio::select! {
@@ -1836,7 +1837,7 @@ impl Worker {
         let mut session_changes = client.subscribe_to_session_changes();
         // In a set, which aborts it when dropped: it holds the client, and a session
         // that fails to start (an early return below) must not leave it running.
-        let mut token_saver = tokio::task::JoinSet::new();
+        let mut token_saver = rt::JoinSet::new();
         {
             let mut changes = client.subscribe_to_session_changes();
             let (paths, client, passphrase) =
@@ -2089,7 +2090,7 @@ impl Worker {
         ];
         // What a command started and left running here (a recovery, a report): it
         // holds the client, so it ends with the session.
-        let mut session_tasks = tokio::task::JoinSet::new();
+        let mut session_tasks = rt::JoinSet::new();
         let end = loop {
             // A room's timeline left unused for long goes (see `rooms::IDLE_TIMELINE`).
             let timelines_idle = timelines.idle_due();
@@ -2309,7 +2310,7 @@ impl Worker {
         }
         timelines.stop();
         // Do not hang on exit if the server is unreachable.
-        let _ = tokio::time::timeout(Duration::from_secs(2), sync.stop()).await;
+        let _ = rt::timeout(Duration::from_secs(2), sync.stop()).await;
         token_saver.abort_all();
         // Waited for: a save that is running must not write the session file again
         // after the session was forgotten.
@@ -2422,7 +2423,7 @@ struct Previews {
     >,
     /// Rooms the SDK has been asked to keep a latest message for.
     listening: std::collections::HashSet<matrix_sdk::ruma::OwnedRoomId>,
-    tasks: tokio::task::JoinSet<()>,
+    tasks: rt::JoinSet<()>,
 }
 
 impl Previews {

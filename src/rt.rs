@@ -13,13 +13,14 @@
 //! (`tokio::task::spawn_blocking`), as do the programs, sockets and signals of the
 //! terminal's edges (audio, `textcmd`, `catchup`, `portal`, `watch`, `agent`).
 
-use std::future::Future;
+use std::future::{Future, IntoFuture};
 
 use matrix_sdk::SendOutsideWasm;
 
 use crate::time::Instant;
 
-pub use tokio::task::{JoinHandle, JoinSet};
+pub use tokio::task::{AbortHandle, JoinHandle, JoinSet};
+pub use tokio::time::error::Elapsed;
 pub use tokio::time::{MissedTickBehavior, interval, sleep, timeout};
 
 /// Runs `future` as a task of its own, at once.
@@ -35,4 +36,12 @@ where
 /// Ends at `deadline` (at once if it has passed).
 pub fn sleep_until(deadline: Instant) -> tokio::time::Sleep {
     tokio::time::sleep_until(deadline.into())
+}
+
+/// `future`'s output, or `Elapsed` if it is not ready by `deadline`.
+pub fn timeout_at<F: IntoFuture>(
+    deadline: Instant,
+    future: F,
+) -> tokio::time::Timeout<F::IntoFuture> {
+    tokio::time::timeout_at(deadline.into(), future)
 }

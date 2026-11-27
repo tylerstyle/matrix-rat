@@ -11,6 +11,8 @@ use zbus::{
     Connection, Error as ZbusError, ObjectPath, OwnedObjectPath, OwnedVariant, Variant, fdo,
 };
 
+use crate::rt;
+
 const SERVICE_DEST: &str = "org.freedesktop.secrets";
 const SERVICE_PATH: &str = "/org/freedesktop/secrets";
 const SERVICE_IFACE: &str = "org.freedesktop.Secret.Service";
@@ -462,7 +464,7 @@ impl SecretServiceKeyring {
                     .map_err(|err| KeyringError::Unavailable(err.to_string())),
             }
         };
-        tokio::time::timeout(self.timeout, fut).await.map_err(|_| {
+        rt::timeout(self.timeout, fut).await.map_err(|_| {
             KeyringError::Unavailable("timed out connecting to session D-Bus".into())
         })?
     }
@@ -474,7 +476,7 @@ impl SecretServiceKeyring {
     {
         let conn = self.connect().await?;
         let timeout = self.timeout;
-        tokio::time::timeout(timeout, async move {
+        rt::timeout(timeout, async move {
             let service = make_proxy(&conn, SERVICE_PATH, SERVICE_IFACE).await?;
             let reply = service
                 .call_method("OpenSession", &("plain", Variant::from("")))

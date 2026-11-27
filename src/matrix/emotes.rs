@@ -17,6 +17,7 @@ use tokio::sync::{Notify, mpsc::UnboundedSender};
 
 use super::MatrixEvent;
 use super::left::LeftRooms;
+use crate::rt;
 use crate::text::{is_blank, sanitize_line, truncate};
 
 /// Pack rooms named in the account data that are read; the rest are ignored.
@@ -388,7 +389,7 @@ fn lock(state: &Mutex<CacheState>) -> MutexGuard<'_, CacheState> {
 pub(super) struct EmoteManager {
     state: Arc<Mutex<CacheState>>,
     poke: Arc<Notify>,
-    task: Option<tokio::task::JoinHandle<()>>,
+    task: Option<rt::JoinHandle<()>>,
 }
 
 impl EmoteManager {
@@ -397,7 +398,7 @@ impl EmoteManager {
         let poke = Arc::new(Notify::new());
         let task_state = state.clone();
         let task_poke = poke.clone();
-        let task = tokio::spawn(async move {
+        let task = rt::spawn(async move {
             loop {
                 task_poke.notified().await;
                 let (requested, active_room) = {
@@ -578,7 +579,7 @@ async fn load_room_packs(
                 StateEventType::from(ty),
                 key.clone(),
             );
-            let response = tokio::time::timeout(STATE_FETCH_TIMEOUT, client.send(request)).await;
+            let response = rt::timeout(STATE_FETCH_TIMEOUT, client.send(request)).await;
             if let Ok(Ok(response)) = response
                 && let Ok(content) = serde_json::from_str::<Value>(response.event_or_content.get())
             {

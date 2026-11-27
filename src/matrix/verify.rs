@@ -43,9 +43,9 @@ use matrix_sdk::ruma::{
 };
 use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
-use tokio::task::{JoinHandle, JoinSet};
 
 use super::{MatrixEvent, RecoveryStatus, Secret, recovery_status};
+use crate::rt::{self, JoinHandle, JoinSet};
 use crate::text::sanitize_line;
 use crate::time::Instant;
 
@@ -843,7 +843,7 @@ impl Verifier {
             last: None,
         };
         let client = self.client.clone();
-        let task = tokio::spawn(flow.run(client, request, answer_rx));
+        let task = rt::spawn(flow.run(client, request, answer_rx));
         self.running = Some(Running {
             flow: self.next_flow,
             answers,
@@ -866,7 +866,7 @@ impl Verifier {
             if !running.finished.load(Ordering::SeqCst) {
                 let _ = running.answers.send(Answer::Cancel);
                 let mut task = running.task;
-                if tokio::time::timeout(Duration::from_secs(2), &mut task)
+                if rt::timeout(Duration::from_secs(2), &mut task)
                     .await
                     .is_err()
                 {
@@ -958,7 +958,7 @@ async fn refresh_own_keys(client: &Client) {
 /// one a moment after the verification ends. Look until it is there.
 async fn await_own_signature(client: &Client, refresh: &Notify) {
     for delay in [0, 1, 2, 4, 8] {
-        tokio::time::sleep(Duration::from_secs(delay)).await;
+        rt::sleep(Duration::from_secs(delay)).await;
         if matches!(
             client.encryption().get_own_device().await,
             Ok(Some(device)) if device.is_cross_signed_by_owner()
@@ -1390,7 +1390,7 @@ async fn request_user(client: &Client, user_id: &UserId) -> Result<VerificationR
         .map_err(|err| format!("Could not read the encryption store: {err}"))?
     {
         Some(identity) => identity,
-        None => tokio::time::timeout(
+        None => rt::timeout(
             Duration::from_secs(15),
             encryption.request_user_identity(user_id),
         )

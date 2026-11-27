@@ -27,11 +27,11 @@ use matrix_sdk::ruma::{
 };
 use matrix_sdk::{Client, NotificationSettingsError, Room, RoomMemberships, RoomState};
 use tokio::sync::{Notify, mpsc::UnboundedSender, watch};
-use tokio::task::JoinHandle;
 
 use super::MatrixEvent;
 use super::spaces::{SpaceDetails, SpaceEdit};
 use crate::model::RoomPower;
+use crate::rt::{self, JoinHandle};
 use crate::text::{sanitize, sanitize_line, truncate};
 use crate::time::Instant;
 
@@ -826,7 +826,7 @@ pub struct Manager {
     relist: Arc<Notify>,
     /// The commands still running (see `handle`). They hold the session's client: given
     /// up with the session (see `stop`).
-    tasks: tokio::task::JoinSet<()>,
+    tasks: rt::JoinSet<()>,
 }
 
 /// Wakes the open room info watcher when the watched room changes.
@@ -894,7 +894,7 @@ impl Manager {
             left,
             notify,
             relist,
-            tasks: tokio::task::JoinSet::new(),
+            tasks: rt::JoinSet::new(),
         }
     }
 
@@ -1039,7 +1039,7 @@ impl Manager {
                 // store read still mark this watcher's receiver dirty.
                 let refresh = self.refresh.watch(&room_id);
                 let own_room_names = self.own_room_names.clone();
-                self.watcher = Some(tokio::spawn(watch(
+                self.watcher = Some(rt::spawn(watch(
                     client,
                     room_id,
                     self.events.clone(),
@@ -1324,7 +1324,7 @@ impl Manager {
                     move |client, room| async move {
                         let (mime, bytes) =
                             super::people::prepare_avatar_upload(&client, &path).await?;
-                        tokio::time::timeout(
+                        rt::timeout(
                             Duration::from_secs(60),
                             room.upload_avatar(&mime, bytes, None),
                         )
@@ -2277,7 +2277,7 @@ async fn fetch_member_events(
 ) -> Result<ServerMembers, String> {
     let mut request = get_member_events::v3::Request::new(room.room_id().to_owned());
     request.membership = membership;
-    let response = tokio::time::timeout(MEMBERS_TIMEOUT, client.send(request))
+    let response = rt::timeout(MEMBERS_TIMEOUT, client.send(request))
         .await
         .map_err(|_| "The member list took too long to arrive.".to_owned())?
         .map_err(|err| failed("load the member list", &err.into()))?;
@@ -2506,7 +2506,7 @@ fn parse_room_aliases(
 
 async fn fetch_local_aliases(client: &Client, room: &Room) -> Result<Vec<String>, String> {
     let req = AliasesRequest::new(room.room_id().to_owned());
-    let resp = tokio::time::timeout(Duration::from_secs(5), client.send(req))
+    let resp = rt::timeout(Duration::from_secs(5), client.send(req))
         .await
         .map_err(|_| "Asking for local room addresses took too long.".to_owned())?
         .map_err(|err| failed("list local addresses", &err.into()))?;
@@ -2855,7 +2855,7 @@ async fn watch(
             }
         }
         // Until the room changes, a moderation event or knock arrives, or a postponed fetch is due.
-        let deadline = wait.map(|time| tokio::time::Instant::now() + time);
+        let deadline = wait.map(|time| Instant::now() + time);
         let burst = tokio::select! {
             change = changes.next() => {
                 if change.is_none() {
@@ -2888,14 +2888,14 @@ async fn watch(
             }
             () = async {
                 match deadline {
-                    Some(at) => tokio::time::sleep_until(at).await,
+                    Some(at) => rt::sleep_until(at).await,
                     None => std::future::pending().await,
                 }
             } => false,
         };
         if burst {
             // Changes come in bursts (a sync brings several); one look afterwards is enough.
-            tokio::time::sleep(Duration::from_millis(300)).await;
+            rt::sleep(Duration::from_millis(300)).await;
             while futures::FutureExt::now_or_never(changes.next())
                 .flatten()
                 .is_some()

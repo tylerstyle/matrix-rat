@@ -29,6 +29,7 @@ use super::manage;
 use super::safety::IgnoredSet;
 use super::search;
 use crate::model::PinnedMessage;
+use crate::rt;
 use crate::text::{sanitize_line, truncate};
 
 /// Upper bound on cached remote-fetched pinned events so repeated opens avoid `/event` requests.
@@ -679,7 +680,7 @@ async fn forward_media_reupload(
         source: media.source,
         format: MediaFormat::File,
     };
-    let data = tokio::time::timeout(
+    let data = rt::timeout(
         FORWARD_TIMEOUT,
         client.media().get_media_content(&request, false),
     )
@@ -693,7 +694,7 @@ async fn forward_media_reupload(
                 source: thumb_source,
                 format: MediaFormat::File,
             };
-            if let Ok(Ok(thumb_bytes)) = tokio::time::timeout(
+            if let Ok(Ok(thumb_bytes)) = rt::timeout(
                 FORWARD_TIMEOUT,
                 client.media().get_media_content(&thumb_req, false),
             )
@@ -736,7 +737,7 @@ async fn forward_media_reupload(
         .info(media.info)
         .thumbnail(thumbnail)
         .caption(caption);
-    tokio::time::timeout(
+    rt::timeout(
         FORWARD_TIMEOUT,
         to_room.send_attachment(&media.filename, &content_type, data, config),
     )

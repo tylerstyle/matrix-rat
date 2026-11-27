@@ -24,6 +24,7 @@ use super::convert::shown_name;
 use super::safety::IgnoredSet;
 use super::{moderation, search};
 use crate::model::{ItemRef, Message, ThreadInfo, ThreadSummary};
+use crate::rt;
 use crate::text::{first_line, sanitize_line, truncate};
 
 /// Replies in threads are shown in their thread only, so they must not count as
@@ -359,7 +360,7 @@ pub async fn list(
         from,
         limit: Some(UInt::from(LIST_PAGE)),
     };
-    let roots = match tokio::time::timeout(LIST_TIMEOUT, room.list_threads(options)).await {
+    let roots = match rt::timeout(LIST_TIMEOUT, room.list_threads(options)).await {
         Ok(Ok(roots)) => roots,
         Ok(Err(err)) => {
             let status = err

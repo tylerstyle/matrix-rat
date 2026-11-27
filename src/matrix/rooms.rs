@@ -23,7 +23,6 @@ use matrix_sdk_ui::timeline::{
 };
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
 
 use super::paging::{self, PageError, Paging};
 use super::safety::{IgnoredSet, is_ignored_in};
@@ -31,6 +30,7 @@ use super::{DetachedTimeline, MatrixCmd, MatrixEvent, drafts, threads};
 use crate::format::Outgoing;
 use crate::logsafe;
 use crate::model::ItemRef;
+use crate::rt::{self, JoinHandle};
 use crate::time::Instant;
 
 /// Recently used timelines stay alive so going back to a room is instant and keeps the
@@ -131,7 +131,7 @@ pub struct Timelines {
     media: super::media::Media,
     previews: super::previews::Previews,
     /// Running requests for member lists (for sender names).
-    member_fetches: tokio::task::JoinSet<()>,
+    member_fetches: rt::JoinSet<()>,
     /// Set while a command for a thread is handled: the event the thread starts at.
     /// `timeline` then answers with that thread's timeline instead of the room's.
     thread: Option<String>,
@@ -154,11 +154,11 @@ pub struct Timelines {
     /// What commands left running that changes something (a send, a reaction, a read
     /// receipt). It holds the session's client and timelines, so it ends with the
     /// session (see `stop`); at a shutdown it is given a moment first.
-    actions: tokio::task::JoinSet<()>,
+    actions: rt::JoinSet<()>,
     /// What commands left running that only looks something up or says something
     /// passing (pinned and saved messages, a source, a retried decryption, typing).
     /// Ends with the session too, and is not waited for.
-    lookups: tokio::task::JoinSet<()>,
+    lookups: rt::JoinSet<()>,
     /// Rooms left in this session (see [`super::left`]).
     left: super::left::LeftRooms,
 }
@@ -176,7 +176,7 @@ impl Timelines {
         Self {
             media: super::media::Media::new(client.clone(), events.clone()),
             previews: super::previews::Previews::new(client.clone(), events.clone()),
-            member_fetches: tokio::task::JoinSet::new(),
+            member_fetches: rt::JoinSet::new(),
             uploads: super::upload::Uploads::new(client.clone(), events.clone()),
             client,
             cache: VecDeque::new(),
@@ -200,8 +200,8 @@ impl Timelines {
             pinned_cache: Arc::default(),
             saved_limit: Arc::new(tokio::sync::Semaphore::new(super::saved::CONCURRENCY)),
             thread_lister: None,
-            actions: tokio::task::JoinSet::new(),
-            lookups: tokio::task::JoinSet::new(),
+            actions: rt::JoinSet::new(),
+            lookups: rt::JoinSet::new(),
             left,
             events,
         }
@@ -249,11 +249,11 @@ impl Timelines {
     /// to end: within `wait` in all, and those at most [`ACTIONS_WAIT`]. Lookups are
     /// not waited for.
     pub async fn finish_uploads(&mut self, wait: std::time::Duration) {
-        let deadline = tokio::time::Instant::now() + wait;
+        let deadline = Instant::now() + wait;
         self.uploads.finish(wait).await;
-        let deadline = deadline.min(tokio::time::Instant::now() + ACTIONS_WAIT);
+        let deadline = deadline.min(Instant::now() + ACTIONS_WAIT);
         let actions = async { while self.actions.join_next().await.is_some() {} };
-        let _ = tokio::time::timeout_at(deadline, actions).await;
+        let _ = rt::timeout_at(deadline, actions).await;
     }
 
     /// At the end of the session: closes the timelines, and stops a request for the
@@ -430,7 +430,7 @@ impl Timelines {
         let next = self.next_idle();
         async move {
             match next {
-                Some(at) => tokio::time::sleep_until(at.into()).await,
+                Some(at) => rt::sleep_until(at).await,
                 None => std::future::pending().await,
             }
         }
@@ -676,7 +676,7 @@ impl Timelines {
                 });
                 self.tell_draft_for(&room, &room_id, thread_root.as_deref())
                     .await;
-                self.forwarder = Some(tokio::spawn(forward(
+                self.forwarder = Some(rt::spawn(forward(
                     room,
                     timeline,
                     room_id,
@@ -696,7 +696,7 @@ impl Timelines {
         self.pending_open_event_gen = Some(generation);
         let open_tx = self.open_tx.clone();
         let ignored = self.ignored.clone();
-        self.event_opener = Some(tokio::spawn(async move {
+        self.event_opener = Some(rt::spawn(async move {
             // Check the target event before opening a `TimelineFocus::Event` cache so an
             // ignored, MSC4406-blocked, or missing event fails cleanly without leaving a
             // broken `event_focused` entry behind in the SDK's `EventCache`.
@@ -862,7 +862,7 @@ impl Timelines {
                 self.spawn_members_if_needed(&room, &timeline);
                 self.tell_draft_for(&room, &room_id, thread.as_deref())
                     .await;
-                self.forwarder = Some(tokio::spawn(forward(
+                self.forwarder = Some(rt::spawn(forward(
                     room,
                     timeline,
                     room_id,
@@ -935,7 +935,7 @@ impl Timelines {
                     room_id: room_id.clone(),
                     generation,
                 });
-                self.forwarder = Some(tokio::spawn(forward(
+                self.forwarder = Some(rt::spawn(forward(
                     room,
                     timeline.clone(),
                     room_id,
@@ -981,7 +981,7 @@ impl Timelines {
                     room_id: room_id.clone(),
                     generation,
                 });
-                self.forwarder = Some(tokio::spawn(forward(
+                self.forwarder = Some(rt::spawn(forward(
                     room,
                     timeline,
                     room_id,
@@ -1050,7 +1050,7 @@ impl Timelines {
                             generation,
                             kind: StreamKind::Live,
                         });
-                        self.forwarder = Some(tokio::spawn(forward(
+                        self.forwarder = Some(rt::spawn(forward(
                             room,
                             timeline.clone(),
                             room_id,
@@ -1763,7 +1763,7 @@ impl Timelines {
         };
         let read = self.read_marks.clone();
         let ignored = self.ignored.borrow().clone();
-        self.thread_lister = Some(tokio::spawn(async move {
+        self.thread_lister = Some(rt::spawn(async move {
             let event = match threads::list(&room, from, mine, &read, &ignored).await {
                 Some((threads, next)) => MatrixEvent::Threads(threads::ThreadPage {
                     room_id,
@@ -1908,7 +1908,7 @@ async fn decrypt_again(timeline: &Timeline, event_id: &str) -> Result<super::Ret
     timeline.retry_decryption([session_id]).await;
     // The answer shows in the timeline; it takes a moment.
     for _ in 0..15 {
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        rt::sleep(std::time::Duration::from_millis(200)).await;
         match timeline.item_by_event_id(&event_id).await {
             Some(now) if now.content().as_unable_to_decrypt().is_some() => {}
             Some(_) => return Ok(Retried::Decrypted),
@@ -2244,7 +2244,7 @@ async fn fallback_latest_event_id(room: &Room) -> Option<matrix_sdk::ruma::Owned
 struct UnreadFlags {
     queue: UnboundedSender<(Room, bool)>,
     /// The task that sends them; stopped with the session.
-    task: tokio::task::AbortHandle,
+    task: rt::AbortHandle,
 }
 
 impl UnreadFlags {
@@ -2255,7 +2255,7 @@ impl UnreadFlags {
     fn start(events: UnboundedSender<MatrixEvent>) -> Self {
         use matrix_sdk::ruma::events::marked_unread::MarkedUnreadEventContent;
         let (queue, mut wanted) = tokio::sync::mpsc::unbounded_channel::<(Room, bool)>();
-        let task = tokio::spawn(async move {
+        let task = rt::spawn(async move {
             let mut sent: std::collections::HashMap<
                 matrix_sdk::ruma::OwnedRoomId,
                 (bool, crate::time::Instant),
@@ -2627,7 +2627,7 @@ async fn forward(
     // original is fetched. Ask once per reply. The requests end with this forwarder,
     // when the room is closed or the session ends.
     let mut asked: HashSet<OwnedEventId> = HashSet::new();
-    let mut reply_fetches = tokio::task::JoinSet::new();
+    let mut reply_fetches = rt::JoinSet::new();
     let mut fetch_replies = |items: &Vector<Arc<TimelineItem>>| {
         while reply_fetches.try_join_next().is_some() {}
         for event in items.iter().filter_map(|item| item.as_event()) {
@@ -2689,7 +2689,7 @@ async fn forward(
     }
     let pin_stream = room.pinned_event_ids_stream();
     pin_mut!(pin_stream);
-    let mut clear_paginators = tokio::task::JoinSet::new();
+    let mut clear_paginators = rt::JoinSet::new();
     loop {
         tokio::select! {
             diffs = changes.next() => {

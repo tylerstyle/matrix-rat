@@ -9,9 +9,9 @@ use matrix_sdk::ruma::events::ignored_user_list::{IgnoredUser, IgnoredUserListEv
 use matrix_sdk::ruma::{EventId, MxcUri, OwnedUserId, RoomId, UserId};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
 
 use super::{MatrixEvent, UserMatch};
+use crate::rt::{self, JoinHandle};
 use crate::text::{is_blank, sanitize_line};
 use crate::time::Instant;
 
@@ -77,7 +77,7 @@ impl IgnoreTracker {
         let (tx, rx) = watch::channel(Arc::new(initial_set));
         let (ops, mut op_rx) = unbounded_channel::<IgnoreOp>();
 
-        let task = tokio::spawn(async move {
+        let task = rt::spawn(async move {
             let mut stream = client.subscribe_to_ignore_user_list_changes();
             let mut local_content: Option<(Instant, IgnoredUserListEventContent)> = None;
 
@@ -281,7 +281,7 @@ impl UserSearcher {
         let client = self.client.clone();
         let events = self.events.clone();
         let ignored = self.ignored.clone();
-        self.task = Some(tokio::spawn(async move {
+        self.task = Some(rt::spawn(async move {
             let results = match client.search_users(&trimmed, USER_SEARCH_LIMIT).await {
                 Ok(response) => response
                     .results

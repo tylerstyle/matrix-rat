@@ -18,7 +18,6 @@ use matrix_sdk_base::crypto::AttachmentDecryptor;
 use matrix_sdk_base::media::store::IgnoreMediaRetentionPolicy;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::task::JoinSet;
 use url::Url;
 
 use super::MatrixEvent;
@@ -29,6 +28,7 @@ use crate::images::{
     human_size,
 };
 use crate::model::{Attachment, MediaRef};
+use crate::rt::{self, JoinSet};
 
 /// Downloads running at the same time.
 const PARALLEL: usize = 4;
@@ -68,7 +68,7 @@ pub struct Media {
     audio: Mutex<JoinSet<()>>,
     /// The downloads of sounds to transcribe, by the app's number for each: given up
     /// one by one when the app cancels, and all with the session.
-    speech: Mutex<(JoinSet<()>, HashMap<u64, tokio::task::AbortHandle>)>,
+    speech: Mutex<(JoinSet<()>, HashMap<u64, rt::AbortHandle>)>,
 }
 
 impl Media {
@@ -105,7 +105,7 @@ impl Media {
             let result = async {
                 let _slot = slots.acquire().await.map_err(|_| FAILED.to_owned())?;
                 let work = load(&client, &media, size, full);
-                match tokio::time::timeout(TIMEOUT, work).await {
+                match rt::timeout(TIMEOUT, work).await {
                     Ok(result) => result,
                     Err(_) => Err("took too long to load".to_owned()),
                 }
@@ -137,7 +137,7 @@ impl Media {
         fetches.spawn(async move {
             let result = async {
                 let _slot = slots.acquire().await.map_err(|_| FAILED.to_owned())?;
-                match tokio::time::timeout(AVATAR_TIMEOUT, load_avatar(&client, &url)).await {
+                match rt::timeout(AVATAR_TIMEOUT, load_avatar(&client, &url)).await {
                     Ok(result) => result,
                     Err(_) => Err(FAILED.to_owned()),
                 }
@@ -174,7 +174,7 @@ impl Media {
         fetches.spawn(async move {
             let result = async {
                 let _slot = slots.acquire().await.map_err(|_| FAILED.to_owned())?;
-                match tokio::time::timeout(AVATAR_TIMEOUT, load_emote(&client, &url)).await {
+                match rt::timeout(AVATAR_TIMEOUT, load_emote(&client, &url)).await {
                     Ok(result) => result,
                     Err(_) => Err(FAILED.to_owned()),
                 }
@@ -220,7 +220,7 @@ impl Media {
                     .map_err(|_| "writing the file failed".to_owned())?
                     .map_err(|err| format!("{err}"))
             };
-            let result = match tokio::time::timeout(SAVE_TIMEOUT, work).await {
+            let result = match rt::timeout(SAVE_TIMEOUT, work).await {
                 Ok(result) => result,
                 Err(_) => Err("the download took too long".to_owned()),
             };
@@ -246,11 +246,10 @@ impl Media {
         audio.abort_all();
         while audio.try_join_next().is_some() {}
         audio.spawn(async move {
-            let result =
-                match tokio::time::timeout(AUDIO_TIMEOUT, load_audio(&client, &file, dir)).await {
-                    Ok(result) => result,
-                    Err(_) => Err("the download took too long".to_owned()),
-                };
+            let result = match rt::timeout(AUDIO_TIMEOUT, load_audio(&client, &file, dir)).await {
+                Ok(result) => result,
+                Err(_) => Err("the download took too long".to_owned()),
+            };
             let _ = events.send(MatrixEvent::AudioFetched { id, result });
         });
     }
@@ -273,11 +272,10 @@ impl Media {
         while tasks.try_join_next().is_some() {}
         handles.retain(|_, handle| !handle.is_finished());
         let handle = tasks.spawn(async move {
-            let result =
-                match tokio::time::timeout(AUDIO_TIMEOUT, load_audio(&client, &file, dir)).await {
-                    Ok(result) => result,
-                    Err(_) => Err("the download took too long".to_owned()),
-                };
+            let result = match rt::timeout(AUDIO_TIMEOUT, load_audio(&client, &file, dir)).await {
+                Ok(result) => result,
+                Err(_) => Err("the download took too long".to_owned()),
+            };
             let _ = events.send(MatrixEvent::SpeechFetched { id, result });
         });
         handles.insert(id, handle);

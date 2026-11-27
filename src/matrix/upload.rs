@@ -15,11 +15,11 @@ use matrix_sdk::ruma::events::room::message::TextMessageEventContent;
 use matrix_sdk::ruma::{OwnedEventId, UInt};
 use matrix_sdk_ui::timeline::{AttachmentConfig, AttachmentSource, Timeline};
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::task::JoinSet;
 
 use super::MatrixEvent;
 use crate::format::Outgoing;
 use crate::logsafe;
+use crate::rt::{self, JoinSet};
 use crate::text::{sanitize_line, truncate};
 use crate::upload::{self, Prepared};
 
@@ -127,7 +127,7 @@ pub struct Uploads {
 /// that did not.
 async fn drain_set(tasks: &mut JoinSet<()>, wait: Duration) {
     let drained = async { while tasks.join_next().await.is_some() {} };
-    if tokio::time::timeout(wait, drained).await.is_err() {
+    if rt::timeout(wait, drained).await.is_err() {
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}
     }
@@ -151,7 +151,7 @@ impl Uploads {
                         tracing::debug!(why = %logsafe::kind(&err), "could not ask for the upload limit")
                     }
                 }
-                tokio::time::sleep(LIMIT_RETRY).await;
+                rt::sleep(LIMIT_RETRY).await;
             }
         });
         Self {
@@ -185,7 +185,7 @@ impl Uploads {
         let client = self.client.clone();
         let events = self.events.clone();
         self.sends.spawn(async move {
-            let limit = tokio::time::timeout(LIMIT_WAIT, client.load_or_fetch_max_upload_size())
+            let limit = rt::timeout(LIMIT_WAIT, client.load_or_fetch_max_upload_size())
                 .await
                 .ok()
                 .and_then(Result::ok)

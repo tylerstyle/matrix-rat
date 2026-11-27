@@ -15,9 +15,9 @@ use matrix_sdk::{Client, NotificationSettingsError};
 use tokio::sync::Notify;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::task::{JoinHandle, JoinSet};
 
 use super::MatrixEvent;
+use crate::rt::{self, JoinHandle, JoinSet};
 
 /// The most keywords sent to the popup; the rest are only counted.
 pub const MAX_KEYWORDS: usize = 100;
@@ -134,7 +134,7 @@ impl Keywords {
                     old.abort();
                 }
                 if let Some(id) = watch_id {
-                    self.watcher = Some(tokio::spawn(watch(
+                    self.watcher = Some(rt::spawn(watch(
                         self.settings.clone(),
                         self.events.clone(),
                         self.refresh.clone(),

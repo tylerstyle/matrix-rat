@@ -11,11 +11,10 @@ use std::time::Duration;
 use futures::{FutureExt, pin_mut};
 use matrix_sdk_ui::timeline::{Error as TimelineError, Timeline};
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::task::JoinHandle;
-use tokio::time::{Instant, MissedTickBehavior};
 
 use super::MatrixEvent;
 use crate::logsafe;
+use crate::rt::{self, JoinHandle};
 
 /// A page (older messages, newer ones of a detached slice, more rooms of the directory)
 /// loading in the background, which answers the UI once it is loaded. A request for a page
@@ -38,7 +37,7 @@ impl Paging {
     ) -> Self {
         let answered = Arc::new(AtomicBool::new(false));
         let done = answered.clone();
-        let task = tokio::spawn(async move {
+        let task = rt::spawn(async move {
             let answer = load.await;
             done.store(true, Ordering::Release);
             let _ = events.send(answer);
@@ -112,7 +111,7 @@ pub(super) async fn backwards(timeline: &Timeline, count: u16) -> Result<bool, P
 /// would leave them apart for all rooms. A task that is no longer waited for runs to its
 /// end.
 async fn clear_caches(client: matrix_sdk::Client) -> bool {
-    let clear = tokio::spawn(async move {
+    let clear = rt::spawn(async move {
         match client.event_cache().clear_all_rooms().await {
             Ok(()) => true,
             Err(err) => {
@@ -151,14 +150,12 @@ async fn unpanicked(
 ) -> Result<bool, PageError> {
     let page = AssertUnwindSafe(page).catch_unwind();
     pin_mut!(page);
-    let mut again = tokio::time::interval_at(Instant::now() + look_again, look_again);
-    again.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let answer = loop {
         tokio::select! {
             biased;
             answer = &mut page => break answer,
             // Only so that `page` is polled again.
-            _ = again.tick() => {}
+            () = rt::sleep(look_again) => {}
         }
     };
     match answer {

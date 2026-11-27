@@ -15,10 +15,10 @@ use matrix_sdk::config::RequestConfig;
 use matrix_sdk::ruma::api::client::authenticated_media::get_media_preview::v1::Request;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::task::JoinSet;
 
 use super::MatrixEvent;
 use crate::previews::Raw;
+use crate::rt::{self, JoinSet};
 
 /// Requests to the server at the same time (the UI keeps to its own limit as well).
 const PARALLEL: usize = 3;
@@ -56,7 +56,7 @@ impl Previews {
         fetches.spawn(async move {
             let result = async {
                 let _slot = slots.acquire().await.ok()?;
-                tokio::time::timeout(TIMEOUT, request(&client, &url))
+                rt::timeout(TIMEOUT, request(&client, &url))
                     .await
                     .ok()
                     .flatten()

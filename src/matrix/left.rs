@@ -32,8 +32,8 @@ use matrix_sdk::ruma::api::client::membership::joined_rooms;
 use matrix_sdk::ruma::{OwnedRoomId, RoomId};
 use matrix_sdk::{Client, Room, RoomState};
 use tokio::sync::Notify;
-use tokio::task::{JoinHandle, JoinSet};
 
+use crate::rt::{self, JoinHandle, JoinSet};
 use crate::time::Instant;
 
 /// A room that shows up as joined this long after it was left is asked about.
@@ -325,7 +325,7 @@ impl LeftRooms {
         let next = self.next_ask();
         let time_to_ask = async {
             match next {
-                Some(at) => tokio::time::sleep_until(at.into()).await,
+                Some(at) => rt::sleep_until(at).await,
                 None => std::future::pending().await,
             }
         };
@@ -364,7 +364,7 @@ fn remember(rooms: &mut HashMap<OwnedRoomId, Entry>, room_id: &RoomId, now: Inst
 /// The rooms the server says the account is in; `None` if it could not be asked.
 async fn server_joined(client: &Client) -> Option<HashSet<OwnedRoomId>> {
     let request = joined_rooms::v3::Request::new();
-    let answer = tokio::time::timeout(Duration::from_secs(20), client.send(request))
+    let answer = rt::timeout(Duration::from_secs(20), client.send(request))
         .await
         .ok()?
         .ok()?;
@@ -405,7 +405,7 @@ impl StartCheck {
     /// the first call does anything.
     pub fn caught_up(&mut self, client: &Client, left: &LeftRooms) {
         if let Some(at_start) = self.at_start.take() {
-            self.task = Some(tokio::spawn(check_at_start(
+            self.task = Some(rt::spawn(check_at_start(
                 client.clone(),
                 left.clone(),
                 at_start,

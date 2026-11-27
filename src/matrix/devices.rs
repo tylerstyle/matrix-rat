@@ -30,10 +30,10 @@ use matrix_sdk::ruma::{DeviceId, OwnedDeviceId};
 use matrix_sdk::{AuthApi, Client, HttpError};
 use tokio::sync::Notify;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
-use tokio::task::{JoinHandle, JoinSet};
 use zeroize::Zeroizing;
 
 use super::MatrixEvent;
+use crate::rt::{self, JoinHandle, JoinSet};
 
 // ----- what the UI sees ---------------------------------------------------------------
 
@@ -334,12 +334,7 @@ impl Devices {
                     old.abort();
                 }
                 if let Some(id) = watch_id {
-                    self.watcher = Some(tokio::spawn(watch(
-                        client,
-                        self.events.clone(),
-                        refresh,
-                        id,
-                    )));
+                    self.watcher = Some(rt::spawn(watch(client, self.events.clone(), refresh, id)));
                 }
             }
             DevicesCmd::Rename {
@@ -486,7 +481,7 @@ async fn watch(
             }));
             last_backup = Some(now);
         }
-        let poll = tokio::time::sleep(POLL);
+        let poll = rt::sleep(POLL);
         tokio::pin!(poll);
         fetch = loop {
             tokio::select! {
@@ -529,7 +524,7 @@ async fn watch(
         };
         if fetch {
             // Changes tend to come in groups.
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            rt::sleep(Duration::from_millis(200)).await;
         }
     }
 }
@@ -658,7 +653,7 @@ async fn delete_device(
 
 /// The server's own page for ending that session, if it advertises one.
 async fn web_page(client: &Client, device: &DeviceId) -> Option<String> {
-    let metadata = tokio::time::timeout(
+    let metadata = rt::timeout(
         Duration::from_secs(10),
         client.oauth().cached_server_metadata(),
     )

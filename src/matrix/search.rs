@@ -21,12 +21,12 @@ use matrix_sdk::{Client, Room, RoomState};
 use matrix_sdk_base::event_cache::store::EventCacheStoreLockState;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::left::LeftRooms;
 use super::safety::{IgnoredSet, is_ignored_in};
 use super::{MatrixEvent, convert};
+use crate::rt::{self, JoinHandle};
 
 const SEARCH_BATCH_SIZE: usize = 16;
 const MAX_SEARCH_RESULTS: usize = 200;
@@ -118,7 +118,7 @@ impl Searcher {
         ignored: watch::Receiver<IgnoredSet>,
         left: LeftRooms,
     ) -> Self {
-        let redecrypt_task = Some(tokio::spawn(index_redecrypted(client.clone())));
+        let redecrypt_task = Some(rt::spawn(index_redecrypted(client.clone())));
         Self {
             client,
             events,
@@ -135,7 +135,7 @@ impl Searcher {
         let events = self.events.clone();
         let ignored = self.ignored.clone();
         let left = self.left.clone();
-        self.task = Some(tokio::spawn(async move {
+        self.task = Some(rt::spawn(async move {
             run_search(client, events, ignored, &left, generation, query).await;
         }));
     }

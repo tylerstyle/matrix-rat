@@ -39,7 +39,6 @@ use matrix_sdk_ui::timeline::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::watch;
-use tokio::task::JoinSet;
 
 use super::MatrixEvent;
 use super::paging::{self, PageError};
@@ -47,6 +46,8 @@ use super::safety::IgnoredSet;
 use crate::collect::{self, Cut, Span};
 use crate::logsafe;
 use crate::model::{Message, Namesakes};
+use crate::rt::{self, JoinSet};
+use crate::time::Instant;
 
 /// The most events one archive takes; of a room with more, the newest.
 pub const ARCHIVE_EVENTS: usize = 5_000;
@@ -364,7 +365,7 @@ impl Collector {
                     Wanted::Last(count) => last(&room, count, &ignored, &progress).await,
                 }
             };
-            let result = match tokio::time::timeout(UNREAD_BUDGET, work).await {
+            let result = match rt::timeout(UNREAD_BUDGET, work).await {
                 Ok(result) => result,
                 Err(_) => Err(anyhow!("loading the messages took too long")),
             };
@@ -422,7 +423,7 @@ async fn open(room: &Room) -> Result<Timeline> {
         })
         .track_read_marker_and_receipts(TimelineReadReceiptTracking::MessageLikeEvents)
         .build();
-    tokio::time::timeout(OPEN_TIMEOUT, build)
+    rt::timeout(OPEN_TIMEOUT, build)
         .await
         .map_err(|_| anyhow!("opening the room's messages timed out"))?
         .context("could not open the room's messages")
@@ -560,12 +561,12 @@ where
     S: futures::Stream<Item = Vec<VectorDiff<T>>>,
 {
     let ask = usize::from(ask);
-    let mut deadline = tokio::time::Instant::now() + times.page;
+    let mut deadline = Instant::now() + times.page;
     let mut waiting_second = false;
     let mut saw_start_wait = false;
 
     loop {
-        let Ok(next) = tokio::time::timeout_at(deadline, changes.as_mut().next()).await else {
+        let Ok(next) = rt::timeout_at(deadline, changes.as_mut().next()).await else {
             return true;
         };
         let Some(diffs) = next else {
@@ -599,7 +600,7 @@ where
                 *lazy_possible = false;
                 waiting_second = true;
                 anchor = PageAnchor::of(items);
-                deadline = deadline.min(tokio::time::Instant::now() + times.more);
+                deadline = deadline.min(Instant::now() + times.more);
                 continue;
             }
             if added_events > 0 {
@@ -610,7 +611,7 @@ where
             }
             if has_start && !saw_start_wait {
                 saw_start_wait = true;
-                deadline = deadline.min(tokio::time::Instant::now() + times.more);
+                deadline = deadline.min(Instant::now() + times.more);
             }
             continue;
         }
@@ -630,7 +631,7 @@ where
             // for the event-cache task's disk or network batch before asking again.
             waiting_second = true;
             anchor = PageAnchor::of(items);
-            deadline = deadline.min(tokio::time::Instant::now() + times.more);
+            deadline = deadline.min(Instant::now() + times.more);
             continue;
         }
 
@@ -824,7 +825,7 @@ async fn load(
         |loaded| progress.tell(loaded),
         enough,
         |ask| async move {
-            match tokio::time::timeout(PAGE_TIMEOUT, paging::backwards(timeline, ask)).await {
+            match rt::timeout(PAGE_TIMEOUT, paging::backwards(timeline, ask)).await {
                 Ok(Ok(reached_start)) => Some(reached_start),
                 // All caches were cleared after a panic: the timeline's reset comes through
                 // its changes like any page, and the next page, of the cleared caches, is
