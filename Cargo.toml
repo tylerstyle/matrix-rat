@@ -65,7 +65,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 # Support
 clap = { version = "4", features = ["derive"] }
 etcetera = "0.11"
-signal-hook = "0.3"
+signal-hook = "0.4"
 # Splits $VISUAL / $EDITOR into words the way a shell does; already in the tree.
 shlex = "2"
 libc = "0.2"
