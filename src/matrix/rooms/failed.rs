@@ -885,9 +885,13 @@ async fn failed_changes_can_be_retried_or_discarded() {
     );
     let back = messages.iter().find(is_mine).unwrap();
     // Its text is back (the risk: `abort_send` of a deletion of an event on the server
-    // must put the content back). With the edit or without: the SDK's copy from before
-    // the deletion has the edit only where the timeline had applied it then, and in
-    // some runs it had not (the edit's event outside what the timeline had loaded).
+    // must put the content back). With the edit or without, by matrix-sdk-ui 0.20.0:
+    // where the timeline applies the message's aggregations afresh (`apply_all`), it
+    // applies our pending deletion before `resolve_edits`, so the copy the deletion
+    // keeps (`unredacted_item`) is the text from before the edit; aborting the deletion
+    // (`unredact`) puts that copy back without resolving the edits again. The edit is
+    // still on the server and in the event cache: reopening the room, or a restart,
+    // shows it again. Left as it is for 1.1 (matrix-agy's review of send-retry, §3).
     assert!(
         back.body == edited || back.body == original,
         "its text is back: {:?}",
