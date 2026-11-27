@@ -5,7 +5,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{EventKindMask, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
@@ -31,20 +31,32 @@ impl ThemeWatch {
         // files by renaming, which a watch on the old file would never see.
         std::fs::create_dir_all(paths.themes_dir()).ok();
         let file_sender = sender.clone();
-        let mut watcher =
-            notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                let relevant = event.is_ok_and(|event| {
-                    !event.kind.is_access()
-                        && event
-                            .paths
-                            .iter()
-                            .any(|path| path.extension().is_some_and(|ext| ext == "toml"))
-                });
-                if relevant {
+        let mut told = false;
+        let handler = move |event: notify::Result<notify::Event>| match event {
+            Ok(event) => {
+                if reloads(&event) {
                     let _ = file_sender.send(());
                 }
-            })
-            .ok();
+            }
+            // Not a reason to reload: an error that comes again and again would reload
+            // the theme as often. Said once; the watch goes on.
+            Err(err) => {
+                if !told {
+                    told = true;
+                    tracing::warn!(why = %crate::logsafe::kind(&err), "the theme watch failed; a change may be missed");
+                }
+            }
+        };
+        // Creations, removals and changes only: reading a theme, as every reload does,
+        // would otherwise wake the watch for nothing.
+        let config = notify::Config::default().with_event_kinds(EventKindMask::CORE);
+        let mut watcher = match RecommendedWatcher::new(handler, config) {
+            Ok(watcher) => Some(watcher),
+            Err(err) => {
+                tracing::warn!(why = %crate::logsafe::kind(&err), "themes will not reload by themselves");
+                None
+            }
+        };
         if let Some(watcher) = watcher.as_mut() {
             for dir in [paths.config_dir.as_path(), paths.themes_dir().as_path()] {
                 if let Err(err) = watch(watcher, dir) {
@@ -92,6 +104,18 @@ impl ThemeWatch {
         // Whatever arrived meanwhile is covered by the reload that follows.
         while self.changes.try_recv().is_ok() {}
     }
+}
+
+/// Whether an event may have changed a theme or the config: a `.toml` file was
+/// written, made, removed or renamed, or events were lost (the system's queue ran
+/// over), after which any of them may have been.
+fn reloads(event: &notify::Event) -> bool {
+    event.need_rescan()
+        || (!event.kind.is_access()
+            && event
+                .paths
+                .iter()
+                .any(|path| path.extension().is_some_and(|ext| ext == "toml")))
 }
 
 fn watch(watcher: &mut RecommendedWatcher, dir: &Path) -> Result<()> {
@@ -219,7 +243,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_changes_and_renames_are_noticed() {
+    async fn file_changes_renames_and_recreations_are_noticed() {
         let root = std::env::temp_dir().join(format!("matrix-rat-watch-{}", std::process::id()));
         let paths = Paths {
             config_dir: root.join("config"),
@@ -249,14 +273,69 @@ mod tests {
                 .expect("rename was not noticed");
         }
 
-        // Unrelated files do not trigger a reload.
+        // A change in place of the file that is there now.
+        std::fs::write(&theme, "# edited\n[palette]\n").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), watch.changed())
+            .await
+            .expect("an edit in place was not noticed");
+
+        // Removed, then made again.
+        std::fs::remove_file(&theme).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), watch.changed())
+            .await
+            .expect("removal was not noticed");
+        std::fs::write(&theme, "# again\n[palette]\n").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), watch.changed())
+            .await
+            .expect("the new file was not noticed");
+
+        // The config, in the folder above, is watched too.
+        std::fs::write(paths.config_file(), "theme = \"x\"\n").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), watch.changed())
+            .await
+            .expect("a change of the config was not noticed");
+
+        // Unrelated files do not trigger a reload, nor does reading a theme, as every
+        // reload does.
         std::fs::write(paths.themes_dir().join("notes.txt"), "x").unwrap();
+        std::fs::read_to_string(&theme).unwrap();
         assert!(
             tokio::time::timeout(Duration::from_millis(600), watch.changed())
                 .await
                 .is_err()
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn changes_to_toml_files_and_lost_events_reload_and_nothing_else_does() {
+        use notify::event::{
+            AccessKind, AccessMode, CreateKind, DataChange, Flag, ModifyKind, RemoveKind,
+            RenameMode,
+        };
+        use notify::{Event, EventKind};
+
+        let on = |kind: EventKind, file: &str| {
+            Event::new(kind).add_path(std::path::PathBuf::from("/config/themes").join(file))
+        };
+        for kind in [
+            EventKind::Create(CreateKind::File),
+            EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            EventKind::Modify(ModifyKind::Name(RenameMode::To)),
+            EventKind::Modify(ModifyKind::Name(RenameMode::From)),
+            EventKind::Remove(RemoveKind::File),
+        ] {
+            assert!(reloads(&on(kind, "x.toml")), "{kind:?}");
+            assert!(!reloads(&on(kind, "x.toml.tmp")), "{kind:?}");
+        }
+        let read = EventKind::Access(AccessKind::Close(AccessMode::Read));
+        assert!(!reloads(&on(read, "x.toml")));
+        assert!(!reloads(&Event::new(EventKind::Any)));
+        // The system's queue ran over: the event names no file, and anything may
+        // have changed.
+        assert!(reloads(
+            &Event::new(EventKind::Other).set_flag(Flag::Rescan)
+        ));
     }
 
     #[tokio::test]
