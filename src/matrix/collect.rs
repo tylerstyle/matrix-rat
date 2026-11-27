@@ -824,20 +824,19 @@ async fn load(
         |loaded| progress.tell(loaded),
         enough,
         |ask| async move {
-            // Asked once more when all caches were cleared after a panic: of them. A second
-            // panic does not clear them again (see `paging::backwards`).
-            for _ in 0..2 {
-                match tokio::time::timeout(PAGE_TIMEOUT, paging::backwards(timeline, ask)).await {
-                    Ok(Ok(reached_start)) => return Some(reached_start),
-                    Ok(Err(PageError::Panicked { cleared: true })) => {}
-                    Ok(Err(err)) => {
-                        tracing::debug!(why = %logsafe::kind(&err), "collect: could not load older messages");
-                        return None;
-                    }
-                    Err(_) => return None,
+            match tokio::time::timeout(PAGE_TIMEOUT, paging::backwards(timeline, ask)).await {
+                Ok(Ok(reached_start)) => Some(reached_start),
+                // All caches were cleared after a panic: the timeline's reset comes through
+                // its changes like any page, and the next page, of the cleared caches, is
+                // asked for from what is there then. A second panic does not clear them
+                // again (see `paging::backwards`), and ends the collection.
+                Ok(Err(PageError::Panicked { cleared: true })) => Some(false),
+                Ok(Err(err)) => {
+                    tracing::debug!(why = %logsafe::kind(&err), "collect: could not load older messages");
+                    None
                 }
+                Err(_) => None,
             }
-            None
         },
         times,
     )
