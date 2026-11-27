@@ -942,27 +942,37 @@ Nothing native. The gate as usual.
 
 ### The race, in short
 
-From matrix-agy's review §2, checked in the crypto source:
+Corrected while building (the `verify-keys` builder, confirmed by matrix-agy in Task 74; the
+first version of this section, after agy's Task 69, had the order the wrong way round, read from
+the SDK's branch for flows that do not start from a request):
 
-- **B is done at once.** When the new device (B) confirms the emoji after the old one (A) has
-  confirmed, B is done at once. `SasVerification::confirm`
-  (`matrix-sdk/src/encryption/verification/sas.rs:81-93`) first runs the inner confirm (`:82`).
-  That marks the flow done and stores B's requests for the secrets it lacks
-  (`matrix-sdk-crypto/src/verification/mod.rs:497-616`). Only then does it send B's MAC
-  (`:84-86`).
-- **The requests can overtake the MAC.** Since #6753 the sync sends outgoing requests at the end
-  of each response (`matrix-sdk/src/sliding_sync/mod.rs:718-722`, up to 20 at once,
-  `encryption/mod.rs:974`). So B's secret requests can reach A before B's MAC.
-- **A drops them for good.** A does not trust B yet, logs "won't serve, the device isn't
-  trusted" (`matrix-sdk-crypto/src/gossiping/machine.rs:416-449`), and never retries.
-- **The result.** B ends up cross-signed, because A signs it once B's MAC arrives. But it lacks
-  the private self-signing and user-signing keys and the backup key. It cannot verify others,
-  and older encrypted messages stay locked. The app says "this device is verified"
-  (`src/verify.rs:89-102`) and offers nothing.
+- **Every flow of ours starts from a request**, so `started_from_request` is true
+  (`matrix-sdk-crypto/src/verification/sas/mod.rs:330, 413`; `requests.rs:1387, 1512`). Then
+  the side that confirms second, already holding the other's MAC, does not finish at once: it
+  goes to `WaitingForDone` and sends its MAC and its done (`sas/inner_sas.rs:302-308`;
+  `matrix-sdk/src/encryption/verification/sas.rs:84-86`). Neither side trusts the other or asks
+  for secrets (`verification/mod.rs:595-601`) before the other's done arrives
+  (`inner_sas.rs:408-415`, `verification/machine.rs:534-538`).
+- **Old device (A) first is safe.** B confirms second and sends MAC and done; B asks for the
+  secrets only when A's done comes, and A sends that after B's MAC, so B's done reaches A ahead
+  of any secret request.
+- **New device (B) first is the window** (and both at once). A confirms second and sends MAC and
+  done together without trusting B yet. B gets both in one sync, queues its done, finishes and
+  stores its secret requests; at the end of that sync response (since #6753,
+  `matrix-sdk/src/sliding_sync/mod.rs:718-722`) its done and the secret requests go out side by
+  side, up to 20 at once (`encryption/mod.rs:974`). A secret request that reaches A in an
+  earlier sync than B's done is refused for good: "won't serve, the device isn't trusted"
+  (`matrix-sdk-crypto/src/gossiping/machine.rs:416-449`). If they come in the same sync, A is
+  safe: it handles the verification events first (`machine/mod.rs:1998-2016`).
+- **How often.** Not seen in 40 runs on the dev homeserver (new/old first, 0 s/2 s apart). The
+  1-in-8 failures of `a_chosen_session_is_verified` before `2c4df1a` had the shape of a lost key
+  share; with both sides confirming at once in that test, this window may have been their cause.
+- **The result, when it hits.** B ends up cross-signed but without the private self-signing and
+  user-signing keys and the backup key: it cannot verify others, and older encrypted messages
+  stay locked, while the app said "this device is verified" and offered nothing.
 - **No public way to ask again.** `query_missing_secrets_from_other_sessions`
   (`matrix-sdk-crypto/src/machine/mod.rs:2179`) is not exposed by matrix-sdk.
-- **The safe order** is B first: then B is done only when A's MAC comes, and A sends that only
-  once it trusts B.
+- **The safe order** is the old device first, then the new one; the Compare lines ask for it.
 
 ### What asks for the secrets again
 
@@ -1045,12 +1055,16 @@ In the verification itself:
 ### The cheap mitigation: the order
 
 The SDK tells neither side whether the other has confirmed: the internal `MacReceived` shows as
-`KeysExchanged` (`matrix-sdk-crypto/src/verification/sas/mod.rs:211-222`). So the order cannot be
-enforced, only asked for, with the two Compare lines above. They cost one line per side. They
-also steer the user when Element is on the other side, since the user reads our screen too.
+`KeysExchanged` (`matrix-sdk-crypto/src/verification/sas/mod.rs:211-222`). So the order is asked
+for, with the two Compare lines above: on the new device "…on your device “X” first, then here",
+on the old one "…here first, then on your device “X”". They cost one line per side and also
+steer the user when Element is on the other side.
 
-Holding back A's confirm until B's MAC has come was considered. It is not possible without that
-state.
+Holding back the new device's confirm until the old device's MAC has come (a to-device handler
+for `m.key.verification.mac` would show it) was considered while building and dropped (matrix-agy,
+Task 74): it breaks the symmetry of the protocol, two clients doing the same would wait for each
+other, and the way out (verify again, the recovery key) covers this and every other cause of
+missing keys.
 
 ### Our changes
 
@@ -1121,14 +1135,14 @@ state.
 `Pair::finish` (`:2177-2213`) lets both sides press "They match" as soon as they see the emoji
 (`step`, `:2024-2051`), so either order happens.
 
-1. **`Pair::finish(order)`**, with `Order::NewFirst` or `Order::OldFirst`.
-   - NewFirst: B answers Match at Compare. A holds its Match until B's update says
-     `Confirmed`, which after change 6 means that B's MAC is on the server.
-   - All existing callers use NewFirst, the safe and deterministic order:
-     `two_devices_verify_each_other` (`:2257`) and `a_chosen_session_is_verified`.
-   - `answer_one_request` (`:2346-2381`) is the plain SDK device of
-     `history_unlocks_after_verification` (`:2393`). It gets a `Notify` that the test fires on
-     B's `Confirmed`, so it too confirms second.
+As built (the order corrected, see "The race, in short"):
+
+1. **`Pair::finish(order)`**, with `Order::OldFirst` or `Order::NewFirst`.
+   - OldFirst: A answers Match at Compare; B answers 2 s after A's update says `Confirmed`, so A's
+     MAC has reached B.
+   - All existing callers use OldFirst, the safe and deterministic order:
+     `two_devices_verify_each_other` and `a_chosen_session_is_verified`.
+   - `history_unlocks_after_verification` confirms A (the plain SDK device) first too.
 2. **New `verified_without_keys_verify_again`**: the recovery path, deterministic.
    1. A is a plain SDK client with cross-signing, as in `history_unlocks_after_verification`.
       B (the worker) logs in.
@@ -1136,19 +1150,19 @@ state.
       (`matrix-sdk/src/encryption/identities/devices.rs:290`). That leaves B cross-signed with
       no keys: the very state the race leaves, every time.
    3. Assert that B's `Security` is `Verified && !signing_keys`.
-   4. B sends `VerifyCmd::Request`. A answers with `answer_one_request`, confirming **first**:
-      the bad order, on purpose.
+   4. B sends `VerifyCmd::Request` and confirms first, the window order, on purpose: A already
+      trusts B, so it answers whatever the order.
    5. B ends up with `signing_keys`.
 3. **New `verified_without_keys_recovery_key`.** The same setup, but A also sets up recovery
    (`recovery().enable()` gives the key). B sends `MatrixCmd::Recover { key }` and ends up with
    `signing_keys`, and with the backup key (`Security.backup` is Enabled).
-4. **New `old_device_first_ends_with_the_keys`**: the race order, with two workers,
-   `Pair::finish(Order::OldFirst)`.
+4. **New `new_device_first_ends_with_the_keys`**: the window order, with two workers,
+   `Pair::finish(Order::NewFirst)`.
    - In most runs B gets the keys.
    - Otherwise B's `Security` stays `Verified && !signing_keys` for a short poll window (5–10 s
      after `Verified`). `KEYS_GRACE` belongs to the app's `VerifyState`, not to the worker's
      `Security`, so this worker test does not wait 30 s. Then the test runs the fix (B sends
-     `VerifyCmd::Request`, NewFirst) and asserts the keys.
+     `VerifyCmd::Request`) and asserts the keys.
    - Either way the test prints which case happened. It never fails because of the race, and it
      does not pretend the race is gone: the test logs show how often it hits.
 - **Unit.**
