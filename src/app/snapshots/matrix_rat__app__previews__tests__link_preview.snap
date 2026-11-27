@@ -22,11 +22,11 @@ expression: text
 "│                      ││───────────────────────────────── Today ───────────────────────────────── │"
 "│                      ││● ann  12:00                                                              │"
 "│                      ││  first                                                                   │"
-"│                      ││  look https://example.org/a                                              │"
+"│                      ││· look https://example.org/a                                              │"
 "│                      ││  │ An <i>example</i> **page**                                            │"
 "│                      ││  │ A long description that goes on and on, so that it needs more than    │"
 "│                      ││  │ one line of the pane to be read and then still goes on and on past…   │"
-"│                      ││  last                                                                    │"
+"│                      ││· last                                                                    │"
 "│                      │╰──────────────────────────────────────────────────────────────────────────╯"
 "│                      │╭ 3 Message ───────────────────────────────────────────────────────────────╮"
 "│                      ││ Click here or press Alt-3 to write                                 📎 🙂 │" Hidden by multi-width symbols: [(94, " "), (97, " ")]

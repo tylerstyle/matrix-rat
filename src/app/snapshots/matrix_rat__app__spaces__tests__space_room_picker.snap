@@ -4,7 +4,7 @@ expression: "screen(&mut app, &mut terminal)"
 ---
 "╭ 1 Rooms ────────── + ╮╭ 2 #rust ─────────────────────────────────────────────╮"
 "│ Filter rooms…        ││   👍 2   🎉 1                                       ││" Hidden by multi-width symbols: [(29, "─"), (36, "─")]
-"│ ○ Unread  ○ People   ││  Back-pagination also survives restarts, which is a ││"
+"│ ○ Unread  ○ People   ││· Back-pagination also survives restarts, which is a ││"
 "│ ◂ Ra╭ Add a room to the space ─────────────────────────────────────────╮    ││"
 "│ Favo│ ⌕ type a room name…                                              │e   ││"
 "│▌R  r│ Space: Rat club                                              5/5 │    ││"

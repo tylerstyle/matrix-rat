@@ -293,6 +293,7 @@
 <text x="58.8" y="283.5" textLength="126.0" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169" font-weight="bold">erin: @you can…</text>
 <g fill="#54546d" stroke="#54546d"><path d="M197.4 269.9 L197.4 288.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M205.8 269.9 L205.8 288.1" stroke-width="1" fill="none"/></g>
+<text x="210.0" y="283.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">· </text>
 <g fill="#e9b89f" stroke="#e9b89f"><rect x="226.8" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
 <g fill="#e9b89f" stroke="#e9b89f"><rect x="235.2" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
 <g fill="#e9b89f" stroke="#e9b89f"><rect x="243.6" y="270.0" width="8.6" height="9.0" stroke="none"/></g>
@@ -1080,7 +1081,8 @@
 <g fill="#54546d" stroke="#54546d"><path d="M4.2 503.9 L4.2 522.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M197.4 503.9 L197.4 522.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M205.8 503.9 L205.8 522.1" stroke-width="1" fill="none"/></g>
-<text x="210.0" y="517.5" textLength="705.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">  @you can you check the contrast of the unread badge?                              </text>
+<text x="210.0" y="517.5" textLength="16.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#727169">· </text>
+<text x="226.8" y="517.5" textLength="688.8" lengthAdjust="spacingAndGlyphs" xml:space="preserve" fill="#dcd7ba">@you can you check the contrast of the unread badge?                              </text>
 <g fill="#54546d" stroke="#54546d"><path d="M919.8 503.9 L919.8 522.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M4.2 521.9 L4.2 540.1" stroke-width="1" fill="none"/></g>
 <g fill="#54546d" stroke="#54546d"><path d="M197.4 521.9 L197.4 540.1" stroke-width="1" fill="none"/></g>

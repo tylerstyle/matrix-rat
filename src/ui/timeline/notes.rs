@@ -321,7 +321,8 @@ mod tests {
                 "  ┊ transcribing…",
                 "  ┊ translation: Good morning",
                 "  ┊ to all of you over there",
-                "  second",
+                // The next message of the run, with its dot after the notes.
+                "· second",
             ]
         );
         assert_eq!(shown.last().unwrap(), "  ┊ translation: no");

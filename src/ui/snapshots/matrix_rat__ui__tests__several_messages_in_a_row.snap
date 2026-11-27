@@ -1,0 +1,34 @@
+---
+source: src/ui/mod.rs
+expression: wide
+---
+"╭ 1 Rooms ────────── + ╮╭ 2 #rust ─────────────────────────────────────────────╮"
+"│ Filter rooms…        ││                                                      │"
+"│ ○ Unread  ○ People   ││                                                      │"
+"│ Favourites           ││                                                      │"
+"│▌R  rust              ││                                                      │"
+"│ M  matrix-rat        ││                                                      │"
+"│ People               ││                                                      │"
+"│ B  bob            2  ││─────────────────────── Today ─────────────────────── │"
+"│ C  carol             ││● alice  12:00                                        │"
+"│ Rooms                ││  Three in a row: the first,                          │"
+"│ D  design         5  ││· the second,                                         │"
+"│ N  nixos             ││· and the third, long enough to be wrapped onto a     │"
+"│ O  off-topic     12  ││  second row.                                         │"
+"│                      ││                                                      │"
+"│                      ││● bob  12:00                                          │"
+"│                      ││  A reaction under this one.                          │"
+"│                      ││   👍 2                                               │" Hidden by multi-width symbols: [(29, " ")]
+"│                      ││· The next one is still bob's.                        │"
+"│                      ││· ┃ alice: the second,                                │"
+"│                      ││  A reply in the run.                                 │"
+"│                      ││──────────────────────── new ──────────────────────── │"
+"│                      ││                                                      │"
+"│                      ││● bob  12:00                                          │"
+"│                      ││  After the new line, his header again.               │"
+"│                      ││· And a dot.                                          │"
+"│                      │╰──────────────────────────────────────────────────────╯"
+"│                      │╭ 3 Message ───────────────────────────────────────────╮"
+"│                      ││ Type a message…                                📎 🙂 │" Hidden by multi-width symbols: [(74, " "), (77, " ")]
+"╰──────────────────────╯╰──────────────────────────────────────────────────────╯"
+" ● demo data  Enter send      Ctrl-P palette  F1 help  F2 settings  F3 rat-dark "

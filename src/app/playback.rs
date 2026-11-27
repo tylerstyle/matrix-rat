@@ -1432,7 +1432,8 @@ mod tests {
             }),
         );
         let shown = screen(&mut app, 80, 24);
-        assert!(shown.contains("■ 0:03 / 0:12 paused ━━━━━━──"), "{shown}");
+        // The second of alice's messages in a row: drawn over, its dot stays.
+        assert!(shown.contains("· ■ 0:03 / 0:12 paused ━━━━━━──"), "{shown}");
         assert!(shown.contains("Space resume"), "{shown}");
         insta::assert_snapshot!(shown);
     }

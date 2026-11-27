@@ -5,20 +5,20 @@
 //! of them are as they were: their rows are taken over from the layout before, and only
 //! the others are laid out anew.
 //!
-//! Whether a message is as it was is told by a hash of everything its rows are made
-//! from ([`hash_inputs`]): all of the message; what it takes from the messages before it (a
-//! day divider, its sender's header, a gap, a shield said once for a run); whether its
-//! spoilers are shown; and what it looks up elsewhere: its picture's place, whether
-//! custom emoji are drawn as pictures at all, whether its sender is ignored, whether
-//! the room has link previews, the names of the custom emoji it was reacted with, and
-//! its notes. What its rows took from the link previews and the custom emoji pictures
-//! is known only once they are laid out (which links and emoji they have), so it is
-//! hashed apart ([`hash_fetched`]) and looked up again, for the links and emoji the kept
-//! rows have. What all messages are laid out with alike (the room, the width, the
-//! theme, read markers on or off, a chat with one person or not: [`Shared`]) is not
-//! hashed: when any of it changes, nothing is kept. One thing is not of the message nor
-//! of the room: the time its code may take to be coloured. A message whose colouring
-//! was cut short for lack of it is laid out again each time, until it was not.
+//! Whether a message is as it was is told by a hash of everything its rows are made from
+//! ([`hash_inputs`]): all of the message; what it takes from the messages before it (a day
+//! divider, its sender's header, a gap, the dot of a further message of a run, a shield
+//! said once for a run); whether its spoilers are shown; and what it looks up elsewhere:
+//! its picture's place, whether custom emoji are drawn as pictures at all, whether its
+//! sender is ignored, whether the room has link previews, the names of the custom emoji it
+//! was reacted with, and its notes. What its rows took from the link previews and the
+//! custom emoji pictures is known only once they are laid out (which links and emoji they
+//! have), so it is hashed apart ([`hash_fetched`]) and looked up again, for the links and
+//! emoji the kept rows have. What all messages are laid out with alike (the room, the
+//! width, the theme, read markers on or off, a chat with one person or not: [`Shared`]) is
+//! not hashed: when any of it changes, nothing is kept. One thing is not of the message nor
+//! of the room: the time its code may take to be coloured. A message whose colouring was
+//! cut short for lack of it is laid out again each time, until it was not.
 //!
 //! The hashes are keyed at random, once for each memo: what someone writes cannot be
 //! made to hash like something else, which would leave a message showing what it said

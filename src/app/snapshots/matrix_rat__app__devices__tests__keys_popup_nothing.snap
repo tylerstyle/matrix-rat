@@ -25,7 +25,7 @@ expression: text
 "│              │ unlocks.                                                           │───────────── │"
 "│              ╰────────────────── k recovery key · e export · i import · Esc close ╯              │"
 "│                      ││  hello from bob                                                          │"
-"│                      ││  Unable to decrypt: sent before this device was logged in. Verify this   │"
+"│                      ││· Unable to decrypt: sent before this device was logged in. Verify this   │"
 "│                      ││  device to read it                                                       │"
 "│                      │╰──────────────────────────────────────────────────────────────────────────╯"
 "│                      │╭ 3 Message ──────────────────────────────────────────────────── A  alice ─╮"

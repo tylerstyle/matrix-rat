@@ -5,7 +5,7 @@ expression: "render(&mut app, 80, 24)"
 "╭ 1 Rooms ── + ╮╭ 2 #rust ─────────────────────────────────────────────────────╮"
 "│ Filter ro… UP││  from disk.                                                 ││"
 "│ Favourites   ││   👍 2   🎉 1                                               ││" Hidden by multi-width symbols: [(21, " "), (28, " ")]
-"│▌R  rust      ││  Back-pagination also survives restarts, which is a big deal││"
+"│▌R  rust      ││· Back-pagination also survives restarts, which is a big deal││"
 "│ People       ││  for large rooms like this one where scrolling up used to   ││"
 "│ B  bob    2  ││  refetch everything from the server every single time.      ┃│"
 "│              ││─────────────────────────── Today ───────────────────────────┃│"

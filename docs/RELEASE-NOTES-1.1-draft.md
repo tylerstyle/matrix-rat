@@ -1,8 +1,8 @@
 # matrix-rat 1.1.0 (draft)
 
 A draft of the release notes for 1.1.0, in the form of the GitHub releases of 1.0.x, kept
-up to date while 1.1.0 is built. So far: the move to matrix-sdk 0.20 and every other
-dependency brought up to date.
+up to date while 1.1.0 is built. So far: the move to matrix-sdk 0.20, every other
+dependency brought up to date, and a mark between messages of one person in a row.
 
 matrix-rat now builds on matrix-sdk 0.20: search lists the newest matches first, a
 handful of fixes from the SDK, and the SQLite in the release archives is current again.
@@ -22,6 +22,14 @@ handful of fixes from the SDK, and the SQLite in the release archives is current
   made opening each room's index slow; the profile's key is random and needs no
   stretching), so the old index cannot be opened and is deleted. Until messages are loaded
   again, search finds fewer of them.
+
+## New
+
+- **Several messages of one person in a row are told apart.** Each one after the first
+  starts with a muted `·` under the `●` of the line with the name and time, on its first
+  line only: no row more, and it is there without colours (`NO_COLOR`) and in 256 colours
+  over ssh as well. Until now such a run read as one long message, parted only where a
+  message had reactions.
 
 ## Changed
 

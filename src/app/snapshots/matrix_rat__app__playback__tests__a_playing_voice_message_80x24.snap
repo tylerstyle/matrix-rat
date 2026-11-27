@@ -17,7 +17,7 @@ expression: shown
 "│                      ││● alice  10:00                                        │"
 "│                      ││  ▶ 🎤 waves.ogg · 0:12 · 2.0 kB                      │" Hidden by multi-width symbols: [(30, " ")]
 "│                      ││  ▁▃▅▇█▅▄▂▄▆▇▅▃▂▃▅▇▄▂▁▃▅▆▃                            │"
-"│                      ││  ■ 0:03 / 0:12 paused ━━━━━━──────────────────       │"
+"│                      ││· ■ 0:03 / 0:12 paused ━━━━━━──────────────────       │"
 "│                      ││                                                      │"
 "│                      ││● bob  10:01                                          │"
 "│                      ││  and this one has no waveform                        │"
