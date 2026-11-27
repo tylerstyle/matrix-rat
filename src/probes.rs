@@ -9,6 +9,7 @@ use crate::audio::recorder::{self, NoRecorder, Recorder};
 use crate::audio::{self, NoPlayer, Player};
 use crate::catchup::{self, NoCommand};
 use crate::notes::{self, NoTranscriber, NoTranslator, Transcriber, Translator};
+use crate::notify::NotifyMode;
 
 /// The questions. Each answer is what the app would find on its own: nothing here
 /// starts a program, and the answers say nothing of the user's that the app did not
@@ -20,6 +21,10 @@ pub trait Probes {
     fn no_color(&self) -> bool;
     /// A session over SSH: what plays or records would be the far machine's.
     fn ssh(&self) -> bool;
+    /// What the `notifications` setting's `auto` comes to here: the desktop's
+    /// notification service where a session bus is announced and the session is not
+    /// over SSH, else the terminal's.
+    fn notify_auto(&self) -> NotifyMode;
     /// The player the `audio_player` setting comes to here.
     fn player(&self, setting: &str) -> Result<Player, NoPlayer>;
     /// The recorder the `audio_recorder` setting comes to here, `ssh` as the app
@@ -56,6 +61,10 @@ impl Probes for NativeProbes {
 
     fn ssh(&self) -> bool {
         crate::portal::in_ssh_session()
+    }
+
+    fn notify_auto(&self) -> NotifyMode {
+        NotifyMode::Auto.resolved()
     }
 
     fn player(&self, setting: &str) -> Result<Player, NoPlayer> {
@@ -120,6 +129,10 @@ impl Probes for TestProbes {
         false
     }
 
+    fn notify_auto(&self) -> NotifyMode {
+        NativeProbes.notify_auto()
+    }
+
     fn player(&self, setting: &str) -> Result<Player, NoPlayer> {
         NativeProbes.player(setting)
     }
@@ -160,7 +173,8 @@ impl Probes for TestProbes {
 }
 
 /// A machine where nothing is found, as a shell without programs answers: no player,
-/// no recorder, no programs for notes or summaries, no editor, no clipboard tools.
+/// no recorder, no programs for notes or summaries, no editor, no clipboard tools, no
+/// desktop to notify on.
 /// Records what it was asked, for the tests that look at when the app asks.
 #[cfg(test)]
 #[derive(Debug, Default)]
@@ -190,6 +204,11 @@ impl Probes for NothingHere {
     fn ssh(&self) -> bool {
         self.ask("ssh");
         false
+    }
+
+    fn notify_auto(&self) -> NotifyMode {
+        self.ask("notify_auto");
+        NotifyMode::Terminal
     }
 
     fn player(&self, setting: &str) -> Result<Player, NoPlayer> {

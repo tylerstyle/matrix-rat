@@ -316,6 +316,9 @@ pub struct App {
     /// How notifications are shown, and the mode to return to when switched back on.
     pub notify_mode: crate::notify::NotifyMode,
     notify_mode_on: crate::notify::NotifyMode,
+    /// What `auto` notifications are here, as the probes said at start: the desktop's
+    /// or the terminal's.
+    notify_auto: crate::notify::NotifyMode,
     notification_preview: bool,
     /// Notifications made from a risen unread count, waiting to see whether a
     /// detailed one arrives for the same room; and when each room last got one.
@@ -494,6 +497,7 @@ impl std::fmt::Debug for App {
             .field("title_written", &self.title_written)
             .field("found", &self.found)
             .field("notify_mode", &self.notify_mode)
+            .field("notify_auto", &self.notify_auto)
             .field("pending_notices", &self.pending_notices.len())
             .field("link_previews", &self.link_previews)
             .field("previews", &self.previews)
@@ -620,6 +624,7 @@ impl App {
         app.room_previews = config.room_previews;
         app.link_previews = config.link_previews;
         app.notify_mode = config.notifications;
+        app.notify_auto = app.probes.notify_auto();
         if config.notifications != crate::notify::NotifyMode::Off {
             app.notify_mode_on = config.notifications;
         }
@@ -714,6 +719,7 @@ impl App {
             pending_copy: None,
             notify_mode: crate::notify::NotifyMode::Off,
             notify_mode_on: crate::notify::NotifyMode::Auto,
+            notify_auto: crate::notify::NotifyMode::Terminal,
             notification_preview: true,
             count_notices: Vec::new(),
             detailed_notices: Default::default(),
@@ -1599,9 +1605,13 @@ impl App {
     }
 
     fn resolve_notice_icon(&mut self, notice: &crate::matrix::Notice) -> crate::notify::NotifyIcon {
-        if !self.notification_preview
-            || self.notify_mode.resolved() != crate::notify::NotifyMode::Desktop
-        {
+        let mode = match self.notify_mode {
+            crate::notify::NotifyMode::Auto => self.notify_auto,
+            mode @ (crate::notify::NotifyMode::Desktop
+            | crate::notify::NotifyMode::Terminal
+            | crate::notify::NotifyMode::Off) => mode,
+        };
+        if !self.notification_preview || mode != crate::notify::NotifyMode::Desktop {
             return crate::notify::NotifyIcon::Generic;
         }
         let room = self.rooms.iter().find(|r| r.id == notice.room_id);
@@ -5606,6 +5616,7 @@ mod tests {
             at_start,
             [
                 "no_color",
+                "notify_auto",
                 "player",
                 "recorder",
                 "ssh",
@@ -9190,6 +9201,26 @@ mod tests {
         assert!(matches!(ready.items[0].1, NotifyIcon::Generic));
         assert!(drain(&mut commands).is_empty());
         assert!(!temp_dir.exists());
+
+        // `auto` is what the probes said it is here: the terminal's, as above...
+        app.shown_notices.clear();
+        app.notify_mode = NotifyMode::Auto;
+        app.notify_auto = NotifyMode::Terminal;
+        app.on_matrix(make_notice());
+        let ready = app.take_notices_with_icons();
+        assert!(matches!(ready.items[0].1, NotifyIcon::Generic));
+        assert!(drain(&mut commands).is_empty());
+        // ...or the desktop's, whose notices show the room's picture: only now is it
+        // asked for.
+        app.shown_notices.clear();
+        app.notify_auto = NotifyMode::Desktop;
+        app.on_matrix(make_notice());
+        let ready = app.take_notices_with_icons();
+        assert!(matches!(ready.items[0].1, NotifyIcon::Tile { ch: 'B', .. }));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(MatrixCmd::FetchAvatar { url }) if url == "mxc://example.org/never-fetch"
+        ));
     }
 
     #[test]
