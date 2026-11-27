@@ -27,10 +27,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use futures::FutureExt;
-use futures::future::{BoxFuture, Shared};
+use futures::future::Shared;
 use matrix_sdk::ruma::api::client::membership::joined_rooms;
 use matrix_sdk::ruma::{OwnedRoomId, RoomId};
-use matrix_sdk::{Client, Room, RoomState};
+use matrix_sdk::{BoxFuture, Client, Room, RoomState};
 use tokio::sync::Notify;
 
 use crate::rt::{self, JoinHandle, JoinSet};
@@ -83,7 +83,8 @@ pub struct LeftRooms {
 }
 
 /// A question to the server about the rooms the account is in, shared by the rooms
-/// asked about while it is on its way.
+/// asked about while it is on its way. (matrix-sdk's `BoxFuture` is `Send` only outside
+/// the browser, where the client's requests are not.)
 type Question = Shared<BoxFuture<'static, Option<Arc<HashSet<OwnedRoomId>>>>>;
 
 impl std::fmt::Debug for LeftRooms {
@@ -201,9 +202,9 @@ impl LeftRooms {
     fn question(&self, client: &Client, since: Instant) -> Question {
         let ask = || {
             let client = client.clone();
-            async move { server_joined(&client).await.map(Arc::new) }
-                .boxed()
-                .shared()
+            let question: BoxFuture<'static, _> =
+                Box::pin(async move { server_joined(&client).await.map(Arc::new) });
+            question.shared()
         };
         let Ok(mut on_its_way) = self.question.lock() else {
             return ask();

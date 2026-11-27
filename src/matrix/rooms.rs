@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use futures::{StreamExt, pin_mut};
 use matrix_sdk::room::edit::EditedContent;
 use matrix_sdk::ruma::api::client::receipt::create_receipt::v3::ReceiptType;
@@ -26,7 +26,7 @@ use tokio::sync::watch;
 
 use super::paging::{self, PageError, Paging};
 use super::safety::{IgnoredSet, is_ignored_in};
-use super::{DetachedTimeline, MatrixCmd, MatrixEvent, drafts, threads};
+use super::{DetachedTimeline, MatrixCmd, MatrixEvent, SdkResult, drafts, threads};
 use crate::format::Outgoing;
 use crate::logsafe;
 use crate::model::ItemRef;
@@ -1223,10 +1223,11 @@ impl Timelines {
                                 .map_err(|_| anyhow!("invalid event id"))?;
                             timeline
                                 .send_reply(content_without_relation(&message)?, event_id)
-                                .await?;
+                                .await
+                                .sdk()?;
                         }
                         None => {
-                            timeline.send(content(&message)?.into()).await?;
+                            timeline.send(content(&message)?.into()).await.sdk()?;
                         }
                     }
                     Ok(())
@@ -1240,7 +1241,7 @@ impl Timelines {
             } => {
                 self.with_active_timeline(&room_id, "Could not edit", |timeline| async move {
                     let content = EditedContent::RoomMessage(content_without_relation(&message)?);
-                    timeline.edit(&item_id(&item)?, content).await?;
+                    timeline.edit(&item_id(&item)?, content).await.sdk()?;
                     Ok(())
                 })
                 .await;
@@ -1257,7 +1258,8 @@ impl Timelines {
                 self.with_active_timeline(&room_id, "Could not react", |timeline| async move {
                     timeline
                         .toggle_reaction_with_extra_content(&item_id(&item)?, &key, extra)
-                        .await?;
+                        .await
+                        .sdk()?;
                     Ok(())
                 })
                 .await;
@@ -1275,7 +1277,10 @@ impl Timelines {
                     .filter(|s| !crate::text::is_blank(s));
                 self.with_active_timeline(&room_id, "Could not delete", |timeline| async move {
                     let target = item_id(&item)?;
-                    timeline.redact(&target, clean_reason.as_deref()).await?;
+                    timeline
+                        .redact(&target, clean_reason.as_deref())
+                        .await
+                        .sdk()?;
                     if let ItemRef::Event(id) = item {
                         cache
                             .lock()
@@ -1432,7 +1437,7 @@ impl Timelines {
                         .find(|event| event.identifier() == wanted)
                         .and_then(|event| event.local_echo_send_handle())
                         .ok_or_else(|| anyhow!("this message is no longer waiting"))?;
-                    handle.unwedge().await?;
+                    handle.unwedge().await.sdk()?;
                     // The SDK stops a room's queue after any failure; nothing would
                     // be tried again without this.
                     timeline.room().send_queue().set_enabled(true);
@@ -1585,7 +1590,7 @@ impl Timelines {
                 Ok(room) => {
                     let left = self.left.clone();
                     self.spawn("Could not join", async move {
-                        room.join().await?;
+                        room.join().await.sdk()?;
                         // In it: no longer a room that was left. Only now: until the join
                         // went through, one left here stays as gone as it was.
                         left.clear(room.room_id());
@@ -1601,7 +1606,7 @@ impl Timelines {
                     let left = self.left.clone();
                     self.spawn("Could not leave", async move {
                         let was_knocked = room.state() == matrix_sdk::RoomState::Knocked;
-                        room.leave().await?;
+                        room.leave().await.sdk()?;
                         // Remembered like any room left, so that a sync answer that was on
                         // its way cannot bring it back as one the user is in. (A new
                         // invitation still shows: that is news.)
@@ -1797,7 +1802,7 @@ impl Timelines {
             } => {
                 self.with_timeline(&room_id, "Could not send sticker", |timeline| async move {
                     let content = sticker_content(&name, url, dimensions, size, mime)?;
-                    timeline.send(content.into()).await?;
+                    timeline.send(content.into()).await.sdk()?;
                     Ok(())
                 })
                 .await;
@@ -1817,7 +1822,7 @@ impl Timelines {
                             fallback, block,
                         ),
                     );
-                    timeline.send(content.into()).await?;
+                    timeline.send(content.into()).await.sdk()?;
                     Ok(())
                 })
                 .await;
@@ -1837,7 +1842,7 @@ impl Timelines {
                         fallback_text: fallback,
                         new_content: block,
                     };
-                    timeline.edit(&item_id(&item)?, edited).await?;
+                    timeline.edit(&item_id(&item)?, edited).await.sdk()?;
                     Ok(())
                 })
                 .await;
@@ -1853,7 +1858,7 @@ impl Timelines {
                     let content = matrix_sdk::ruma::events::poll::unstable_response::UnstablePollResponseEventContent::new(
                         answers, poll_id,
                     );
-                    timeline.send(content.into()).await?;
+                    timeline.send(content.into()).await.sdk()?;
                     Ok(())
                 })
                 .await;
@@ -1869,7 +1874,7 @@ impl Timelines {
                     let content = matrix_sdk::ruma::events::poll::unstable_end::UnstablePollEndEventContent::new(
                         fallback, poll_id,
                     );
-                    timeline.send(content.into()).await?;
+                    timeline.send(content.into()).await.sdk()?;
                     Ok(())
                 })
                 .await;
@@ -2152,7 +2157,7 @@ async fn room_timeline(room: &Room) -> Result<Timeline> {
         .track_read_marker_and_receipts(TimelineReadReceiptTracking::MessageLikeEvents)
         .build()
         .await
-        .context("could not open the room's messages")
+        .sdk_context("could not open the room's messages")
 }
 
 fn receipt_type(public: bool) -> ReceiptType {
@@ -2201,8 +2206,8 @@ async fn mark_room_read(
                         event_id,
                     )
                     .await;
-                r?;
-                m?;
+                r.sdk()?;
+                m.sdk()?;
                 return Ok(());
             }
             bail!("no message to mark as read");
@@ -2210,8 +2215,8 @@ async fn mark_room_read(
     }
     let receipt = timeline.mark_as_read(receipt).await;
     let marker = timeline.mark_as_read(ReceiptType::FullyRead).await;
-    receipt?;
-    marker?;
+    receipt.sdk()?;
+    marker.sdk()?;
     Ok(())
 }
 

@@ -25,6 +25,7 @@ mod receipts;
 mod rooms;
 mod safety;
 mod saved;
+mod sdk_error;
 pub(crate) mod search;
 #[cfg(not(target_family = "wasm"))]
 mod session;
@@ -71,6 +72,9 @@ pub use people::{
     OwnProfile, OwnProfileAction, UserProfile, UserSharedRoom, UserVerifyStatus, fallback_localpart,
 };
 pub use saved::{MAX_FETCH as SAVED_MAX_FETCH, SavedCmd, SavedEvent};
+#[cfg(target_family = "wasm")]
+pub(crate) use sdk_error::CopiedError;
+use sdk_error::SdkResult;
 pub use search::SearchHit;
 pub use session::{ReauthKind, ReauthTarget};
 pub use source::{EventSource, SOURCE_MAX, SourceKind};
@@ -86,7 +90,7 @@ pub use verify::{
 
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use futures::{StreamExt, pin_mut};
 use matrix_sdk::encryption::recovery::RecoveryState;
 use matrix_sdk::notification_settings::RoomNotificationMode;
@@ -1891,7 +1895,7 @@ impl Worker {
             .with_room_list_timeline_limit(20)
             .build()
             .await
-            .context("could not set up sync")?;
+            .sdk_context("could not set up sync")?;
         // Start listening for redecryption reports before sync begins so any
         // newly decrypted UTDs are forwarded into the search index.
         let mut searcher = search::Searcher::new(
@@ -1914,7 +1918,7 @@ impl Worker {
             .room_list_service()
             .all_rooms()
             .await
-            .context("could not open the room list")?;
+            .sdk_context("could not open the room list")?;
         let (entries, controller) = room_list.entries_with_dynamic_adapters(ROOM_PAGE);
         // Nothing is emitted until a filter is set.
         controller.set_filter(Box::new(new_filter_non_left()));

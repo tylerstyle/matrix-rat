@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use matrix_sdk::deserialized_responses::TimelineEvent;
 use matrix_sdk::room::ListThreadsOptions;
 use matrix_sdk::ruma::api::client::threads::get_threads::v1::IncludeThreads;
@@ -22,7 +22,7 @@ use matrix_sdk_ui::timeline::{
 
 use super::convert::shown_name;
 use super::safety::IgnoredSet;
-use super::{moderation, search};
+use super::{SdkResult, moderation, search};
 use crate::model::{ItemRef, Message, ThreadInfo, ThreadSummary};
 use crate::rt;
 use crate::text::{first_line, sanitize_line, truncate};
@@ -62,7 +62,7 @@ pub async fn open(room: &Room, root: &str) -> Result<Timeline> {
         .track_read_marker_and_receipts(TimelineReadReceiptTracking::MessageLikeEvents)
         .build()
         .await
-        .context("could not open the thread")
+        .sdk_context("could not open the thread")
 }
 
 /// What to show under a message that started a thread. Text from other people is

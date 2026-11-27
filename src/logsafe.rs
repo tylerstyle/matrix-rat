@@ -158,6 +158,12 @@ fn recognise(err: &(dyn Error + 'static)) -> Option<Why> {
     if let Some(err) = find::<matrix_sdk_ui::timeline::Error>(err) {
         return Some(timeline(err));
     }
+    // In the browser an SDK error reaches `anyhow` as a copy, which knows what this
+    // function made of the original (see `crate::matrix::sdk_error`).
+    #[cfg(target_family = "wasm")]
+    if let Some(err) = find::<crate::matrix::CopiedError>(err) {
+        return Some(err.why());
+    }
     if let Some(err) = find::<std::io::Error>(err) {
         return Some(Why::Io(err.kind()));
     }

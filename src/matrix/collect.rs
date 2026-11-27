@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use futures::{FutureExt, StreamExt, pin_mut};
 use matrix_sdk::ruma::events::fully_read::FullyReadEventContent;
 use matrix_sdk::ruma::{OwnedUserId, UserId};
@@ -40,9 +40,9 @@ use matrix_sdk_ui::timeline::{
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::watch;
 
-use super::MatrixEvent;
 use super::paging::{self, PageError};
 use super::safety::IgnoredSet;
+use super::{MatrixEvent, SdkResult};
 use crate::collect::{self, Cut, Span};
 use crate::logsafe;
 use crate::model::{Message, Namesakes};
@@ -426,7 +426,7 @@ async fn open(room: &Room) -> Result<Timeline> {
     rt::timeout(OPEN_TIMEOUT, build)
         .await
         .map_err(|_| anyhow!("opening the room's messages timed out"))?
-        .context("could not open the room's messages")
+        .sdk_context("could not open the room's messages")
 }
 
 type Items = Vector<Arc<TimelineItem>>;
