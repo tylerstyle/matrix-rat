@@ -16,6 +16,7 @@
 //! panic hook). With the setting off the title is never touched, not even saved.
 
 pub mod external_editor;
+pub mod icon_cache;
 pub mod termquery;
 
 use std::io::{self, Stdout, Write};
@@ -508,8 +509,8 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
         app.add_demo_space();
         app.maybe_open_startup_target();
     }
-    let notify_icons = Arc::new(crate::notify::IconCache::new(paths.notify_icons_dir()));
-    struct NotifyCacheGuard(Arc<crate::notify::IconCache>);
+    let notify_icons = Arc::new(icon_cache::IconCache::new(paths.notify_icons_dir()));
+    struct NotifyCacheGuard(Arc<icon_cache::IconCache>);
     impl Drop for NotifyCacheGuard {
         fn drop(&mut self) {
             self.0.clear();

@@ -11,10 +11,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use super::{
-    AppIcon, Click, Clicks, DueReminder, IconCache, NotifyIcon, NotifyMode, escape_markup,
+    AppIcon, Click, Clicks, DueReminder, NotifyIcon, NotifyMode, escape_markup,
     reminder_title_and_text, terminal_sequence, title_and_text,
 };
 use crate::matrix::Notice;
+use crate::shell::terminal::icon_cache::IconCache;
 use crate::time::Instant;
 
 /// The desktop's own icon for a new message: every icon theme has it.

@@ -244,7 +244,7 @@ pub struct ReadyNotices {
     pub items: Vec<(crate::matrix::Notice, crate::notify::NotifyIcon)>,
     pub mode: crate::notify::NotifyMode,
     pub preview: bool,
-    pub icon_cache: Option<(Arc<crate::notify::IconCache>, u64)>,
+    pub icon_cache: Option<(Arc<crate::shell::terminal::icon_cache::IconCache>, u64)>,
     /// Reminders that came due: shown under a title and text of their own.
     pub reminders: Vec<(crate::notify::DueReminder, crate::notify::NotifyIcon)>,
 }
@@ -346,7 +346,7 @@ pub struct App {
     /// Notifications on their way out; the event loop shows them.
     pub pending_notices: Vec<crate::matrix::Notice>,
     /// Ephemeral PNG cache for desktop notification avatars, wiped on logout/exit.
-    notify_icons: Option<Arc<crate::notify::IconCache>>,
+    notify_icons: Option<Arc<crate::shell::terminal::icon_cache::IconCache>>,
     /// The `download_dir` setting; empty means the desktop's download folder.
     download_dir: String,
     /// The `notification_click_command` setting (see `focus`). `None` where no
@@ -1582,7 +1582,7 @@ impl App {
     }
 
     /// Attaches the ephemeral desktop notification icon cache managed by the event loop.
-    pub fn set_notify_icons(&mut self, cache: Arc<crate::notify::IconCache>) {
+    pub fn set_notify_icons(&mut self, cache: Arc<crate::shell::terminal::icon_cache::IconCache>) {
         self.notify_icons = Some(cache);
     }
 
@@ -9050,7 +9050,8 @@ mod tests {
     #[test]
     fn desktop_notification_icons_tile_fetch_upgrade_invite_and_logout_wipe() {
         use crate::images::Decoded;
-        use crate::notify::{IconCache, NotifyIcon, NotifyMode};
+        use crate::notify::{NotifyIcon, NotifyMode};
+        use crate::shell::terminal::icon_cache::IconCache;
 
         let (mut app, _terminal, mut commands) = connected();
         let _ = drain(&mut commands);
@@ -9139,7 +9140,8 @@ mod tests {
 
     #[test]
     fn hidden_preview_and_terminal_mode_skip_icon_fetch_and_cache() {
-        use crate::notify::{IconCache, NotifyIcon, NotifyMode};
+        use crate::notify::{NotifyIcon, NotifyMode};
+        use crate::shell::terminal::icon_cache::IconCache;
 
         let (mut app, _terminal, mut commands) = connected();
         let _ = drain(&mut commands);

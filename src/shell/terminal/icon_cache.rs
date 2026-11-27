@@ -9,7 +9,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use super::{NotifyIcon, cache_filename, encode_icon_png, icon_cache_key};
+use crate::notify::{NotifyIcon, cache_filename, encode_icon_png, icon_cache_key};
 
 const DEFAULT_CACHE_LIMIT: usize = 64;
 

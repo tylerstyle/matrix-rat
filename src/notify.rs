@@ -3,10 +3,9 @@
 //!
 //! What a notification says, its icon and where a click on it goes are here. Sending it
 //! (the desktop's service over D-Bus, or the terminal's escape sequences) is in
-//! [`send`], and the owner-only folder of icon files the desktop is pointed at in
-//! [`icon_cache`].
+//! [`send`]; the owner-only folder of icon files the desktop is pointed at is the
+//! terminal shell's (`shell::terminal::icon_cache`).
 
-mod icon_cache;
 mod send;
 
 use std::io::Cursor;
@@ -20,7 +19,6 @@ use crate::matrix::Notice;
 use crate::text::truncate;
 use crate::theme::{Role, Theme};
 
-pub use icon_cache::IconCache;
 pub use send::{session_bus, set_app_icon, show, show_reminder};
 
 pub const TILE_SIZE: u32 = 96;
@@ -240,7 +238,7 @@ impl std::fmt::Debug for DueReminder {
 /// Where the clicks on notifications go: to the event loop.
 pub type Clicks = tokio::sync::mpsc::UnboundedSender<Click>;
 
-fn icon_cache_key(icon: &NotifyIcon) -> Option<Vec<u8>> {
+pub(crate) fn icon_cache_key(icon: &NotifyIcon) -> Option<Vec<u8>> {
     match icon {
         NotifyIcon::Generic => None,
         NotifyIcon::Tile { ch, bg, fg } => {
@@ -260,7 +258,7 @@ fn icon_cache_key(icon: &NotifyIcon) -> Option<Vec<u8>> {
     }
 }
 
-fn encode_icon_png(icon: &NotifyIcon) -> Result<Vec<u8>, image::ImageError> {
+pub(crate) fn encode_icon_png(icon: &NotifyIcon) -> Result<Vec<u8>, image::ImageError> {
     let mut bytes = Vec::new();
     match icon {
         NotifyIcon::Generic => {}
@@ -275,7 +273,7 @@ fn encode_icon_png(icon: &NotifyIcon) -> Result<Vec<u8>, image::ImageError> {
     Ok(bytes)
 }
 
-fn cache_filename(key: &[u8]) -> String {
+pub(crate) fn cache_filename(key: &[u8]) -> String {
     let mut hash: u128 = 0x6c62272e07bb014262b821756295c58d;
     for &b in key {
         hash ^= b as u128;
@@ -507,7 +505,7 @@ fn terminal_sequence(title: &str, text: &str, kitty: bool, id: u32) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -623,7 +621,7 @@ mod tests {
     }
 
     /// A fresh empty folder for one test, removed at its end.
-    pub(super) struct TempDir(pub PathBuf);
+    pub(crate) struct TempDir(pub PathBuf);
 
     impl TempDir {
         pub fn new(name: &str) -> Self {
