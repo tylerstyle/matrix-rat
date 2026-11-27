@@ -1344,15 +1344,21 @@ mod tests {
 
             let server = fake::Server::answering(sync(), older()).await;
             let client = signed_in(&server, app_options(false)).await;
-            // Until no more is asked for.
+            // Until no more is asked for in a second.
             let mut asked = 0;
-            for _ in 0..40 {
+            let mut quiet = 0;
+            for _ in 0..80 {
                 tokio::time::sleep(Duration::from_millis(250)).await;
                 let now = asked_for_messages(&server);
-                if now > 0 && now == asked {
+                quiet = if now > 0 && now == asked {
+                    quiet + 1
+                } else {
+                    0
+                };
+                asked = now;
+                if quiet == 4 {
                     break;
                 }
-                asked = now;
             }
             assert!((1..=20).contains(&asked), "{asked} requests");
 
