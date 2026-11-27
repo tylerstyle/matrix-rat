@@ -1911,6 +1911,10 @@ impl Worker {
         // against the server's list once the first sync is in (a room left in an earlier
         // session can look joined, see `left`).
         let mut start_check = left::StartCheck::new(client);
+        // Before the start: a subscriber only reports what changes after it was made, and
+        // the service can end at once (a token the server no longer takes, see
+        // `token_rejected`). Made here, the loop below sees whatever state it reached.
+        let mut sync_state = sync.state();
         sync.start().await;
 
         let room_list = sync
@@ -1923,8 +1927,8 @@ impl Worker {
         controller.set_filter(Box::new(new_filter_non_left()));
         pin_mut!(entries);
 
-        let mut sync_state = sync.state();
-        // The subscriber only reports changes; the service may already be running.
+        // The service may already be running. `get` leaves the state unseen, so the loop
+        // still checks it.
         self.emit(MatrixEvent::Sync(sync_status(&sync_state.get())));
         // The room list leaves its first state when the first answer of the server
         // has been worked in.
