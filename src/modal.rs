@@ -581,6 +581,8 @@ pub enum Setting {
     Logout,
     /// Whether the messages say who has read them (shown next to `ReadReceipts`).
     ReadMarkers,
+    /// Whether three months of every room's history are fetched for search.
+    SearchHistory,
     /// Theme used when the terminal is dark.
     ThemeDark,
     /// Theme used when the terminal is light.
@@ -600,7 +602,7 @@ pub enum Setting {
 }
 
 impl Setting {
-    pub const ALL: [Setting; 34] = [
+    pub const ALL: [Setting; 35] = [
         Setting::Theme,
         Setting::ThemePairing,
         Setting::ThemeDark,
@@ -614,6 +616,7 @@ impl Setting {
         Setting::TypingNotices,
         Setting::ReadReceipts,
         Setting::ReadMarkers,
+        Setting::SearchHistory,
         Setting::Notifications,
         Setting::DoNotDisturb,
         Setting::WindowTitle,
@@ -666,6 +669,7 @@ impl Setting {
             | Setting::Encryption
             | Setting::Logout
             | Setting::ReadMarkers
+            | Setting::SearchHistory
             | Setting::ThemeDark
             | Setting::ThemeLight
             | Setting::ThemePairing
@@ -692,6 +696,7 @@ impl Setting {
             Setting::TypingNotices => "Typing notices",
             Setting::ReadReceipts => "Read receipts",
             Setting::ReadMarkers => "Read markers",
+            Setting::SearchHistory => "Search history",
             Setting::Notifications => "Notifications",
             Setting::DoNotDisturb => "Do not disturb",
             Setting::Keywords => "Notification keywords",
@@ -741,6 +746,9 @@ impl Setting {
             Setting::TypingNotices => "Show others when you are typing.",
             Setting::ReadReceipts => "Show others how far you have read.",
             Setting::ReadMarkers => "Show under messages who has read up to there.",
+            Setting::SearchHistory => {
+                "Fetch three months of every room's messages in the background, so Ctrl-G finds them. Costs data and disk."
+            }
             Setting::Notifications => {
                 "Tell you about new messages while you are in another room or window."
             }

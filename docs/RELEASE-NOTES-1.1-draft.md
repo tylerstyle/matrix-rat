@@ -21,8 +21,9 @@ handful of fixes from the SDK, and the SQLite in the release archives is current
   emptied once by its migration and fetched from the server again as rooms are synced and
   opened. The search index is rebuilt: matrix-sdk 0.20 no longer stretches its key (which
   made opening each room's index slow; the profile's key is random and needs no
-  stretching), so the old index cannot be opened and is deleted. Until messages are loaded
-  again, search finds fewer of them.
+  stretching), so the old index cannot be opened and is deleted. Search history (see New)
+  fills both again in the background, three months back; with it turned off, search finds
+  fewer messages until they are loaded again.
 
 ## New
 
@@ -50,6 +51,15 @@ handful of fixes from the SDK, and the SQLite in the release archives is current
   asks for a reason before it deletes; `Del` still deletes at once. It has no key by
   default (`delete_with_reason` under `[keys.timeline]` gives it one).
 
+- **Search reaches back three months.** Once a session, about ten seconds after the room
+  list is in, matrix-rat fetches three months of every room's messages in the background,
+  a room a second, so that search across all rooms (`Ctrl-G`) finds them, encrypted ones
+  too once their keys are there. The search box says how far it has got ("Fetching older
+  messages, back to 28 Aug…", then "back to about 28 Aug"). It costs data and disk: the
+  first run fetches the most, later ones read what is stored, in seconds, and fetch only
+  what is missing. **Search history** in the settings (`search_history = false`) turns it
+  off, at once; `matrix-rat serve` never fetches. Built on matrix-sdk 0.20's search backfill.
+
 ## Changed
 
 - **Search across all rooms (`Ctrl-G`) lists the newest matches first**, instead of the
@@ -61,6 +71,12 @@ handful of fixes from the SDK, and the SQLite in the release archives is current
   said that its key had not arrived. No key will make it readable.
 - **The room list orders rooms without messages by their activity** among the others,
   instead of after all rooms with messages.
+- **Room previews reach back**: a room whose last events hold no message (only topic
+  changes or people coming and going, say) shows its last message under its name, fetched
+  from the server, where its line had none. And an unread room whose read marker lies
+  further back than what was synced has its older messages fetched (at most 600), so its
+  count of unread messages is right. Both come with matrix-sdk 0.20 and run whatever the
+  search history setting says.
 - **The log keeps the libraries out.** By default it holds only matrix-rat's own notes;
   the lines of matrix-sdk and the other libraries, many of which carry room, user or
   device ids or an error as it came, no longer go in. `MATRIX_RAT_LOG` still lets them in
@@ -132,10 +148,20 @@ Through matrix-sdk 0.20:
   with `Ctrl-Z`, and every other dependency at its newest compatible version.
 
 <!-- Notes for the final text, not for the release:
-- "Until messages are loaded again, search finds fewer of them": if the search backfill of
-  §6.1 ("Search reaches back three months") ships with 1.1.0, it refills the index on its
-  own (`EventCache::run_search_backfill` indexes the stored events once, then pages back);
-  reword then.
+- Search history: reworded the upgrade note above (the run indexes the stored events once,
+  then pages back). Measured on the dev server, 2026-11-27 (`search_history_cost`,
+  docs/DESIGN-1.1.md §1 "Measured"): 9 101 events in 9 rooms took 189 `/messages`, 2.3 MB
+  down, 57 s and 12.8 MB of disk (2.3 KB per event); a later start asked the server nothing
+  and was done in 1 s (4 s when the index is redone). For 100 000 events in 100 rooms: about
+  3 400 requests and 236 MB, 29 min at 0.5 s a request plus up to 23 min of pacing on the
+  first run; within the gate (1 GB, 1 h), so on by default. Later starts leave the SDK's
+  sweep out: it fetches nothing then, but its pacing cost a second per room and week (about
+  21 min for 100 rooms) before. What the SDK had not indexed when a session ended is indexed
+  at the next start (a mark of ours, `history-indexing`, removes the SDK's `reindexed-v1`).
+  matrix-sdk 0.20's sweep alone stops at about 300 events a room (its batch cap counts what it reads back
+  from disk); our own walk takes each room the rest of the way (at most 3 900 events). With
+  search history off, the start still costs the latest-event and read-receipt backfills (87
+  `/messages` in the test, 67 of them one room of 2 000 topic changes).
 - Upgrade tested on the dev homeserver on 2026-11-27: profiles made with the 0.19.1 build
   (one without cross-signing, one verified with an encrypted room) opened with the 0.20
   build: the session was restored, history showed and decrypted, search found the old

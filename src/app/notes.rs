@@ -880,6 +880,7 @@ impl App {
             | Setting::Profile
             | Setting::Logout
             | Setting::ReadMarkers
+            | Setting::SearchHistory
             | Setting::ThemeDark
             | Setting::ThemeLight
             | Setting::ThemePairing

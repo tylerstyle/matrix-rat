@@ -1730,6 +1730,7 @@ impl Timelines {
             | MatrixCmd::Manage(_)
             | MatrixCmd::SearchMessages { .. }
             | MatrixCmd::CancelSearch
+            | MatrixCmd::SearchHistory { .. }
             | MatrixCmd::IgnoreUser { .. }
             | MatrixCmd::UnignoreUser { .. }
             | MatrixCmd::ReportContent { .. }
@@ -5526,7 +5527,7 @@ mod tests {
         use matrix_sdk::ruma::events::fully_read::FullyReadEventContent;
         use matrix_sdk::{Client, Room};
 
-        use crate::matrix::{MatrixEvent, spawn};
+        use crate::matrix::MatrixEvent;
         use crate::model::ItemRef;
         use crate::paths::Paths;
 
@@ -5562,7 +5563,8 @@ mod tests {
             profile: "it".into(),
         };
         paths.create_dirs().unwrap();
-        let (handle, mut events) = spawn(paths);
+        // With the app's options: the read-receipt backfill runs, as for users.
+        let (handle, mut events) = crate::matrix::spawn_app(paths, false);
         handle.send(MatrixCmd::LoginPassword {
             homeserver,
             username,
@@ -5777,7 +5779,8 @@ mod tests {
             profile: "it".into(),
         };
         paths.create_dirs().unwrap();
-        let (handle, mut events) = spawn(paths);
+        // With the app's options: the read-receipt backfill runs, as for users.
+        let (handle, mut events) = crate::matrix::spawn_app(paths, false);
         handle.send(MatrixCmd::LoginPassword {
             homeserver,
             username,

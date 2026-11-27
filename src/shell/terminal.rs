@@ -488,7 +488,10 @@ pub async fn run(paths: &Paths, config: &Config, demo: bool, target: Option<Stri
     let (matrix, mut matrix_events) = if demo {
         (None, None)
     } else {
-        let (handle, events) = matrix::spawn_with(paths.clone(), config.secret_store);
+        // The app always has the back-pagination queue; the setting says only whether
+        // the search history is fetched.
+        let options = matrix::WorkerOptions::app(config.secret_store, config.search_history);
+        let (handle, events) = matrix::spawn_with(paths.clone(), options);
         (Some(handle), Some(events))
     };
     let mut app = App::new_in_scheme(

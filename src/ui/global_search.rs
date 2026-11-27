@@ -12,13 +12,35 @@ use super::hit::{HitId, InputTarget};
 use super::modal::{centered, popup, row};
 use crate::app::App;
 use crate::app::global_search::GlobalSearch;
+use crate::matrix::HistoryRun;
 use crate::matrix::search::first_term_match_span;
 use crate::text::{truncate, width};
 use crate::theme::Role;
 
 const WIDTH: u16 = 78;
 const HEIGHT: u16 = 22;
-const DEVICE_HINT: &str = "Searches messages loaded on this device";
+/// Under matches while older messages are still being fetched, unless the search has a
+/// note of its own (which asks the user to do something).
+const STILL_FETCHING: &str = "Still fetching older messages: search again later for more";
+
+/// What the box says under an empty query: where search looks, and how far the fetch of
+/// older messages has got (the `search_history` setting).
+fn device_hint(run: &HistoryRun) -> Vec<String> {
+    const ON: &str = "Searches messages on this device";
+    match run {
+        HistoryRun::Off => vec!["Searches messages loaded on this device".to_owned()],
+        HistoryRun::Waiting => vec![ON.to_owned(), "Fetching older messages…".to_owned()],
+        HistoryRun::Running { back_to } => vec![
+            ON.to_owned(),
+            format!("Fetching older messages, back to {back_to}…"),
+        ],
+        HistoryRun::Done { back_to } => vec![format!("{ON}, back to about {back_to}")],
+        HistoryRun::Stopped => vec![
+            ON.to_owned(),
+            "Fetching older messages stopped; it goes on at the next start".to_owned(),
+        ],
+    }
+}
 
 pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, state: &mut GlobalSearch) {
     let Some(rect) = centered(area, WIDTH, HEIGHT) else {
@@ -98,7 +120,13 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, state: &mut GlobalSear
         return;
     }
 
-    let show_note = state.note.is_some() && !state.hits.is_empty() && avail_rows >= 3;
+    let fetching = app.history_run.fetching();
+    let note = state
+        .note
+        .as_deref()
+        .or(fetching.then_some(STILL_FETCHING))
+        .map(str::to_owned);
+    let show_note = note.is_some() && !state.hits.is_empty() && avail_rows >= 3;
     let list_rows = avail_rows - usize::from(show_note);
     let card_rows: usize = if list_rows >= 2 { 2 } else { 1 };
     let cap = (list_rows / card_rows).max(1);
@@ -121,23 +149,27 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, state: &mut GlobalSear
     }
 
     if state.hits.is_empty() {
-        let msg = if state.query.trim().is_empty() {
-            DEVICE_HINT
+        let lines = if state.query.trim().is_empty() {
+            device_hint(&app.history_run)
         } else if state.pending_at.is_some() || state.searching {
-            "searching…"
+            vec!["searching…".to_owned()]
         } else if let Some(note) = &state.note {
-            note.as_str()
+            vec![note.clone()]
+        } else if fetching {
+            vec!["no matches yet; still fetching older messages".to_owned()]
         } else {
-            "no matches"
+            vec!["no matches".to_owned()]
         };
         let line_w = (inner.width as usize).saturating_sub(2);
-        frame.render_widget(
-            Line::from(Span::styled(
-                format!("  {}", truncate(msg, line_w)),
-                theme.style(Role::Muted),
-            )),
-            row(inner, list_y),
-        );
+        for (at, msg) in lines.iter().take(avail_rows).enumerate() {
+            frame.render_widget(
+                Line::from(Span::styled(
+                    format!("  {}", truncate(msg, line_w)),
+                    theme.style(Role::Muted),
+                )),
+                row(inner, list_y + at as u16),
+            );
+        }
         return;
     }
 
@@ -241,7 +273,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, state: &mut GlobalSear
         app.hits.add(card_rect, HitId::GlobalSearch(vis));
     }
 
-    if show_note && let Some(note) = &state.note {
+    if show_note && let Some(note) = &note {
         let note_rect = row(inner, (list_y as usize + list_rows) as u16);
         let note_w = (note_rect.width as usize).saturating_sub(2);
         frame.render_widget(

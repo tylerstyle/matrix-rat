@@ -33,7 +33,7 @@ notifications and themes that follow your desktop are all there.
 | 💬 **Everything a chat needs** | Replies, edits, reactions, threads, polls, stickers and custom emoji, voice messages (record and play in the app, with optional local transcripts and message translations), mentions, read markers, typing notices; Markdown and `\|\|spoilers\|\|` are applied when you send. |
 | 📬 **Pick up where you left off** | A "new" line above the first unread message, with the view starting there when a lot has happened; `Alt-U` jumps back to it. Mark a room as unread (your other clients see that too) or everything as read, save messages for later with reminders (`b`, `B`), summarise what is unread or the last messages (`/catchup [N]`), or archive a room as Markdown (`/archive`). |
 | 📎 **Files both ways** | Drop a file into the terminal to attach it, or `Alt-I` for the picture in the clipboard; `Enter` sends it; `s` on a selected message saves its attachment to your download folder. |
-| 🔎 **Find things fast** | `Ctrl-K` for rooms, `Ctrl-F` inside a room, `Ctrl-G` across all rooms (encrypted ones too), `Ctrl-P` for every command. Completions for `@people`, `:emoji:`, `#rooms` and `/commands`. |
+| 🔎 **Find things fast** | `Ctrl-K` for rooms, `Ctrl-F` inside a room, `Ctrl-G` across all rooms (encrypted ones too, three months back), `Ctrl-P` for every command. Completions for `@people`, `:emoji:`, `#rooms` and `/commands`. |
 | 🖱️ **Mouse-friendly** | Click to focus, scroll anything, drag the divider, right-click for a menu of what applies. |
 | 📐 **Fits any window** | Below 60 columns the room list steps aside and one pane fills the window: the chat while you read and write, the room list when you go to it (`Alt-1`, `Alt-←`, or `Ctrl-K`). Popups scroll and keep their hints on small terminals, so it stays usable in a narrow split or a phone-sized SSH session. `Ctrl-B` puts the room list away the same way in a window of any size. While the list is out of sight, a **rooms bar** above the chat leads back to it and shows the rooms with new notifications (see Good to know). |
 | 🎨 **Yours to shape** | Twelve built-in themes, dark/light pairing, live theme files for Noctalia, matugen, wallust and pywal, and every key rebindable. |
@@ -450,6 +450,7 @@ Setting `preset = "vim"` keeps the default keys and adds:
 | `rooms_bar` | `true` (default): while the room list is out of sight (put away with `Ctrl-B`, or a chat is open in a window below 60 columns), a line above the chat with **☰ Rooms** and the rooms that have new notifications. `false` (or "Rooms bar" in the settings): no such line, the chat has it |
 | `esc_closes_chat` | `true` (default): `Esc` in the composer, with no reply, edit or thread left to step back from, closes the chat and goes to the room list. `false`: `Esc` stops at the composer |
 | `read_receipts`, `read_markers`, `typing_notices` | what others see of you, and what you see of them |
+| `search_history` | `true` (default): once a session, shortly after the start, three months of every room's messages are fetched in the background, so that `Ctrl-G` finds them; it costs data and disk (see Good to know). `false` (or "Search history" in the settings): search finds what was loaded while you used matrix-rat |
 | `notifications` | on or off in the menu; in the file also `"desktop"` or `"terminal"` instead of `"auto"` |
 | `download_dir` | where `s` saves attachments |
 | `audio_player` | what plays voice and audio messages in the app (`x`): `"auto"` (default) takes the first of `mpv`, `ffplay`, `pw-play`, `paplay` and `aplay` found on `PATH`; or a command line of your own, such as `"mpv --volume=70"`, to which the file is added at the end (split into words like `$EDITOR`, no shell). It must play the file and end when the sound does. Also **Audio player** in the settings, which says what was found. See Good to know |
@@ -548,6 +549,21 @@ There is no command that lists or removes profiles; a profile is its two folders
   It takes no row of its own and is there without colours too (`NO_COLOR`). An action
   (`/me`) names its sender itself and has none; after it, after the "new" line, a day's
   line or a line of the room's (a join, say) the name comes again.
+- **Search reaches back three months.** `Ctrl-G` searches the messages kept on this
+  device. So that it finds older ones too, matrix-rat fetches about three months of
+  every room's messages in the background, once a session, starting about ten seconds
+  after the room list is in: a room at a time, a second apart, the most recently active
+  rooms first, and no more than about 4 000 messages of a room. The search box says how far it
+  has got ("Fetching older messages, back to 28 Aug…", then "back to about 28 Aug"); a
+  search while it fetches finds what has come so far. The first run fetches the most and
+  takes a while; later ones read what is already stored, in seconds, and ask the server
+  only for what is missing. What is fetched stays in the encrypted message store and the
+  search index (see **Several accounts** for where they are), and takes disk space. If
+  matrix-rat is closed before the search index has taken it all in, the next start indexes
+  the stored messages again (some CPU, no data). Encrypted messages are found once their
+  keys are there (from the key backup or another device).
+  "Search history" in the settings (`search_history = false`) turns it off, also in the
+  middle of a run; `matrix-rat serve` never fetches.
 - **Bridged chats** (Signal, WhatsApp…) show a quiet "sent on the sender's behalf" remark:
   the bridge encrypts for the people on the other side.
 - **Over SSH** notifications go through the terminal, and the dark/light mode is detected
