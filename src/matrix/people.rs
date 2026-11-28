@@ -2274,6 +2274,78 @@ mod tests {
             )
             .await;
 
+            // A name in the room given on another device of ours: it comes only through the
+            // sync, as a member event of ours (`follow_members`), and the details, our entry
+            // in the member list and our messages take it.
+            let elsewhere = format!("Alice Elsewhere {tag}");
+            let other = Client::builder()
+                .homeserver_url(&homeserver)
+                .build()
+                .await
+                .unwrap();
+            other
+                .matrix_auth()
+                .login_username(&username, &password)
+                .initial_device_display_name("matrix-rat people test")
+                .send()
+                .await
+                .unwrap();
+            let mut renamed = RoomMemberEventContent::new(MembershipState::Join);
+            renamed.displayname = Some(elsewhere.clone());
+            other
+                .send(
+                    matrix_sdk::ruma::api::client::state::send_state_event::v3::Request::new(
+                        parsed_room.clone(),
+                        &*own_uid,
+                        &renamed,
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            let _ = other.logout().await;
+            // Both, in either order: our messages are shown anew as soon as the name is
+            // noted, the details after a look at the room.
+            let (mut info, mut messages_renamed) = (None, false);
+            while info.is_none() || !messages_renamed {
+                let seen = recv_until(
+                    &mut events,
+                    "the name from elsewhere in the room info and the timeline",
+                    |e| match e {
+                        MatrixEvent::Manage(ManageEvent::Info {
+                            room_id: r,
+                            result: Ok(d),
+                        }) if r == room_id
+                            && !d.members_loading
+                            && d.own_display_name.as_deref() == Some(elsewhere.as_str()) =>
+                        {
+                            Some(Some(*d))
+                        }
+                        MatrixEvent::Timeline {
+                            room_id: r,
+                            messages,
+                            ..
+                        } if r == room_id
+                            && messages.iter().any(|m| {
+                                m.own
+                                    && m.body.contains("hi under room nick")
+                                    && m.sender == elsewhere
+                            }) =>
+                        {
+                            Some(None)
+                        }
+                        _ => None,
+                    },
+                )
+                .await;
+                match seen {
+                    Some(details) => info = Some(details),
+                    None => messages_renamed = true,
+                }
+            }
+            let info = info.expect("room info with the name from elsewhere");
+            assert!(info.members.iter().any(|m| m.own && m.name == elsewhere));
+
             // 4. FetchUserProfile returns Bob's shared room + room member details.
             handle.send(MatrixCmd::FetchUserProfile {
                 request: 42,
