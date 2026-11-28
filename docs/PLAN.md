@@ -9,9 +9,9 @@ what comes next. It is kept current. Two things that used to live here have thei
 - the log of every review: [`docs/REVIEW-LOG.md`](REVIEW-LOG.md), with the reviews in
   [`docs/reviews/`](reviews/).
 
-Last brought up to date: 2026-11-26, with 1.1.0 (§6.1) and 1.2.0 (§6.2) planned; releases up to 1.0.3. The
+Last brought up to date: 2026-11-28, with 1.2.0 planned (§6.1); releases up to 1.1.0. The
 plans of 0.8 and 0.9 moved to [`docs/history/`](history/) on 2026-11-20, the road to 1.0 on
-2026-11-21.
+2026-11-21, the plan of 1.1.0 on 2026-11-28.
 
 ## 1. What it is for
 
@@ -47,6 +47,7 @@ Not goals: calls, widgets, creating or deactivating accounts, a Windows build.
 | 1.0.1 | 2026-11-21 | No more quitting two seconds after opening a room (a repaint asked the terminal for its cursor while the event stream held its reader); an error exit shuts the worker down first. Nothing lights up under the mouse pointer any more, and the terminal reports only clicks, the wheel and drags. comrak 1.0, clap 4.6.8, zeroize 1.9.2; the release workflow on checkout v7, upload-artifact v7, download-artifact v8. |
 | 1.0.2 | 2026-11-23 | Dependencies brought up to date: url 2.5.9 (RUSTSEC-2026-0592), comrak 1.2.0 (slow parsing of some tables, autolinks and strikethrough runs fixed), zbus 6.5, clap 4.6.9 and 37 more compatible updates (one crate fewer); `cargo deny` looks for unmaintained crates in the whole tree again (cargo-deny 0.22 in CI). |
 | 1.0.3 | 2026-11-23 | `/catchup N` summarises the last N messages of the open room (1 to 300), read or not, and moves no read marker. Over ssh, where themes come down to 256 colours, the room cursor shows again: each colour goes to the nearest of cube and grey ramp, shades that differed stay apart, and a `›` marks the cursor while the room list has focus. A message that matrix-sdk-ui 0.19.1 delivered twice is collected once, at its first place, so the newest of a summary are the newest. Every settings hint is whole in its two lines (nine were cut, the translate and summary commands' privacy notes among them). No half emoji box before the read marker; a custom emoji picture that failed is tried again after a pause; names stop at the 255 bytes a server takes. |
+| 1.1.0 | 2026-11-28 | matrix-sdk 0.20 (pinned exactly again; the stores are migrated, so no way back to 1.0.x; search lists the newest matches first) and every dependency up to date (Rust 1.99, notify 9, signal-hook 0.4). Search history: every room fetched back about three months in the background, so search across all rooms finds older messages (on by default; for 100,000 messages about 230 MB and half an hour, once; later starts read the store in seconds; what a quit left unsearchable is made searchable at the next start). An edit, a deletion or a reaction that could not be sent shows "✕ … not sent" (a ✕ on a reaction), `Enter` tries it again and `Del` throws it away (a failed deletion keeps the message); what waits behind it says "◌ waiting". A deleted message says why and who deleted it; "Delete with a reason…". A muted `·` parts the messages of one person in a row. A device verified without the signing keys says so and offers "Verify again" or the recovery key; the Compare screen asks for the old device first. The log keeps the libraries out. Fixed: your name for one room before the sync has the room's state, and after a rename elsewhere; the SDK's panic while loading older messages. |
 
 Each release is a tag, a GitHub release with notes, the Nix package in the NUR with a binary
 cache, and (from 0.7.0) archives for x86-64 and ARM64 Linux built by
@@ -54,10 +55,11 @@ cache, and (from 0.7.0) archives for x86-64 and ARM64 Linux built by
 
 ## 3. How it is built
 
-One binary crate, about 190,000 lines of Rust with its tests (945 unit tests and 43 tests against
+One package, about 205,000 lines of Rust with its tests: a binary crate up to 1.0.3, since 1.1.0
+a library (which also builds for the browser) and the binary (945 unit tests and 43 tests against
 a real homeserver at 0.7.0; 1034 and 44 at 0.8.0; 1109 and 45 at 0.9.0; 1113 and 45 at 0.9.1;
-1589 and 47 at 1.0.0; 1593 and 47 at 1.0.1 and 1.0.2; 1620 and 49 at 1.0.3, besides 12
-measurements that are run by hand).
+1589 and 47 at 1.0.0; 1593 and 47 at 1.0.1 and 1.0.2; 1620 and 49 at 1.0.3; 1747 and 56 at
+1.1.0, besides 13 measurements that are run by hand).
 
 **Stack.** `matrix-sdk`, `matrix-sdk-ui` and `matrix-sdk-base` 0.20.0 (0.19.1 up to 1.0.3),
 pinned exactly (every minor release breaks APIs); `ratatui` 0.30 on `crossterm` 0.29; `tokio`;
@@ -153,8 +155,8 @@ Rust 1.99 or newer.
 | 2026-11-20 | Composer symbols: the emoji for now; a monochrome look later. |
 | 2026-11-20 | Rooms bar: counts in superscript, `(n)>` opens the room list, and the room icons win over the label (it shrinks to `☰`). |
 | 2026-11-21 | The memory and CPU pass is measured with the user's own account: the user runs a build of the 1.0 state for a day with `scripts/measure.sh` beside it, which reads only `/proc`. |
-| 2026-11-23 | Several messages of one person in a row: a muted `·` in the indent on the first line of each further message, under the header's `●` (1.1.0, §6.1). |
-| 2026-11-26 | matrix-rat in the browser and as a phone app (a PWA, iOS and Android) with ratzilla: the main goal of 1.2.0 (§6.2). A test build (phase 0) runs beside 1.1.0 first and decides go or no-go. |
+| 2026-11-23 | Several messages of one person in a row: a muted `·` in the indent on the first line of each further message, under the header's `●` (1.1.0, [`history/1.1-plan.md`](history/1.1-plan.md)). |
+| 2026-11-26 | matrix-rat in the browser and as a phone app (a PWA, iOS and Android) with ratzilla: the main goal of 1.2.0 (§6.1). A test build (phase 0) runs beside 1.1.0 first and decides go or no-go. |
 | 2026-11-26 | The web app is served by GitHub Pages from this repository; only the app's files are there, all data stays on the device. |
 | 2026-11-26 | The test build is hosted locally first (hpserver; desktop by ssh tunnel, phones on the Wi-Fi); notifications while the web app is closed wait (phase 4). |
 | 2026-11-26 | No unlock prompt for the web app ("Almost no one is doing that to any other messenger they use"), as no lock screen for the terminal app. |
@@ -165,94 +167,10 @@ What 0.8, 0.9 and 1.0 were planned as is kept in
 [`history/0.8-ideas-from-faro.md`](history/0.8-ideas-from-faro.md),
 [`history/0.9-agent-channel.md`](history/0.9-agent-channel.md) and
 [`history/1.0-road.md`](history/1.0-road.md) (features first, then the passes over the code as
-it would ship: the user, 2026-11-20).
+it would ship: the user, 2026-11-20); the plan of 1.1.0 in
+[`history/1.1-plan.md`](history/1.1-plan.md).
 
-### 6.1 1.1.0 (next)
-
-What the user decides after using 1.0 for a while (from 2026-11-21 on). Nothing of it is built
-yet; each piece is written and reviewed as in §4.
-
-**Decided by the user on 2026-11-27:** the two fixes to released code on `main` (a name for one
-room before sync; the SDK's panic while loading older messages) ship with 1.1.0, no 1.0.4.
-Order: phase 1 of the web app is finished (steps 6 and 7) and `web-seams` merged into `main`
-first, then all of 1.1.0 is built on top. 1.1.0 starts with matrix-sdk 0.20, then notify 9 (accepted) and
-the dot. `--mobile` is dropped (§6.4). Building starts once all is talked through (2026-11-27).
-
-- **Everything up to date first** (the user, 2026-11-27: "update all dependancies … Before
-  doing yet more work, get us up to date"): Rust 1.96 → **1.99**, the newest nixpkgs has (the
-  Nix package builds with it; 1.100.0, out on 2026-11-12, is not in nixpkgs yet, not even
-  unstable; the release binaries on GitHub already build with the newest stable); every
-  compatible update (26 crates on top of matrix-sdk 0.20 on 2026-11-27; behind are only
-  generic-array and matchit, pinned exactly by others); the
-  breaking ones: matrix-sdk 0.20 (below), notify 9 (below) and signal-hook 0.4 (one call, the
-  terminal's suspend); the CI actions (cargo-deny-action 2.1.4). New features of 1.1.0 wait
-  until this is merged.
-- **matrix-sdk 0.20** (published 2026-11-25; the user: "Yes, integrate the new sdk!"), first:
-  about 19 breaking changes in matrix-sdk and more in matrix-sdk-ui. It fixes the race that
-  put a batch of messages twice into a timeline (PR #7284; our `dup-block` fix stays as a safety
-  net) and an event-cache panic after shrinking a room's chunks (#7389); our catch of the
-  "chunk not found" panic (#5416) stays unless that is fixed too. Pinned exactly again
-  (`=0.20.x`), for terminal and web at once. From a survey of its changelogs against our code
-  (2026-11-27, not yet compiled): about 7 real changes over ~40 places, mostly mechanical, 1.5
-  to 2.5 days with tests; the largest: `Client::event_cache()` (and `latest_events()`) answer an
-  `Option` and the cache is always on (~25 places), `Room::event_cache()` is gone, reactions
-  move back to the event item. ruma 0.17 → 0.18, MSRV unchanged, all our features remain.
-  - It fixes the SQLite advisory of §7 (rusqlite 0.41 → libsqlite3-sys 0.39.1 bundles SQLite
-    3.54.1), and the cause our panic catch names (all caches cleared at the start with an
-    ignore list, #7397); #5416 itself is not named, so the catch stays until it no longer
-    happens on the dev homeserver.
-  - **No way back:** the stores are migrated (the event cache is emptied once and fetched
-    again; the search index is rebuilt, its key no longer stretched, which is fine with our
-    random 256-bit passphrase), and keys exported or backed up by 0.20 read differently on
-    0.19.1. A profile used with 1.1.0 should not be opened with 1.0.x again; the release notes
-    say so. Tested with a real 1.0.3 profile before release.
-  - Comes with it at no cost: after a kick or ban the room's keys are changed; a message that
-    failed for good no longer turns the room's send queue off (it still holds back the ones
-    after it until it is retried or cancelled; our `set_enabled(true)` after a retry stays for
-    a failure the SDK takes as passing, a network error, which still turns it off); the read
-    marker when the last read event is not shown (a reaction, an edit); smaller fixes. Room
-    list order changes a little for rooms without messages.
-- **New with matrix-sdk 0.20, chosen by the user (2026-11-27)** for 1.1.0:
-  1. **Search reaches back three months** in every room: the SDK's search backfill
-     (`EventCache::run_search_backfill`, first what the cache holds, then by recency down to
-     three months). Today search finds only what this device has loaded.
-  2. **Retry or cancel what failed**: edits, reactions and deletions too, not only messages
-     (`Timeline::retry_send`, `abort_send`); cancelling the last pending edit puts the old
-     text back.
-  3. **A deleted message shows its reason**, when one was given (`redaction_reason()`).
-
-- **notify 9** (published 2026-11-21; the file watcher behind theme reloading): kept out of
-  1.0.2, which took only compatible updates. Its breaking changes reach how watch errors are
-  matched (`src/logsafe.rs`) and how events and watching the same path again behave
-  (`src/watch.rs`); its guide is `docs/UPGRADING_V8_TO_V9.md` in notify-rs/notify. With its own
-  review and the theme watcher tried by hand.
-- **Several messages of one person in a row, told apart** (the user, 2026-11-23): "a separator
-  in the chat view, when someone posts multiple messages. As it is now, they look as if written
-  as one and are hard to visually separate. … A line break, a line. Make suggestions." Today a
-  run of one sender's messages has one header (`● name  time`), every message's text sits
-  behind the same two-space indent (`INDENT`), and the empty row comes only before the next
-  sender (`Flow::next` and `Before` in `src/ui/timeline.rs`); only a reaction row parts two
-  messages of a run. **Chosen by the user (2026-11-23): suggestion 1, the dot** ("We go with
-  your idea, the dot."). The suggestions were:
-  1. a mark in the indent on the first line of each further message of the run, muted, such as
-     `·` under the header's `●`: no row more, readable without colour (`NO_COLOR`, 256
-     colours over ssh);
-  2. its time, muted, on that first line too (or only there);
-  3. an empty row between them, as between senders: the simplest, but a row per message,
-     felt most on a phone;
-  4. a faint line (`┄`) between them: the clearest, also a row each, and busier.
-  Not proposed: alternating background shades, which vanish without colour (as the room
-  cursor did over ssh). Whatever is chosen also has to fit selection (`↑` from the composer),
-  replies and threads, the read marker and the receipts row, and the room view's snapshots.
-  **Built (2026-11-27, branch `dot-separator`):** `· ` (`DOT`) in place of `INDENT` on the
-  first row of a further message (`Before::further`), whatever that row shows (the quote of
-  a reply, a picture's top row, a poll's question, the text), in the header time's colour
-  (`timestamp`, foreground only, so a selection's background shows through); wrapped rows
-  keep the indent. An action line (`/me`) gets none: it names its sender and stands alone,
-  and the "new" line, a day divider and a room line bring the header back, as before. A
-  playing voice message keeps it (`AudioPart::dot`). No new theme key, no setting.
-
-### 6.2 1.2.0: in the browser and on phones (ratzilla)
+### 6.1 1.2.0 (next): in the browser and on phones (ratzilla)
 
 Decided by the user on 2026-11-26, after research the same day. matrix-rat built for the
 browser (WebAssembly) with [ratzilla](https://github.com/ratatui/ratzilla), ratatui's web
@@ -336,7 +254,7 @@ backend, and installable on iOS and Android as a home-screen app (a PWA).
     - A swipe moves the whole page and nothing else: the page stays put (no overscroll), and
       a swipe in the chat scrolls the messages (swipe = scroll, above).
 
-### 6.3 Later, after 1.0.0 or by demand
+### 6.2 Later, after 1.0.0 or by demand
 
 - **Calls.** Voice calls wait until the SDK can join calls itself; with them a line in the
   room saying that a call is running, and a key that opens it in the browser. Video after
@@ -362,7 +280,7 @@ backend, and installable on iOS and Android as a home-screen app (a PWA).
   past the first 12: it needs remembering which rooms were checked. Also: room info's own name
   can be empty on a fresh login although the member list has it.
 
-### 6.4 Not wanted or not pursued
+### 6.3 Not wanted or not pursued
 
 - **`--mobile`, a mode for ssh from a phone** (planned for 1.1.0 on 2026-11-21, dropped by the
   user on 2026-11-27: "Drop --mobile"): the web app on phones serves that better, talking to the
