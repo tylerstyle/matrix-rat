@@ -111,6 +111,9 @@ to 1.0.x.
 - **Setting your name for one room** failed with "Local cache doesn't contain all
   necessary data" in a room whose state the sync had not brought yet, a room just created
   for one. The name is now set from what the server holds.
+- **Your name in a room** stays right: the room details could show one name in the header
+  and another for you in the member list, a name for the room given on another device
+  could be missed at start, and an older name of yours could come back and stay.
 - **A panic in matrix-sdk while loading older messages** ("The chunk is not found",
   matrix-rust-sdk #5416) no longer ends the task that asked (the room said "loading older
   messages" for good, an agent's listener never got ready) and no longer hands the
