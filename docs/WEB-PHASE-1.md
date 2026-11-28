@@ -1,6 +1,6 @@
 # Web app, phase 1: the core without the terminal and the OS
 
-Part of 1.2.0 ([`PLAN.md`](PLAN.md) §6.2). Written 2026-11-26 from an inventory of the code at
+Part of 1.2.0 ([`PLAN.md`](PLAN.md) §6.1). Written 2026-11-26 from an inventory of the code at
 `8b5ee15`, revised the same night after matrix-agy's review
 (`.claude/agy/review-web-phase1-design.md`, Task 46: two blockers, two high, four medium
 findings, all taken in; Task 47 re-review: OK, its four implementation notes taken in too). Phase 1 changes nothing a user of the terminal app can see; at its end
