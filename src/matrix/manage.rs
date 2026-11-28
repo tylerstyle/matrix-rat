@@ -2381,11 +2381,12 @@ fn build_knock_requests(
         .collect()
 }
 
+/// `own_name`: our name in the room as `OwnRoomNames` has it, if it knows the room.
 async fn head(
     room: &Room,
     notify_settings: &NotificationSettings,
     levels: Option<&RoomPowerLevels>,
-    own_room_names: &super::people::OwnRoomNames,
+    own_name: Option<Option<String>>,
     raw_knocks: &[RawKnock],
 ) -> RoomDetails {
     let joined = room.state() == RoomState::Joined;
@@ -2418,7 +2419,7 @@ async fn head(
     let own_is_creator = matches!(own_pl, Some(UserPowerLevel::Infinite));
     let own_power_level = own_pl.map_or(0, numeric_level);
     let own_display_name = if joined {
-        if let Some(cached) = own_room_names.get(room.room_id().as_str()) {
+        if let Some(cached) = own_name {
             cached
         } else {
             room.get_member_no_sync(own)
@@ -2712,11 +2713,16 @@ async fn watch(
             local_aliases_loaded = false;
             force_aliases = false;
         }
+        // Our name in the room, looked at once for all that is sent this time round: the
+        // details and our entry in the member list say the same of us, even when a member
+        // event of ours lands meanwhile. One that lands asks for another look (see the
+        // member handler in `super`), which sees it.
+        let own_name = own_room_names.get(&room_id);
         let mut current = head(
             &room,
             &notify_settings,
             levels.as_ref(),
-            &own_room_names,
+            own_name.clone(),
             &raw_knocks,
         )
         .await;
@@ -2779,12 +2785,7 @@ async fn watch(
             force_refresh = false;
             list = MemberList::default();
         }
-        list.apply(
-            &mut current,
-            levels.as_ref(),
-            &own,
-            own_room_names.get(&room_id),
-        );
+        list.apply(&mut current, levels.as_ref(), &own, own_name.clone());
         let ask = current.members_loading;
         let ask_knocks = joined && !ask && (!knocks_loaded || force_knocks);
         let ask_aliases = joined && (!local_aliases_loaded || force_aliases);
@@ -2822,12 +2823,7 @@ async fn watch(
                     }
                 }
                 current.members_loading = false;
-                list.apply(
-                    &mut current,
-                    levels.as_ref(),
-                    &own,
-                    own_room_names.get(&room_id),
-                );
+                list.apply(&mut current, levels.as_ref(), &own, own_name.clone());
             } else if ask_knocks {
                 knocks_loaded = true;
                 if let Ok(knocks) = server_knocks(&client, &room).await {
