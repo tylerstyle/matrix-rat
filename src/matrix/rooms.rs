@@ -6481,4 +6481,120 @@ mod tests {
         while events.recv().await.is_some() {}
         let _ = std::fs::remove_dir_all(root);
     }
+
+    /// A file on its way shows in the room at once as ours and being sent, with how much
+    /// of it has gone (what the line under it is made from), and nothing of its message
+    /// goes out before the file is up. The stand-in server takes the upload and never
+    /// answers, so the file stays on its way for as long as the test looks.
+    /// (`upload::tests::files_are_sent_and_arrive` cannot ask this of a real server: a
+    /// small file can be up and its message sent between two looks at the room, and
+    /// the interface is only shown the room as it is at each look.)
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_file_on_its_way_shows_as_being_sent_with_how_much_has_gone() {
+        use crate::matrix::left::LeftRooms;
+        use crate::matrix::spaces::fake;
+        use crate::matrix::{MatrixCmd, MatrixEvent};
+        use crate::model::{ItemRef, SendState};
+
+        const ROOM: &str = "!upload:localhost";
+        let server = fake::Server::answering(
+            serde_json::json!({ "join": { ROOM: fake::joined(false, vec![]) } }),
+            Box::new(|request| {
+                let path = request.path.as_str();
+                // The room is not encrypted: sending asks before it sends.
+                if request.method == "GET" && path.contains("/state/m.room.encryption") {
+                    return Some(fake::Reply::Status(
+                        404,
+                        serde_json::json!({ "errcode": "M_NOT_FOUND", "error": "not found" })
+                            .to_string(),
+                    ));
+                }
+                if path.ends_with("/media/config") {
+                    return Some(fake::Reply::Json(
+                        serde_json::json!({ "m.upload.size": 1_000_000 }).to_string(),
+                    ));
+                }
+                // The file is taken, and never answered for. (Not the keys, which are
+                // uploaded too.)
+                (request.method == "POST" && path.ends_with("/media/v3/upload"))
+                    .then_some(fake::Reply::Never)
+            }),
+        )
+        .await;
+        let client = fake_client_with_cache(&server.url).await;
+        let (mut timelines, mut events, _watches) =
+            live_timelines_of(client.clone(), &LeftRooms::default());
+        timelines
+            .handle(MatrixCmd::OpenRoom {
+                room_id: ROOM.to_owned(),
+                generation: 1,
+            })
+            .await;
+        timeline_where(&mut events, ROOM, 1, |_| true).await;
+
+        // More than one piece of the SDK's (8 KiB each): it tells how far it is after each.
+        let scratch = crate::upload::tests::Scratch::new("on-its-way");
+        let path = scratch.file("notes.txt", &[b'n'; 20_000]);
+        timelines
+            .handle(MatrixCmd::SendFiles {
+                send: 7,
+                room_id: ROOM.to_owned(),
+                files: vec![path.into()],
+                caption: None,
+                reply_to: None,
+            })
+            .await;
+        let is_ours =
+            |m: &crate::model::Message| m.file.as_ref().is_some_and(|f| f.name == "notes.txt");
+        // All of it went to the server, which has not answered: how it stays.
+        let all_gone = |m: &crate::model::Message| {
+            m.upload
+                .is_some_and(|(sent, total)| total > 0 && sent == total)
+        };
+        let mut handed_on = false;
+        let mut on_its_way = None;
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while !handed_on || on_its_way.is_none() {
+                match events.recv().await {
+                    // The file was read and handed to the send queue, which keeps it
+                    // from here on.
+                    Some(MatrixEvent::FilesSent(7)) => handed_on = true,
+                    Some(MatrixEvent::FilesNotSent { reason, .. }) => panic!("{reason}"),
+                    Some(MatrixEvent::ActionFailed(reason)) => panic!("{reason}"),
+                    Some(MatrixEvent::Timeline {
+                        room_id,
+                        generation: 1,
+                        messages,
+                        ..
+                    }) if room_id == ROOM && messages.iter().any(|m| is_ours(m) && all_gone(m)) => {
+                        on_its_way = Some(messages);
+                    }
+                    Some(_) => {}
+                    None => panic!("the worker stopped"),
+                }
+            }
+        })
+        .await
+        .expect("the file never showed as on its way");
+        let messages = on_its_way.unwrap();
+        let file = messages.iter().find(|m| is_ours(m)).unwrap();
+        assert_eq!(file.state, SendState::Sending);
+        assert!(file.own);
+        assert!(matches!(file.item, Some(ItemRef::Transaction(_))));
+        assert_eq!(file.upload, Some((20_000, 20_000)));
+        assert_eq!(messages.iter().filter(|m| is_ours(m)).count(), 1);
+        // The file went to the server; its message waits for it.
+        let requests = server.requests();
+        assert!(
+            requests
+                .iter()
+                .any(|r| r.method == "POST" && r.path.ends_with("/media/v3/upload"))
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|r| r.method == "PUT" && r.path.contains("/send/")),
+            "the message went out before its file"
+        );
+    }
 }
