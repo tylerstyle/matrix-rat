@@ -2168,18 +2168,21 @@ impl Worker {
                 let own_timeline_refresh = own_timeline_refresh.clone();
                 let own_room_names = member_own_room_names.clone();
                 async move {
-                    manage::bump_refresh(&refresh, room.room_id().as_str());
-                    // Only a change of the user's own name or picture in the room is
-                    // worth showing their messages anew and looking at the profile.
-                    if own_id
+                    // Our own name in the room is noted before the room's details are
+                    // asked to look again: the look reads it, and would otherwise keep
+                    // the name before, with nothing to ask for another.
+                    let own_changed = own_id
                         .as_ref()
                         .is_some_and(|own| ev.state_key() == own.as_str())
                         && people::record_own_member_event(
                             &own_room_names,
                             room.room_id().as_str(),
                             &ev,
-                        )
-                    {
+                        );
+                    manage::bump_refresh(&refresh, room.room_id().as_str());
+                    // Only a change of the user's own name or picture in the room is
+                    // worth showing their messages anew and looking at the profile.
+                    if own_changed {
                         own_timeline_refresh.send_modify(|n| *n = n.wrapping_add(1));
                         people_poke.notify_one();
                     }
