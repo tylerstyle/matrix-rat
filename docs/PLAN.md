@@ -55,9 +55,10 @@ cache, and (from 0.7.0) archives for x86-64 and ARM64 Linux built by
 
 ## 3. How it is built
 
-One binary crate, about 205,000 lines of Rust with its tests (945 unit tests and 43 tests against
+One package, about 205,000 lines of Rust with its tests: a binary crate up to 1.0.3, since 1.1.0
+a library (which also builds for the browser) and the binary (945 unit tests and 43 tests against
 a real homeserver at 0.7.0; 1034 and 44 at 0.8.0; 1109 and 45 at 0.9.0; 1113 and 45 at 0.9.1;
-1589 and 47 at 1.0.0; 1593 and 47 at 1.0.1 and 1.0.2; 1620 and 49 at 1.0.3; 1742 and 57 at
+1589 and 47 at 1.0.0; 1593 and 47 at 1.0.1 and 1.0.2; 1620 and 49 at 1.0.3; 1747 and 56 at
 1.1.0, besides 13 measurements that are run by hand).
 
 **Stack.** `matrix-sdk`, `matrix-sdk-ui` and `matrix-sdk-base` 0.20.0 (0.19.1 up to 1.0.3),
