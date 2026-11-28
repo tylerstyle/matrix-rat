@@ -748,8 +748,13 @@ mod tests {
 
     /// Sends a text file and a picture through the worker and waits until the server
     /// has them: as a file and a picture message with the right name, size, caption
-    /// and pixel size, and with content that can be fetched back. Setup as for the
-    /// other end-to-end tests:
+    /// and pixel size, and with content that can be fetched back. How a file looks
+    /// while it is on its way (being sent, and how much has gone) is not asked here:
+    /// a small file can be up and its message sent between two looks at the room, and
+    /// the interface is only shown the room as it is at each look. A stand-in server
+    /// that never finishes the upload asks it
+    /// (`rooms::tests::a_file_on_its_way_shows_as_being_sent_with_how_much_has_gone`).
+    /// Setup as for the other end-to-end tests:
     /// `MATRIX_RAT_TEST_USER=alice MATRIX_RAT_TEST_PASSWORD=... cargo test -- --ignored`
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "needs a local homeserver"]
@@ -791,8 +796,6 @@ mod tests {
         let wait = async {
             let mut room_id = None;
             let mut limit = None;
-            let mut saw_echo = false;
-            let mut saw_progress = false;
             let mut refused = None;
             let mut fetched = false;
             let mut whole = None;
@@ -844,14 +847,6 @@ mod tests {
                         let picture = messages
                             .iter()
                             .find(|m| m.image.as_ref().is_some_and(|i| i.name == picture_name));
-                        saw_echo |= [file, picture]
-                            .iter()
-                            .flatten()
-                            .any(|m| m.state == SendState::Sending);
-                        saw_progress |= messages.iter().any(|m| {
-                            m.upload
-                                .is_some_and(|(sent, total)| sent <= total && total > 0)
-                        });
                         let (Some(file), Some(picture)) = (file, picture) else {
                             continue;
                         };
@@ -913,16 +908,13 @@ mod tests {
                     _ => {}
                 }
                 if whole.is_some() && limit.is_some() {
-                    return (saw_echo, saw_progress, whole, limit, refused);
+                    return (whole, limit, refused);
                 }
             }
         };
-        let (saw_echo, saw_progress, whole, limit, refused) =
-            tokio::time::timeout(Duration::from_secs(60), wait)
-                .await
-                .expect("timed out waiting for the sent files");
-        assert!(saw_echo, "the files never showed as being sent");
-        assert!(saw_progress, "no upload progress was reported");
+        let (whole, limit, refused) = tokio::time::timeout(Duration::from_secs(60), wait)
+            .await
+            .expect("timed out waiting for the sent files");
         assert_eq!(refused.as_deref(), Some("gone.txt does not exist"));
         assert_eq!(whole, Some((1200, 700)));
         assert!(limit.is_some_and(|bytes| bytes > 0));
