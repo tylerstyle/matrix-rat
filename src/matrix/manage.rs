@@ -867,10 +867,26 @@ impl Refresh {
             self.tx.send_modify(|n| *n = n.wrapping_add(1));
         }
     }
+
+    fn bump_watched(&self) {
+        if self
+            .watched
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+        {
+            self.tx.send_modify(|n| *n = n.wrapping_add(1));
+        }
+    }
 }
 
 pub(super) fn bump_refresh(refresh: &Refresh, room_id: &str) {
     refresh.bump(room_id);
+}
+
+/// Asks the room watched, whichever it is, to look again.
+pub(super) fn bump_watched(refresh: &Refresh) {
+    refresh.bump_watched();
 }
 
 impl Manager {
@@ -2715,8 +2731,8 @@ async fn watch(
         }
         // Our name in the room, looked at once for all that is sent this time round: the
         // details and our entry in the member list say the same of us, even when a member
-        // event of ours lands meanwhile. One that lands asks for another look (see the
-        // member handler in `super`), which sees it.
+        // event of ours lands meanwhile. One that lands asks for another look (see
+        // `people::follow_members`), which sees it.
         let own_name = own_room_names.get(&room_id);
         let mut current = head(
             &room,

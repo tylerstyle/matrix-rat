@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::StreamExt;
+use matrix_sdk::deserialized_responses::TimelineEvent;
 use matrix_sdk::ruma::api::client::profile::{AvatarUrl, DisplayName, get_profile};
 use matrix_sdk::ruma::api::client::state::get_state_event_for_key;
 use matrix_sdk::ruma::api::error::ErrorKind;
@@ -15,8 +16,11 @@ use matrix_sdk::ruma::events::room::member::{
     MembershipState, RoomMemberEventContent, SyncRoomMemberEvent,
 };
 use matrix_sdk::ruma::events::room::power_levels::UserPowerLevel;
-use matrix_sdk::ruma::{OwnedMxcUri, UserId};
+use matrix_sdk::ruma::serde::Raw;
+use matrix_sdk::ruma::{OwnedMxcUri, OwnedUserId, UserId};
+use matrix_sdk::sync::{RoomUpdates, State as SyncState};
 use matrix_sdk::{Client, Room, RoomMemberships, RoomState};
+use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::sync::{Notify, mpsc::UnboundedSender, watch};
 
 use super::MatrixEvent;
@@ -197,8 +201,10 @@ impl fmt::Debug for UserProfile {
 
 /// Tracks the latest synced or saved per-room display name for the signed-in user.
 ///
-/// Sliding sync updates room member stores from `required_state` rather than `timeline`, so
-/// reading only `room.get_member_no_sync(own)` misses live per-room display name edits until reconnect.
+/// Sliding sync updates room member stores from `required_state` only, and a server may leave
+/// the user's member event out of it (continuwuity does not know `$ME`), so reading only
+/// `room.get_member_no_sync(own)` misses live per-room display name edits until reconnect.
+/// Kept by `follow_members` and by a name set here.
 #[derive(Clone, Default)]
 pub struct OwnRoomNames(Arc<Mutex<BTreeMap<String, OwnInRoom>>>);
 
@@ -226,6 +232,14 @@ impl OwnRoomNames {
         rooms.insert(room_id.to_owned(), now.clone()) != Some(now)
     }
 
+    /// Takes what a sync response says of the user in a room; whether that is news.
+    fn apply(&self, room_id: &str, member: OwnMember) -> bool {
+        match member {
+            OwnMember::In(now) => self.record(room_id, now),
+            OwnMember::Out => self.remove(room_id),
+        }
+    }
+
     /// Whether the room was known.
     pub fn remove(&self, room_id: &str) -> bool {
         self.0
@@ -233,6 +247,11 @@ impl OwnRoomNames {
             .unwrap_or_else(|e| e.into_inner())
             .remove(room_id)
             .is_some()
+    }
+
+    /// Forgets every room: the readers take the user's name from the SDK's store again.
+    fn clear(&self) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
     pub fn get(&self, room_id: &str) -> Option<Option<String>> {
@@ -244,15 +263,35 @@ impl OwnRoomNames {
     }
 }
 
-/// Records an incoming `m.room.member` event for the signed-in user into `own_room_names`.
-/// Whether the user's name or picture in the room changed by it: the same event can
-/// come again (a sync sends a room's state along again), and only a change is worth
-/// showing the user's messages anew.
-pub(super) fn record_own_member_event(
-    own_room_names: &OwnRoomNames,
-    room_id: &str,
-    ev: &SyncRoomMemberEvent,
-) -> bool {
+/// What a member event of the signed-in user says of them in a room.
+enum OwnMember {
+    /// In the room (joined, or knocking), with this name and picture.
+    In(OwnInRoom),
+    /// Gone from it (left, or banned).
+    Out,
+}
+
+/// Whether a raw event is a member event (one look at its type).
+fn is_member_event<T>(raw: &Raw<T>) -> bool {
+    raw.get_field::<String>("type").ok().flatten().as_deref() == Some("m.room.member")
+}
+
+/// What a member event says of the signed-in user, if it is theirs and says they are in
+/// the room or gone from it.
+fn own_member<T>(own: &str, raw: &Raw<T>) -> Option<OwnMember> {
+    // Two fields are looked at first: most events of a response are of other kinds, or
+    // of other people.
+    if !is_member_event(raw)
+        || raw
+            .get_field::<String>("state_key")
+            .ok()
+            .flatten()
+            .as_deref()
+            != Some(own)
+    {
+        return None;
+    }
+    let ev = raw.deserialize_as_unchecked::<SyncRoomMemberEvent>().ok()?;
     #[expect(
         clippy::wildcard_enum_match_arm,
         reason = "foreign ruma MembershipState"
@@ -260,16 +299,120 @@ pub(super) fn record_own_member_event(
     match ev.membership() {
         MembershipState::Join | MembershipState::Knock => {
             let content = ev.as_original().map(|original| &original.content);
-            own_room_names.record(
-                room_id,
-                OwnInRoom {
-                    name: content.and_then(|c| clean_name(c.displayname.as_deref())),
-                    avatar: content.and_then(|c| c.avatar_url.clone()),
-                },
-            )
+            Some(OwnMember::In(OwnInRoom {
+                name: content.and_then(|c| clean_name(c.displayname.as_deref())),
+                avatar: content.and_then(|c| c.avatar_url.clone()),
+            }))
         }
-        MembershipState::Leave | MembershipState::Ban => own_room_names.remove(room_id),
-        _ => false,
+        MembershipState::Leave | MembershipState::Ban => Some(OwnMember::Out),
+        _ => None,
+    }
+}
+
+/// The signed-in user's member event in a room as one sync response leaves it, if the
+/// response has one of theirs: the last in the order that ends at the room's state.
+///
+/// Sync v2's state (`State::Before`) is the state before the timeline: it comes first, the
+/// timeline after. Sliding sync's `required_state` (`State::After`) is the state at the end
+/// of the timeline: it comes last, and wins over an older member event of the user that the
+/// timeline brings along (one that comes after a newer one, in a room whose history forked
+/// and the server settled for the newer; or one that was redacted). The SDK keeps the room
+/// in its store by the same rule. A server that leaves the user's member event out of
+/// `required_state` (continuwuity does not know `$ME`) is still followed through the
+/// timeline, the only place that has it then.
+fn own_member_in_response(
+    own: &str,
+    state: &SyncState,
+    timeline: &[TimelineEvent],
+) -> Option<OwnMember> {
+    let last_in_timeline = || {
+        timeline
+            .iter()
+            .rev()
+            .find_map(|event| own_member(own, event.raw()))
+    };
+    let last_in_state =
+        |events: &[Raw<_>]| events.iter().rev().find_map(|raw| own_member(own, raw));
+    match state {
+        SyncState::Before(events) => last_in_timeline().or_else(|| last_in_state(events)),
+        SyncState::After(events) => last_in_state(events).or_else(last_in_timeline),
+    }
+}
+
+/// Whether a room's part of a sync response has a member event of anyone.
+fn has_member_event(state: &SyncState, timeline: &[TimelineEvent]) -> bool {
+    let (SyncState::Before(events) | SyncState::After(events)) = state;
+    events.iter().any(is_member_event) || timeline.iter().any(|event| is_member_event(event.raw()))
+}
+
+/// Works one sync response in: notes the user's name and picture in each room it says
+/// something of them, then asks with `look_again` for one more look at each room whose
+/// members it changed (the look reads the name, so it is noted first). Whether the user's
+/// name or picture changed anywhere.
+fn note_members(
+    rooms: &RoomUpdates,
+    own: Option<&UserId>,
+    own_room_names: &OwnRoomNames,
+    mut look_again: impl FnMut(&str),
+) -> bool {
+    let mut own_changed = false;
+    for (room_id, update) in &rooms.joined {
+        let room_id = room_id.as_str();
+        let ours = own.and_then(|own| {
+            own_member_in_response(own.as_str(), &update.state, &update.timeline.events)
+        });
+        own_changed |= ours.is_some_and(|member| own_room_names.apply(room_id, member));
+        if has_member_event(&update.state, &update.timeline.events) {
+            look_again(room_id);
+        }
+    }
+    for (room_id, update) in &rooms.left {
+        let room_id = room_id.as_str();
+        own_changed |= own_room_names.remove(room_id);
+        if has_member_event(&update.state, &update.timeline.events) {
+            look_again(room_id);
+        }
+    }
+    own_changed
+}
+
+/// Follows the member events of every sync response, for the session: the user's name
+/// and picture in each room (`own_room_names`), another look for the details of a room
+/// whose members changed, and, when the user's own changed, their messages shown anew
+/// (`own_refresh`) and their profile looked at (`people_poke`).
+///
+/// A response is read as a whole, not event by event through an event handler: the SDK
+/// hands its handlers a room's state before its timeline, whatever the kind of state, so
+/// with sliding sync an older member event of the user in the timeline came after the
+/// newer state and stayed (`own_member_in_response`). And it is one look per room and
+/// response, not one per event.
+pub(super) async fn follow_members(
+    mut updates: broadcast::Receiver<RoomUpdates>,
+    own: Option<OwnedUserId>,
+    own_room_names: OwnRoomNames,
+    refresh: Arc<super::manage::Refresh>,
+    own_refresh: Arc<watch::Sender<u64>>,
+    people_poke: Arc<Notify>,
+) {
+    loop {
+        let own_changed = match updates.recv().await {
+            Ok(rooms) => note_members(&rooms, own.as_deref(), &own_room_names, |room_id| {
+                super::manage::bump_refresh(&refresh, room_id);
+            }),
+            // Responses were missed, and with them perhaps a member event of the user's:
+            // what was noted may be out of date. The readers fall back on the SDK's store,
+            // and everything that shows the user looks again.
+            Err(RecvError::Lagged(_)) => {
+                own_room_names.clear();
+                super::manage::bump_watched(&refresh);
+                true
+            }
+            Err(RecvError::Closed) => break,
+        };
+        if own_changed {
+            own_refresh.send_modify(|n| *n = n.wrapping_add(1));
+            people_poke.notify_one();
+        }
     }
 }
 
@@ -1406,12 +1549,22 @@ mod tests {
         assert_eq!(fallback_localpart("plain"), "plain");
     }
 
+    /// Takes a member event of `@alice:hs`, the signed-in user, in `!r:hs`.
+    fn take(names: &OwnRoomNames, event: &serde_json::Value) -> bool {
+        let raw =
+            Raw::<SyncRoomMemberEvent>::from_json_string(event.to_string()).expect("raw event");
+        names.apply(
+            "!r:hs",
+            own_member("@alice:hs", &raw).expect("an event of ours"),
+        )
+    }
+
     #[test]
     fn own_room_names_tracks_and_clears_synced_member_events() {
         let names = OwnRoomNames::default();
         assert_eq!(names.get("!r:hs"), None);
 
-        let join_named: SyncRoomMemberEvent = serde_json::from_value(serde_json::json!({
+        let join_named = serde_json::json!({
             "type": "m.room.member",
             "event_id": "$ev1",
             "sender": "@alice:hs",
@@ -1421,14 +1574,13 @@ mod tests {
                 "membership": "join",
                 "displayname": "Room\n\x07 Alice  "
             }
-        }))
-        .expect("parse named join member event");
-        assert!(record_own_member_event(&names, "!r:hs", &join_named));
+        });
+        assert!(take(&names, &join_named));
         assert_eq!(names.get("!r:hs"), Some(Some("Room  Alice".to_owned())));
         // The same again (a sync sends it along with the room again): no news.
-        assert!(!record_own_member_event(&names, "!r:hs", &join_named));
+        assert!(!take(&names, &join_named));
         // A new picture is, with the same name.
-        let pictured: SyncRoomMemberEvent = serde_json::from_value(serde_json::json!({
+        let pictured = serde_json::json!({
             "type": "m.room.member",
             "event_id": "$ev1b",
             "sender": "@alice:hs",
@@ -1439,12 +1591,11 @@ mod tests {
                 "displayname": "Room\n\x07 Alice  ",
                 "avatar_url": "mxc://hs/picture"
             }
-        }))
-        .expect("parse member event with a picture");
-        assert!(record_own_member_event(&names, "!r:hs", &pictured));
-        assert!(!record_own_member_event(&names, "!r:hs", &pictured));
+        });
+        assert!(take(&names, &pictured));
+        assert!(!take(&names, &pictured));
 
-        let join_bare: SyncRoomMemberEvent = serde_json::from_value(serde_json::json!({
+        let join_bare = serde_json::json!({
             "type": "m.room.member",
             "event_id": "$ev2",
             "sender": "@alice:hs",
@@ -1454,12 +1605,11 @@ mod tests {
                 "membership": "join",
                 "displayname": "   "
             }
-        }))
-        .expect("parse cleared join member event");
-        assert!(record_own_member_event(&names, "!r:hs", &join_bare));
+        });
+        assert!(take(&names, &join_bare));
         assert_eq!(names.get("!r:hs"), Some(None));
 
-        let leave: SyncRoomMemberEvent = serde_json::from_value(serde_json::json!({
+        let leave = serde_json::json!({
             "type": "m.room.member",
             "event_id": "$ev3",
             "sender": "@alice:hs",
@@ -1468,11 +1618,180 @@ mod tests {
             "content": {
                 "membership": "leave"
             }
-        }))
-        .expect("parse leave member event");
-        assert!(record_own_member_event(&names, "!r:hs", &leave));
+        });
+        assert!(take(&names, &leave));
         assert_eq!(names.get("!r:hs"), None);
-        assert!(!record_own_member_event(&names, "!r:hs", &leave));
+        assert!(!take(&names, &leave));
+    }
+
+    const ALICE: &str = "@alice:hs";
+
+    /// A member event of `user`, joined under `name` (none: no name).
+    fn member(user: &str, event_id: &str, name: Option<&str>) -> serde_json::Value {
+        let mut content = serde_json::json!({ "membership": "join" });
+        if let Some(name) = name {
+            content["displayname"] = name.into();
+        }
+        serde_json::json!({
+            "type": "m.room.member",
+            "event_id": event_id,
+            "sender": user,
+            "state_key": user,
+            "origin_server_ts": 1000,
+            "content": content,
+        })
+    }
+
+    fn in_state(event: &serde_json::Value) -> Raw<matrix_sdk::ruma::events::AnySyncStateEvent> {
+        Raw::from_json_string(event.to_string()).expect("raw state event")
+    }
+
+    fn in_timeline(event: &serde_json::Value) -> TimelineEvent {
+        TimelineEvent::from_plaintext(Raw::from_json_string(event.to_string()).expect("raw event"))
+    }
+
+    /// Our name in `!r:hs` after a response with this state and timeline, starting from
+    /// "Before".
+    fn name_after(state: SyncState, timeline: &[serde_json::Value]) -> Option<Option<String>> {
+        let names = OwnRoomNames::default();
+        names.set("!r:hs", Some("Before".to_owned()));
+        let timeline: Vec<_> = timeline.iter().map(in_timeline).collect();
+        if let Some(member) = own_member_in_response(ALICE, &state, &timeline) {
+            names.apply("!r:hs", member);
+        }
+        names.get("!r:hs")
+    }
+
+    /// Sliding sync's state is the room's state at the end of the timeline: an older member
+    /// event of ours in the timeline does not undo the name in it (with the events in the
+    /// order the SDK hands them to its handlers, it did, and stayed). Sync v2's state is the
+    /// state before the timeline: there the timeline has the last word.
+    #[test]
+    fn the_state_at_the_end_of_the_timeline_wins_and_the_state_before_it_does_not() {
+        let new = Some(Some("New".to_owned()));
+        let old = member(ALICE, "$old", Some("Old"));
+        // Redacted: it says nothing of a name any more.
+        let mut redacted = member(ALICE, "$gone", None);
+        redacted["unsigned"] = serde_json::json!({
+            "redacted_because": {
+                "type": "m.room.redaction",
+                "event_id": "$redaction",
+                "sender": "@admin:hs",
+                "origin_server_ts": 2000,
+                "redacts": "$gone",
+                "content": { "redacts": "$gone" },
+            }
+        });
+        let state_new = || in_state(&member(ALICE, "$new", Some("New")));
+
+        // Sliding sync: an older event, or a redacted one, after the newer state.
+        assert_eq!(
+            name_after(
+                SyncState::After(vec![state_new()]),
+                std::slice::from_ref(&old)
+            ),
+            new
+        );
+        assert_eq!(
+            name_after(SyncState::After(vec![state_new()]), &[redacted]),
+            new
+        );
+        // A server that leaves our member event out of the state: the timeline, in order.
+        assert_eq!(
+            name_after(
+                SyncState::After(vec![]),
+                &[old.clone(), member(ALICE, "$new", Some("New"))]
+            ),
+            new
+        );
+        // Sync v2: the timeline comes after its state.
+        assert_eq!(
+            name_after(
+                SyncState::Before(vec![in_state(&old)]),
+                &[member(ALICE, "$new", Some("New"))]
+            ),
+            new
+        );
+        assert_eq!(name_after(SyncState::Before(vec![state_new()]), &[]), new);
+        // Other people's events say nothing of us.
+        let bob = member("@bob:hs", "$bob", Some("Bob"));
+        assert_eq!(
+            name_after(
+                SyncState::After(vec![in_state(&bob)]),
+                std::slice::from_ref(&bob)
+            ),
+            Some(Some("Before".to_owned()))
+        );
+    }
+
+    /// One look per room and response, after our name is noted; none for a room without
+    /// member events; a room left is forgotten.
+    #[test]
+    fn a_response_asks_one_look_per_room_whose_members_changed_with_our_name_noted() {
+        let names = OwnRoomNames::default();
+        names.set("!left:hs", Some("Gone soon".to_owned()));
+        let message = serde_json::json!({
+            "type": "m.room.message",
+            "event_id": "$said",
+            "sender": "@bob:hs",
+            "origin_server_ts": 1000,
+            "content": { "msgtype": "m.text", "body": "hi" },
+        });
+        let mut leave = member(ALICE, "$leave", None);
+        leave["content"] = serde_json::json!({ "membership": "leave" });
+        let mut rooms = RoomUpdates::default();
+        let joined = |state, timeline: &[serde_json::Value]| matrix_sdk::sync::JoinedRoomUpdate {
+            state,
+            timeline: matrix_sdk::sync::Timeline {
+                events: timeline.iter().map(in_timeline).collect(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        rooms.joined.insert(
+            "!named:hs".try_into().unwrap(),
+            joined(
+                SyncState::After(vec![in_state(&member(ALICE, "$new", Some("New")))]),
+                &[
+                    member(ALICE, "$old", Some("Old")),
+                    member("@bob:hs", "$bob", Some("Bob")),
+                    member(ALICE, "$older", Some("Older")),
+                ],
+            ),
+        );
+        rooms.joined.insert(
+            "!quiet:hs".try_into().unwrap(),
+            joined(SyncState::After(vec![]), &[message]),
+        );
+        rooms.left.insert(
+            "!left:hs".try_into().unwrap(),
+            matrix_sdk::sync::LeftRoomUpdate {
+                timeline: matrix_sdk::sync::Timeline {
+                    events: vec![in_timeline(&leave)],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let alice = <&UserId>::try_from(ALICE).unwrap();
+
+        let mut looks = Vec::new();
+        let changed = note_members(&rooms, Some(alice), &names, |room| {
+            looks.push((room.to_owned(), names.get(room)));
+        });
+        assert!(changed);
+        assert_eq!(
+            looks,
+            [
+                ("!named:hs".to_owned(), Some(Some("New".to_owned()))),
+                ("!left:hs".to_owned(), None),
+            ]
+        );
+
+        // The same response again: still a look for each, but no news of us.
+        let mut looks = 0;
+        assert!(!note_members(&rooms, Some(alice), &names, |_| looks += 1));
+        assert_eq!(looks, 2);
     }
 
     #[test]

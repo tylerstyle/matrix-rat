@@ -2012,6 +2012,9 @@ impl Worker {
         // the service can end at once (a token the server no longer takes, see
         // `token_rejected`). Made here, the loop below sees whatever state it reached.
         let mut sync_state = sync.state();
+        // Before the start as well, so that the member events of the first responses are
+        // not missed; they wait in the channel until `people::follow_members` reads them.
+        let room_updates = client.subscribe_to_all_room_updates();
         sync.start().await;
 
         let room_list = sync
@@ -2154,41 +2157,17 @@ impl Worker {
                 }
             },
         );
-        let member_refresh = manager.refresh_signal();
-        let own_user_for_member = client.user_id().map(ToOwned::to_owned);
-        let people_poke = people_mgr.sync_poke();
-        let own_timeline_refresh = own_refresh.clone();
-        let member_own_room_names = own_room_names;
-        let member_handler = client.add_event_handler(
-            move |ev: matrix_sdk::ruma::events::room::member::SyncRoomMemberEvent,
-                  room: matrix_sdk::Room| {
-                let refresh = member_refresh.clone();
-                let own_id = own_user_for_member.clone();
-                let people_poke = people_poke.clone();
-                let own_timeline_refresh = own_timeline_refresh.clone();
-                let own_room_names = member_own_room_names.clone();
-                async move {
-                    // Our own name in the room is noted before the room's details are
-                    // asked to look again: the look reads it, and would otherwise keep
-                    // the name before, with nothing to ask for another.
-                    let own_changed = own_id
-                        .as_ref()
-                        .is_some_and(|own| ev.state_key() == own.as_str())
-                        && people::record_own_member_event(
-                            &own_room_names,
-                            room.room_id().as_str(),
-                            &ev,
-                        );
-                    manage::bump_refresh(&refresh, room.room_id().as_str());
-                    // Only a change of the user's own name or picture in the room is
-                    // worth showing their messages anew and looking at the profile.
-                    if own_changed {
-                        own_timeline_refresh.send_modify(|n| *n = n.wrapping_add(1));
-                        people_poke.notify_one();
-                    }
-                }
-            },
-        );
+        // Member events, read from each sync response as a whole (`people::follow_members`
+        // says why). In a set, which aborts it when dropped, as the token saver above.
+        let mut member_follower = rt::JoinSet::new();
+        member_follower.spawn(people::follow_members(
+            room_updates,
+            client.user_id().map(ToOwned::to_owned),
+            own_room_names,
+            manager.refresh_signal(),
+            own_refresh.clone(),
+            people_mgr.sync_poke(),
+        ));
         let room_state_handlers = [
             watch_room_state::<matrix_sdk::ruma::events::room::join_rules::SyncRoomJoinRulesEvent>(
                 client,
@@ -2447,7 +2426,7 @@ impl Worker {
         };
         client.remove_event_handler(power_handler);
         client.remove_event_handler(space_child_handler);
-        client.remove_event_handler(member_handler);
+        member_follower.abort_all();
         for handler in emote_handlers {
             client.remove_event_handler(handler);
         }
